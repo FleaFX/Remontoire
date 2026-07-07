@@ -134,11 +134,11 @@ public class WalRecordSerializerTests {
         ulong logicalOffset = 123,
         ulong timestampMicros = 999,
         string partitionKey = "order-42",
-        IReadOnlyList<WalHeader>? headers = null,
+        IReadOnlyList<Header>? headers = null,
         string payload = "hello world") {
         headers ??= [
-            new WalHeader(Encoding.UTF8.GetBytes("correlation-id"), Encoding.UTF8.GetBytes("abc-123")),
-            new WalHeader(Encoding.UTF8.GetBytes("event-type"), Encoding.UTF8.GetBytes("OrderPlaced")),
+            new Header(Encoding.UTF8.GetBytes("correlation-id"), Encoding.UTF8.GetBytes("abc-123")),
+            new Header(Encoding.UTF8.GetBytes("event-type"), Encoding.UTF8.GetBytes("OrderPlaced")),
         ];
 
         return new WalRecord(type, raftTerm, raftIndex, logicalOffset, timestampMicros,

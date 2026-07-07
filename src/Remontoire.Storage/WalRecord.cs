@@ -20,5 +20,5 @@ readonly record struct WalRecord(
     ulong LogicalOffset,
     ulong TimestampMicros,
     ReadOnlyMemory<byte> PartitionKey,
-    IReadOnlyList<WalHeader> Headers,
+    IReadOnlyList<Header> Headers,
     ReadOnlyMemory<byte> Payload);

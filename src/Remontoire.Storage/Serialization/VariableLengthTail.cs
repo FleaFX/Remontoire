@@ -14,13 +14,13 @@ static class VariableLengthTail {
     /// Computes the on-disk size, in bytes, of the tail for the given
     /// <paramref name="partitionKey"/>/<paramref name="headers"/>/<paramref name="payload"/>.
     /// </summary>
-    public static int GetEncodedLength(ReadOnlyMemory<byte> partitionKey, IReadOnlyList<WalHeader> headers, ReadOnlyMemory<byte> payload) =>
+    public static int GetEncodedLength(ReadOnlyMemory<byte> partitionKey, IReadOnlyList<Header> headers, ReadOnlyMemory<byte> payload) =>
         2 + partitionKey.Length + 2 + headers.Sum(header => 2 + header.Key.Length + 4 + header.Value.Length) + 4 + payload.Length;
 
     /// <summary>
     /// Writes the tail to <paramref name="writer"/>'s current position onward.
     /// </summary>
-    public static void Write(ref SpanWriter writer, ReadOnlySpan<byte> partitionKey, IReadOnlyList<WalHeader> headers, ReadOnlySpan<byte> payload) {
+    public static void Write(ref SpanWriter writer, ReadOnlySpan<byte> partitionKey, IReadOnlyList<Header> headers, ReadOnlySpan<byte> payload) {
         writer.WriteBytesWithUInt16Length(partitionKey);
 
         writer.WriteUInt16((ushort)headers.Count);
@@ -37,7 +37,7 @@ static class VariableLengthTail {
     /// exactly one <see cref="MemoryPool{T}"/> buffer sized to fit everything variable-length —
     /// same technique <see cref="WalRecordSerializer"/> originally introduced.
     /// </summary>
-    public static bool TryParse(ref SpanReader reader, out ReadOnlyMemory<byte> partitionKey, out WalHeader[] headers, out ReadOnlyMemory<byte> payload, out IMemoryOwner<byte>? owner) {
+    public static bool TryParse(ref SpanReader reader, out ReadOnlyMemory<byte> partitionKey, out Header[] headers, out ReadOnlyMemory<byte> payload, out IMemoryOwner<byte>? owner) {
         partitionKey = default;
         headers = [];
         payload = default;
@@ -56,7 +56,7 @@ static class VariableLengthTail {
 
         partitionKey = CopyInto(partitionKeySpan, destination, ref position);
 
-        headers = headerCount == 0 ? [] : new WalHeader[headerCount];
+        headers = headerCount == 0 ? [] : new Header[headerCount];
         for (var i = 0; i < headerCount; i++) {
             if (!reader.TryReadBytesWithUInt16Length(out var keySpan) || !reader.TryReadBytesWithUInt32Length(out var valueSpan)) {
                 owner.Dispose();
@@ -64,7 +64,7 @@ static class VariableLengthTail {
                 return false;
             }
 
-            headers[i] = new WalHeader(CopyInto(keySpan, destination, ref position), CopyInto(valueSpan, destination, ref position));
+            headers[i] = new Header(CopyInto(keySpan, destination, ref position), CopyInto(valueSpan, destination, ref position));
         }
 
         if (!reader.TryReadBytesWithUInt32Length(out var payloadSpan)) {

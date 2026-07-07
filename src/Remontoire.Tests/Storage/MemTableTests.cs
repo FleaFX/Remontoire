@@ -167,6 +167,6 @@ public class MemTableTests {
 
     static LogEntry SampleEntry(ulong logicalOffset, byte[]? payload = null) =>
         new(logicalOffset, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"),
-            [new WalHeader(Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"))],
+            [new Header(Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"))],
             payload ?? Encoding.UTF8.GetBytes("hello world"));
 }

@@ -46,6 +46,6 @@ public class WalRecordApplierTests {
     static WalRecord SampleRecord(WalRecordType type, ulong logicalOffset) =>
         new(type, RaftTerm: 0, RaftIndex: 0, logicalOffset, TimestampMicros: 42,
             Encoding.UTF8.GetBytes("order-42"),
-            [new WalHeader(Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"))],
+            [new Header(Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"))],
             Encoding.UTF8.GetBytes("hello world"));
 }

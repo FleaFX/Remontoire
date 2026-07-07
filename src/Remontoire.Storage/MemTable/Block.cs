@@ -40,11 +40,11 @@ sealed class Block(int capacity) : IDisposable {
 
         var partitionKey = CopyInto(source.PartitionKey.Span, destination, ref position);
 
-        var headers = source.Headers.Count == 0 ? [] : new WalHeader[source.Headers.Count];
+        var headers = source.Headers.Count == 0 ? [] : new Header[source.Headers.Count];
         for (var i = 0; i < source.Headers.Count; i++) {
             var key = CopyInto(source.Headers[i].Key.Span, destination, ref position);
             var value = CopyInto(source.Headers[i].Value.Span, destination, ref position);
-            headers[i] = new WalHeader(key, value);
+            headers[i] = new Header(key, value);
         }
 
         var payload = CopyInto(source.Payload.Span, destination, ref position);
