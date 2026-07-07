@@ -2,7 +2,7 @@ namespace Remontoire.Storage;
 
 /// <summary>
 /// A single, physical entry in a shard's write-ahead log. Internal to the WAL/log layer —
-/// never exposed across <c>Remontoire.Storage</c>'s public boundary; see <see cref="LogEntry"/>
+/// never exposed across <c>Remontoire.Storage</c>'s public boundary; see <c>LogEntry</c>
 /// for the corresponding materialized-state representation.
 /// </summary>
 /// <param name="RecordType">Distinguishes what kind of entry this is.</param>
