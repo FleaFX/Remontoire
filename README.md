@@ -2,7 +2,7 @@
 
 Remontoire is a durable, Raft-replicated, sharded messaging log for inbox/outbox patterns — self-hosted, at-least-once delivery, with either ack-driven retention (queue-style) or unbounded retention (event-sourcing-style).
 
-> **Status:** design phase — no code yet.
+> **Status:** early development — solution skeleton in place, no functionality yet.
 
 ## Core ideas
 
@@ -20,4 +20,11 @@ The two aren't competing designs — they solve different problems. MSSP is an a
 
 ## Building
 
-Not yet — no code exists. This section will be filled in once the initial project skeleton is in place.
+Requires .NET 10 SDK.
+
+```bash
+dotnet build src/Remontoire.slnx
+dotnet test src/Remontoire.slnx
+```
+
+No functionality yet — this builds and tests an empty project skeleton.
