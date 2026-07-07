@@ -1,0 +1,48 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);CS1591;xUnit1051</NoWarn>
+    <RootNamespace>$(MSBuildProjectName.Replace(" ", "_").Replace(".Tests", ""))</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="10.0.1">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="FluentAssertions" Version="8.10.0" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.8" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="xunit.v3" Version="3.2.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Remontoire.Contracts\Remontoire.Contracts.csproj" />
+    <ProjectReference Include="..\Remontoire.Storage\Remontoire.Storage.csproj" />
+    <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" />
+    <ProjectReference Include="..\Remontoire.Sharding\Remontoire.Sharding.csproj" />
+    <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" />
+    <ProjectReference Include="..\Remontoire.Security\Remontoire.Security.csproj" />
+    <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" />
+    <ProjectReference Include="..\Remontoire.Client\Remontoire.Client.csproj" />
+    <ProjectReference Include="..\Remontoire.Server\Remontoire.Server.csproj" />
+    <ProjectReference Include="..\Remontoire.Dashboard\Remontoire.Dashboard.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>
