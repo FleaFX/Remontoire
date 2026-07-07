@@ -2,8 +2,8 @@ namespace Remontoire.Storage;
 
 /// <summary>
 /// The in-memory, most-recently-written slice of a shard's log — everything appended since
-/// the last SST flush. Single-writer (only <c>Remontoire.Storage.Serialization.WalRecordApplier</c>
-/// calls <see cref="Append"/>); safe for concurrent, lock-free reads while the writer is active.
+/// the last SST flush. Single-writer (only <see cref="ShardLog"/>'s own apply mechanism calls
+/// <see cref="Append"/>); safe for concurrent, lock-free reads while the writer is active.
 /// </summary>
 sealed class MemTable : IDisposable {
     const int BlockCapacity = 1024;
@@ -19,6 +19,12 @@ sealed class MemTable : IDisposable {
     /// threshold check.
     /// </summary>
     public long EstimatedSizeBytes => Volatile.Read(ref _estimatedSizeBytes);
+
+    /// <summary>
+    /// The offset of the first entry ever appended to this MemTable. Undefined when nothing
+    /// has been appended yet.
+    /// </summary>
+    public ulong FirstOffset => _firstOffset;
 
     /// <summary>
     /// Appends <paramref name="entry"/>. Its <c>LogicalOffset</c> must be exactly one greater

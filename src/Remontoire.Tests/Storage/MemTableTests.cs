@@ -70,6 +70,17 @@ public class MemTableTests {
         }
     }
 
+    public class FirstOffset {
+        [Fact]
+        public void Is_the_offset_of_the_first_appended_entry() {
+            using var table = new MemTable();
+            table.Append(SampleEntry(1000));
+            table.Append(SampleEntry(1001));
+
+            table.FirstOffset.Should().Be(1000);
+        }
+    }
+
     public class ScanFrom {
         [Fact]
         public void Yields_nothing_when_the_table_is_empty() {

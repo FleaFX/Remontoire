@@ -104,6 +104,56 @@ public class WalWriterTests {
         }
     }
 
+    public class ReadCommittedAsync {
+        [Fact]
+        public async Task Yields_each_record_in_commit_order() {
+            var path = Path.GetTempFileName();
+            try {
+                var writer = await WalWriter.OpenAsync(path);
+                var committed = new List<ulong>();
+                var reading = Task.Run(async () => {
+                    await foreach (var record in writer.ReadCommittedAsync())
+                        committed.Add(record.LogicalOffset);
+                });
+
+                await writer.AppendAsync(SampleRecord(1));
+                await writer.AppendAsync(SampleRecord(2));
+                await writer.AppendAsync(SampleRecord(3));
+
+                await writer.DisposeAsync(); // completes the commit loop, and so ReadCommittedAsync's enumeration
+                await reading;
+
+                committed.Should().Equal(1ul, 2ul, 3ul);
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task Yields_the_same_records_from_a_batch_that_were_just_completed() {
+            var path = Path.GetTempFileName();
+            try {
+                var stream = new CountingFlushFileStream(path);
+                var writer = new WalWriter(stream);
+                var committed = new List<ulong>();
+                var reading = Task.Run(async () => {
+                    await foreach (var record in writer.ReadCommittedAsync())
+                        committed.Add(record.LogicalOffset);
+                });
+
+                var tasks = Enumerable.Range(0, 50).Select(i => writer.AppendAsync(SampleRecord((ulong)i)).AsTask());
+                await Task.WhenAll(tasks);
+
+                await writer.DisposeAsync();
+                await reading;
+
+                committed.Should().Equal(Enumerable.Range(0, 50).Select(i => (ulong)i));
+            } finally {
+                File.Delete(path);
+            }
+        }
+    }
+
     static WalRecord SampleRecord(ulong logicalOffset = 1) =>
         new(WalRecordType.Append, RaftTerm: 0, RaftIndex: 0, logicalOffset, TimestampMicros: 42,
             PartitionKey: Encoding.UTF8.GetBytes("order-42"), Headers: [], Payload: Encoding.UTF8.GetBytes("hello world"));

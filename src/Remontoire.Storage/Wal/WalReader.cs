@@ -4,10 +4,10 @@ using Remontoire.Storage.Serialization;
 namespace Remontoire.Storage;
 
 /// <summary>
-/// Reads <see cref="WalRecord"/>s sequentially from a WAL file. Used both for recovery
-/// (reading from the start, or from a known-good position) and, later, potentially for
-/// live-tailing (an open question on how the live-apply path is triggered) — this class is
-/// agnostic to which; it just reads what is currently on disk from a given position onward.
+/// Reads <see cref="WalRecord"/>s sequentially from a WAL file. Used for recovery (reading
+/// from the start, or from a known-good position) — the only other consumer of WAL content,
+/// live-apply, no longer reads the WAL back at all; it consumes <see cref="WalWriter"/>'s own
+/// in-memory <see cref="WalWriter.ReadCommittedAsync"/> stream instead.
 /// </summary>
 sealed class WalReader(string path) {
     /// <summary>

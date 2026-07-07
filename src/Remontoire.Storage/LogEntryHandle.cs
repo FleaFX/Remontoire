@@ -10,7 +10,9 @@ namespace Remontoire.Storage;
 /// does not need to know or branch on.
 /// </summary>
 public readonly struct LogEntryHandle(LogEntry entry, IMemoryOwner<byte>? owner = null) : IDisposable {
-    /// <summary>The log entry this handle wraps.</summary>
+    /// <summary>
+    /// The log entry this handle wraps.
+    /// </summary>
     public LogEntry Entry { get; } = entry;
 
     /// <inheritdoc />

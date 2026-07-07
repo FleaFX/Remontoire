@@ -12,12 +12,21 @@ namespace Remontoire.Storage;
 sealed class WalWriter : IAsyncDisposable {
     readonly FileStream _file;
     readonly Channel<PendingAppend> _pending = Channel.CreateUnbounded<PendingAppend>(new UnboundedChannelOptions { SingleReader = true });
+    readonly Channel<WalRecord> _committed = Channel.CreateUnbounded<WalRecord>(new UnboundedChannelOptions { SingleReader = true });
     readonly Task _commitLoop;
 
     internal WalWriter(FileStream file) {
         _file = file;
         _commitLoop = Task.Run(RunCommitLoopAsync);
     }
+
+    /// <summary>
+    /// Yields each record in the exact order it was durably committed — the same in-memory
+    /// <see cref="WalRecord"/> just written, handed off directly, never re-read from disk. Only
+    /// one caller may enumerate this at a time.
+    /// </summary>
+    public IAsyncEnumerable<WalRecord> ReadCommittedAsync(CancellationToken cancellationToken = default) =>
+        _committed.Reader.ReadAllAsync(cancellationToken);
 
     /// <summary>
     /// Opens (creating if necessary) the WAL file at <paramref name="path"/> for appending.
@@ -51,6 +60,8 @@ sealed class WalWriter : IAsyncDisposable {
             if (batch.Count > 0)
                 await WriteBatchAsync(batch);
         }
+
+        _committed.Writer.TryComplete();
     }
 
     async Task WriteBatchAsync(List<PendingAppend> batch) {
@@ -68,8 +79,15 @@ sealed class WalWriter : IAsyncDisposable {
 
             _file.Flush(flushToDisk: true);
 
-            foreach (var pending in batch)
+            // Publish each record — the same in-memory WalRecord just written, handed off
+            // directly to ReadCommittedAsync — right after resolving its caller, in the exact
+            // order this single, sequential commit loop wrote them. No re-read from disk, and
+            // no risk of two records ever being observed out of order: this loop is the one and
+            // only place that decides "committed" order in the first place.
+            foreach (var pending in batch) {
                 pending.Completion.TrySetResult();
+                _committed.Writer.TryWrite(pending.Record);
+            }
         } catch (Exception ex) {
             foreach (var pending in batch)
                 pending.Completion.TrySetException(ex);
