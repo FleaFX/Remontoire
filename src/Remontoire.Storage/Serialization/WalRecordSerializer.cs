@@ -9,12 +9,12 @@ namespace Remontoire.Storage.Serialization;
 static class WalRecordSerializer {
     const byte CurrentVersion = 0x01;
     const int PrefixLength = 5; // Version(1) + RecordLength(4)
-    const int HeaderLengthPrefixesOverhead = 2 + 4; // per header: key-length(2) + value-length(4)
 
     /// <summary>
     /// Computes the total on-disk size, in bytes, of <paramref name="record"/>.
     /// </summary>
-    public static int GetEncodedLength(in WalRecord record) => PrefixLength + 4 + 1 + 8 + 8 + 8 + 8 + 2 + record.PartitionKey.Length + 2 + record.Headers.Sum(header => 2 + header.Key.Length + 4 + header.Value.Length) + 4 + record.Payload.Length;
+    public static int GetEncodedLength(in WalRecord record) =>
+        PrefixLength + 4 + 1 + 8 + 8 + 8 + 8 + VariableLengthTail.GetEncodedLength(record.PartitionKey, record.Headers, record.Payload);
 
     /// <summary>
     /// Writes <paramref name="record"/> to <paramref name="destination"/> and returns the
@@ -74,73 +74,23 @@ static class WalRecordSerializer {
         writer.WriteUInt64(record.RaftIndex);
         writer.WriteUInt64(record.LogicalOffset);
         writer.WriteUInt64(record.TimestampMicros);
-        writer.WriteBytesWithUInt16Length(record.PartitionKey.Span);
-
-        writer.WriteUInt16((ushort)record.Headers.Count);
-        foreach (var header in record.Headers) {
-            writer.WriteBytesWithUInt16Length(header.Key.Span);
-            writer.WriteBytesWithUInt32Length(header.Value.Span);
-        }
-
-        writer.WriteBytesWithUInt32Length(record.Payload.Span);
+        VariableLengthTail.Write(ref writer, record.PartitionKey.Span, record.Headers, record.Payload.Span);
     }
 
     static bool TryParseBody(ReadOnlySpan<byte> body, out WalRecord record, out IMemoryOwner<byte>? owner) {
         record = default;
-        owner = null;
         var reader = new SpanReader(body);
 
-        if (!reader.TryReadByte(out var recordTypeByte)) return false;
-        if (!reader.TryReadUInt64(out var raftTerm)) return false;
-        if (!reader.TryReadUInt64(out var raftIndex)) return false;
-        if (!reader.TryReadUInt64(out var logicalOffset)) return false;
-        if (!reader.TryReadUInt64(out var timestampMicros)) return false;
-        if (!reader.TryReadBytesWithUInt16Length(out var partitionKeySpan)) return false;
+        if (!reader.TryReadByte(out var recordTypeByte)) { owner = null; return false; }
+        if (!reader.TryReadUInt64(out var raftTerm)) { owner = null; return false; }
+        if (!reader.TryReadUInt64(out var raftIndex)) { owner = null; return false; }
+        if (!reader.TryReadUInt64(out var logicalOffset)) { owner = null; return false; }
+        if (!reader.TryReadUInt64(out var timestampMicros)) { owner = null; return false; }
 
-        if (!reader.TryReadUInt16(out var headerCount)) return false;
-
-        // Everything left in `body` is exactly headerCount * (2 + keyLen + 4 + valueLen) +
-        // 4 (PayloadLength) + payloadLen. Each header's length-prefixes contribute a fixed,
-        // known overhead regardless of key/value content, so the total variable-length
-        // payload size (partition key + every header's key/value + payload) is computable
-        // right now, without a separate pre-pass over the headers.
-        var variableLength = partitionKeySpan.Length + reader.Remaining - HeaderLengthPrefixesOverhead * headerCount - 4;
-        if (variableLength < 0)
+        if (!VariableLengthTail.TryParse(ref reader, out var partitionKey, out var headers, out var payload, out owner))
             return false;
-
-        owner = MemoryPool<byte>.Shared.Rent(variableLength);
-        var destination = owner.Memory;
-        var position = 0;
-
-        var partitionKey = CopyInto(partitionKeySpan, destination, ref position);
-
-        var headers = headerCount == 0 ? [] : new WalHeader[headerCount];
-        for (var i = 0; i < headerCount; i++) {
-            if (!reader.TryReadBytesWithUInt16Length(out var keySpan) || !reader.TryReadBytesWithUInt32Length(out var valueSpan)) {
-                owner.Dispose();
-                owner = null;
-                return false;
-            }
-
-            headers[i] = new WalHeader(CopyInto(keySpan, destination, ref position), CopyInto(valueSpan, destination, ref position));
-        }
-
-        if (!reader.TryReadBytesWithUInt32Length(out var payloadSpan)) {
-            owner.Dispose();
-            owner = null;
-            return false;
-        }
-
-        var payload = CopyInto(payloadSpan, destination, ref position);
 
         record = new WalRecord((WalRecordType)recordTypeByte, raftTerm, raftIndex, logicalOffset, timestampMicros, partitionKey, headers, payload);
         return true;
-    }
-
-    static ReadOnlyMemory<byte> CopyInto(ReadOnlySpan<byte> source, Memory<byte> destination, ref int position) {
-        source.CopyTo(destination.Span.Slice(position, source.Length));
-        var written = destination.Slice(position, source.Length);
-        position += source.Length;
-        return written;
     }
 }
