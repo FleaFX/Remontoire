@@ -1,7 +1,7 @@
 using System.Text;
 using FluentAssertions;
 
-namespace Remontoire.Storage;
+namespace Remontoire.Storage.Serialization;
 
 public class Crc32CTests {
     // The standard CRC-32C check value for ASCII "123456789", cited throughout CRC literature

@@ -1,7 +1,7 @@
 using System.Buffers.Binary;
 using System.Runtime.Intrinsics.X86;
 
-namespace Remontoire.Storage;
+namespace Remontoire.Storage.Serialization;
 
 /// <summary>
 /// Computes CRC-32C (Castagnoli) checksums. Deliberately not <c>System.IO.Hashing.Crc32</c>,
