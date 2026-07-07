@@ -1,0 +1,42 @@
+<Solution>
+  <Folder Name="/Engine/">
+    <Project Path="Remontoire.Storage/Remontoire.Storage.csproj" />
+    <Project Path="Remontoire.Raft/Remontoire.Raft.csproj">
+      <BuildDependency Project="Remontoire.Storage/Remontoire.Storage.csproj" />
+    </Project>
+    <Project Path="Remontoire.Sharding/Remontoire.Sharding.csproj" />
+    <Project Path="Remontoire.Messaging/Remontoire.Messaging.csproj">
+      <BuildDependency Project="Remontoire.Storage/Remontoire.Storage.csproj" />
+    </Project>
+  </Folder>
+  <Folder Name="/Server/">
+    <Project Path="Remontoire.Server/Remontoire.Server.csproj">
+      <BuildDependency Project="Remontoire.Contracts/Remontoire.Contracts.csproj" />
+      <BuildDependency Project="Remontoire.Storage/Remontoire.Storage.csproj" />
+      <BuildDependency Project="Remontoire.Raft/Remontoire.Raft.csproj" />
+      <BuildDependency Project="Remontoire.Sharding/Remontoire.Sharding.csproj" />
+      <BuildDependency Project="Remontoire.Messaging/Remontoire.Messaging.csproj" />
+      <BuildDependency Project="Remontoire.Security/Remontoire.Security.csproj" />
+      <BuildDependency Project="Remontoire.Observability/Remontoire.Observability.csproj" />
+    </Project>
+    <Project Path="Remontoire.Security/Remontoire.Security.csproj" />
+    <Project Path="Remontoire.Observability/Remontoire.Observability.csproj" />
+  </Folder>
+  <Folder Name="/Client/">
+    <Project Path="Remontoire.Contracts/Remontoire.Contracts.csproj" />
+    <Project Path="Remontoire.Client/Remontoire.Client.csproj">
+      <BuildDependency Project="Remontoire.Contracts/Remontoire.Contracts.csproj" />
+    </Project>
+    <Project Path="Remontoire.Dashboard/Remontoire.Dashboard.csproj">
+      <BuildDependency Project="Remontoire.Client/Remontoire.Client.csproj" />
+    </Project>
+  </Folder>
+  <Folder Name="/Solution Items/">
+    <File Path="../.editorconfig" />
+    <File Path="../.github/workflows/ci.yml" />
+    <File Path="Directory.Build.props" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Remontoire.Tests/Remontoire.Tests.csproj" />
+  </Folder>
+</Solution>
