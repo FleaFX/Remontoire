@@ -108,6 +108,16 @@ public class WalRecordSerializerTests {
         }
 
         [Fact]
+        public void Copies_data_so_the_original_source_can_be_reused_afterward() {
+            var encoded = Encode(SampleRecord(payload: "hello world"));
+
+            using var result = WalRecordSerializer.TryRead(encoded);
+            Array.Clear(encoded); // simulate the original buffer being reused/returned to a pool
+
+            Encoding.UTF8.GetString(result.Record.Payload.Span).Should().Be("hello world");
+        }
+
+        [Fact]
         public void Disposing_the_default_result_does_not_throw() {
             var result = default(WalReadResult);
 

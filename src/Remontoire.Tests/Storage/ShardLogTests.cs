@@ -199,6 +199,116 @@ public class ShardLogTests {
                 Directory.Delete(directory, recursive: true);
             }
         }
+
+        [Fact]
+        public async Task Recovers_a_segment_left_behind_by_an_interrupted_compaction() {
+            var directory = CreateTempDirectory();
+            try {
+                // Simulates a crash between a compaction's "delete old inputs" and "rename to
+                // final name" steps: the merged content is already fully durable under a
+                // ".merging" name, and (per that recovery design) the segments it replaced are
+                // already gone — nothing else needs to exist for this to be a valid scenario.
+                var mergingPath = Path.Combine(directory, $"segment-{0:D20}.sst.merging");
+                await SstWriter.WriteAsync(mergingPath, [
+                    new LogEntry(0, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("entry-0")),
+                    new LogEntry(1, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("entry-1")),
+                ]);
+
+                await using var log = await ShardLog.OpenAsync(directory);
+
+                Directory.GetFiles(directory, "*.sst.merging").Should().BeEmpty();
+                Directory.GetFiles(directory, "*.sst").Should().ContainSingle();
+
+                for (ulong offset = 0; offset < 2; offset++) {
+                    log.TryGet(offset, out var handle).Should().BeTrue();
+                    using (handle)
+                        Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be($"entry-{offset}");
+                }
+
+                // appending after recovery must continue from offset 2, not restart at 0
+                (await log.AppendAsync(SampleRequest())).Should().Be(2);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    public class FaultHandling {
+        [Fact]
+        public async Task A_WAL_write_failure_faults_the_append_without_crashing_the_actor() {
+            var directory = CreateTempDirectory();
+            try {
+                var stream = new ThrowingFlushFileStream(Path.Combine(directory, "wal.log"));
+                var walWriter = new WalWriter(stream);
+
+                await using var log = new ShardLog(directory, walWriter, new MemTable(), [], nextLogicalOffset: 0, flushThresholdBytes: 64 * 1024 * 1024);
+
+                var act = async () => await log.AppendAsync(SampleRequest());
+                await act.Should().ThrowAsync<IOException>();
+
+                // the actor loop must still be alive afterward — a second append also fails
+                // cleanly (not hangs), proving one faulted append doesn't take the actor down
+                var act2 = async () => await log.AppendAsync(SampleRequest()).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+                await act2.Should().ThrowAsync<IOException>();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        sealed class ThrowingFlushFileStream(string path)
+            : FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, bufferSize: 0, useAsync: true) {
+            public override void Flush(bool flushToDisk) {
+                if (flushToDisk)
+                    throw new IOException("Simulated disk failure.");
+
+                base.Flush(flushToDisk);
+            }
+        }
+    }
+
+    public class Concurrency {
+        [Fact]
+        public async Task An_entry_never_becomes_invisible_again_once_visible_across_many_flushes() {
+            var directory = CreateTempDirectory();
+            try {
+                // A tiny threshold forces a flush after nearly every append, maximizing the
+                // chance of hitting the publish-order window (new segment published, THEN the
+                // old MemTable retracted) if that ordering were ever wrong.
+                await using var log = await ShardLog.OpenAsync(directory, flushThresholdBytes: 60);
+
+                const int count = 100;
+                var offsets = new ulong[count];
+                for (var i = 0; i < count; i++)
+                    offsets[i] = await log.AppendAsync(SampleRequest());
+
+                var stop = 0;
+                var flickered = 0;
+
+                var reader = Task.Run(() => {
+                    var everVisible = new bool[count];
+                    while (Volatile.Read(ref stop) == 0) {
+                        for (var i = 0; i < count; i++) {
+                            var found = log.TryGet(offsets[i], out var handle);
+                            if (found)
+                                handle.Dispose();
+
+                            if (found)
+                                everVisible[i] = true;
+                            else if (everVisible[i])
+                                Interlocked.Exchange(ref flickered, 1); // was visible, now isn't — the bug this guards against
+                        }
+                    }
+                });
+
+                await WaitForVisibleAsync(log, offsets[^1]);
+                Interlocked.Exchange(ref stop, 1);
+                await reader;
+
+                flickered.Should().Be(0);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     static string CreateTempDirectory() {

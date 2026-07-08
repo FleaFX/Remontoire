@@ -99,6 +99,25 @@ public class LogEntrySerializerTests {
 
             Encoding.UTF8.GetString(result.Entry.Payload.Span).Should().Be("hello world");
         }
+
+        [Fact]
+        public void Disposing_the_default_result_does_not_throw() {
+            var result = default(LogEntryReadResult);
+
+            var act = result.Dispose;
+
+            act.Should().NotThrow();
+        }
+
+        [Fact]
+        public void Disposing_twice_does_not_throw() {
+            var result = LogEntrySerializer.TryRead(Encode(SampleEntry()));
+            result.Dispose();
+
+            var act = result.Dispose;
+
+            act.Should().NotThrow();
+        }
     }
 
     static LogEntry SampleEntry(

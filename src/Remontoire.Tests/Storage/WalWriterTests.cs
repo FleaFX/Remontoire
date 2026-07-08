@@ -72,6 +72,37 @@ public class WalWriterTests {
         }
 
         [Fact]
+        public async Task Cancelling_the_wait_does_not_abort_the_underlying_write() {
+            var path = Path.GetTempFileName();
+            try {
+                var stream = new GatedFlushFileStream(path);
+                var writer = new WalWriter(stream);
+                try {
+                    using var cts = new CancellationTokenSource();
+                    var appendTask = writer.AppendAsync(SampleRecord(logicalOffset: 9), cts.Token).AsTask();
+
+                    await stream.FlushStarted.Task; // the record is already enqueued; the fsync is gated
+                    cts.Cancel();
+
+                    var act = async () => await appendTask;
+                    await act.Should().ThrowAsync<OperationCanceledException>();
+
+                    stream.FlushGate.TrySetResult(); // let the actual write/fsync proceed regardless
+                } finally {
+                    stream.FlushGate.TrySetResult();
+                    await writer.DisposeAsync();
+                }
+
+                var bytes = await File.ReadAllBytesAsync(path);
+                using var result = WalRecordSerializer.TryRead(bytes);
+                result.Status.Should().Be(WalRecordReadStatus.Success);
+                result.Record.LogicalOffset.Should().Be(9);
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
         public async Task Throws_ObjectDisposedException_after_dispose() {
             var path = Path.GetTempFileName();
             try {
@@ -81,6 +112,53 @@ public class WalWriterTests {
                 Action act = () => { _ = writer.AppendAsync(SampleRecord()); };
 
                 act.Should().Throw<ObjectDisposedException>();
+            } finally {
+                File.Delete(path);
+            }
+        }
+    }
+
+    public class FaultHandling {
+        [Fact]
+        public async Task A_batch_write_failure_faults_every_pending_append_in_that_batch() {
+            var path = Path.GetTempFileName();
+            try {
+                var stream = new ThrowingFlushFileStream(path);
+                var writer = new WalWriter(stream);
+                try {
+                    var tasks = Enumerable.Range(0, 5).Select(i => writer.AppendAsync(SampleRecord((ulong)i)).AsTask()).ToArray();
+
+                    foreach (var task in tasks) {
+                        var act = async () => await task;
+                        await act.Should().ThrowAsync<IOException>();
+                    }
+                } finally {
+                    await writer.DisposeAsync();
+                }
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task A_batch_write_failure_publishes_nothing_to_ReadCommittedAsync() {
+            var path = Path.GetTempFileName();
+            try {
+                var stream = new ThrowingFlushFileStream(path);
+                var writer = new WalWriter(stream);
+                var committed = new List<ulong>();
+                var reading = Task.Run(async () => {
+                    await foreach (var record in writer.ReadCommittedAsync())
+                        committed.Add(record.LogicalOffset);
+                });
+
+                var act = async () => await writer.AppendAsync(SampleRecord());
+                await act.Should().ThrowAsync<IOException>();
+
+                await writer.DisposeAsync();
+                await reading;
+
+                committed.Should().BeEmpty();
             } finally {
                 File.Delete(path);
             }
@@ -165,6 +243,16 @@ public class WalWriterTests {
         public override void Flush(bool flushToDisk) {
             if (flushToDisk)
                 FlushToDiskCount++;
+
+            base.Flush(flushToDisk);
+        }
+    }
+
+    sealed class ThrowingFlushFileStream(string path)
+        : FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, bufferSize: 0, useAsync: true) {
+        public override void Flush(bool flushToDisk) {
+            if (flushToDisk)
+                throw new IOException("Simulated disk failure.");
 
             base.Flush(flushToDisk);
         }

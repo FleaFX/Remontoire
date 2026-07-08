@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Text;
 using FluentAssertions;
 
@@ -26,6 +27,70 @@ public class SstSegmentTests {
                 var act = async () => await SstSegment.OpenAsync(path);
 
                 await act.Should().ThrowAsync<InvalidDataException>();
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task Throws_when_the_index_offset_is_out_of_range() {
+            var path = await WriteSegmentAsync(SampleEntries(5));
+            try {
+                await PatchFooterAsync(path, footer => BinaryPrimitives.WriteUInt64LittleEndian(footer.AsSpan(24, 8), ulong.MaxValue / 2));
+
+                var act = async () => await SstSegment.OpenAsync(path);
+
+                await act.Should().ThrowAsync<InvalidDataException>();
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task Throws_when_the_index_length_is_not_a_multiple_of_16() {
+            var path = await WriteSegmentAsync(SampleEntries(5));
+            try {
+                await PatchFooterAsync(path, footer => {
+                    var indexLength = BinaryPrimitives.ReadUInt32LittleEndian(footer.AsSpan(32, 4));
+                    BinaryPrimitives.WriteUInt32LittleEndian(footer.AsSpan(32, 4), indexLength + 1);
+                });
+
+                var act = async () => await SstSegment.OpenAsync(path);
+
+                await act.Should().ThrowAsync<InvalidDataException>();
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task Throws_when_MinOffset_is_greater_than_MaxOffset() {
+            var path = await WriteSegmentAsync(SampleEntries(5));
+            try {
+                await PatchFooterAsync(path, footer => {
+                    var maxOffset = BinaryPrimitives.ReadUInt64LittleEndian(footer.AsSpan(16, 8));
+                    BinaryPrimitives.WriteUInt64LittleEndian(footer.AsSpan(8, 8), maxOffset + 1);
+                });
+
+                var act = async () => await SstSegment.OpenAsync(path);
+
+                await act.Should().ThrowAsync<InvalidDataException>();
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task Does_not_leak_the_file_handle_when_validation_fails() {
+            var path = await WriteSegmentAsync(SampleEntries(5));
+            try {
+                await PatchFooterAsync(path, footer => BinaryPrimitives.WriteUInt64LittleEndian(footer.AsSpan(24, 8), ulong.MaxValue / 2));
+
+                var act = async () => await SstSegment.OpenAsync(path);
+                await act.Should().ThrowAsync<InvalidDataException>();
+
+                var deleting = () => File.Delete(path); // throws if the handle leaked
+                deleting.Should().NotThrow();
             } finally {
                 File.Delete(path);
             }
@@ -69,6 +134,30 @@ public class SstSegmentTests {
                 using var segment = await SstSegment.OpenAsync(path);
 
                 segment.TryGet(15, out _).Should().BeFalse();
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task Supports_many_concurrent_readers_without_corruption() {
+            const int count = 200;
+            var path = await WriteSegmentAsync(SampleEntries(count), indexIntervalRecords: 8);
+            try {
+                using var segment = await SstSegment.OpenAsync(path);
+
+                var tasks = Enumerable.Range(0, 16).Select(workerId => Task.Run(() => {
+                    var random = new Random(workerId);
+                    for (var i = 0; i < 500; i++) {
+                        var offset = (ulong)random.Next(count);
+
+                        segment.TryGet(offset, out var result).Should().BeTrue();
+                        using (result)
+                            result.Entry.LogicalOffset.Should().Be(offset);
+                    }
+                })).ToArray();
+
+                await Task.WhenAll(tasks);
             } finally {
                 File.Delete(path);
             }
@@ -125,6 +214,18 @@ public class SstSegmentTests {
         var path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         await SstWriter.WriteAsync(path, entries, indexIntervalRecords);
         return path;
+    }
+
+    // Rewrites the trailing Sst.FooterLength bytes of an already-valid segment via `patch`, to
+    // exercise SstSegment.OpenAsync's footer sanity checks without hand-building a whole file.
+    static async Task PatchFooterAsync(string path, Action<byte[]> patch) {
+        var bytes = await File.ReadAllBytesAsync(path);
+        var footer = bytes.AsSpan(bytes.Length - Sst.FooterLength).ToArray();
+
+        patch(footer);
+
+        footer.CopyTo(bytes.AsSpan(bytes.Length - Sst.FooterLength));
+        await File.WriteAllBytesAsync(path, bytes);
     }
 
     static IEnumerable<LogEntry> SampleEntries(int count, ulong startOffset = 0) {

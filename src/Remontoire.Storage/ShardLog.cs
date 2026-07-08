@@ -19,7 +19,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
     SstSegment[] _segments;
     ulong _nextLogicalOffset;
 
-    ShardLog(string directory, WalWriter walWriter, MemTable memTable, SstSegment[] segments, ulong nextLogicalOffset, long flushThresholdBytes) {
+    internal ShardLog(string directory, WalWriter walWriter, MemTable memTable, SstSegment[] segments, ulong nextLogicalOffset, long flushThresholdBytes) {
         _directory = directory;
         _walWriter = walWriter;
         _memTable = memTable;
