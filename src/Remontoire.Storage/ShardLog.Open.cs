@@ -7,7 +7,7 @@ public sealed partial class ShardLog {
     /// segments, and applies the rest to a fresh MemTable.
     /// </summary>
     public static async Task<ShardLog> OpenAsync(
-        string directory, long flushThresholdBytes = 64 * 1024 * 1024, CancellationToken cancellationToken = default) {
+        string directory, long flushThresholdBytes = 64 * 1024 * 1024, CompactionPolicy? compactionPolicy = null, CancellationToken cancellationToken = default) {
         RecoverInterruptedCompactions(directory);
 
         var segments = await LoadSegmentsAsync(directory, cancellationToken);
@@ -18,7 +18,7 @@ public sealed partial class ShardLog {
             directory, new WalReader(walPath), new ShardState(new MemTable(), segments), flushedWatermark, flushThresholdBytes, cancellationToken);
 
         var walWriter = await WalWriter.OpenAsync(walPath, cancellationToken);
-        return new ShardLog(directory, walWriter, state.MemTable, state.Segments, nextLogicalOffset, flushThresholdBytes);
+        return new ShardLog(directory, walWriter, state.MemTable, state.Segments, nextLogicalOffset, flushThresholdBytes, compactionPolicy);
     }
 
     // A crash between a compaction's "delete old inputs" and "rename to final name" steps

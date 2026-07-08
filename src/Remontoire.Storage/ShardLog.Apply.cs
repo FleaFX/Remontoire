@@ -15,7 +15,8 @@ public sealed partial class ShardLog {
         if (committed.Record.RecordType != WalRecordType.Append)
             return;
 
-        var (memTable, sstSegments) = await ApplyAndMaybeFlushAsync(_directory, new ShardState(_memTable, _segments), committed.Record, _flushThresholdBytes, CancellationToken.None);
+        var before = _segments;
+        var (memTable, sstSegments) = await ApplyAndMaybeFlushAsync(_directory, new ShardState(_memTable, before), committed.Record, _flushThresholdBytes, CancellationToken.None);
 
         // Publish the NEW source of truth before retracting the old one — otherwise a
         // concurrent TryGet/ReadFromAsync could observe neither the (already-emptied) old
@@ -23,6 +24,11 @@ public sealed partial class ShardLog {
         // exists.
         Volatile.Write(ref _segments, sstSegments);
         Volatile.Write(ref _memTable, memTable);
+
+        // A new segment can be exactly what turns an earlier "nothing to compact" answer into a
+        // valid plan — only worth checking when a flush actually grew the segment list.
+        if (sstSegments.Length != before.Length)
+            TryFulfillPendingPlanRequest();
     }
 
     /// <summary>

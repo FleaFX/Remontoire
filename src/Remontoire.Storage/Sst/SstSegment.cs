@@ -16,10 +16,12 @@ sealed class SstSegment : IDisposable {
     readonly long _dataEndPosition;
     readonly SstIndexEntry[] _index;
 
+    public string Path { get; }
     public ulong MinOffset { get; }
     public ulong MaxOffset { get; }
 
-    SstSegment(SafeFileHandle handle, ulong minOffset, ulong maxOffset, long dataEndPosition, SstIndexEntry[] index) {
+    SstSegment(string path, SafeFileHandle handle, ulong minOffset, ulong maxOffset, long dataEndPosition, SstIndexEntry[] index) {
+        Path = path;
         _handle = handle;
         MinOffset = minOffset;
         MaxOffset = maxOffset;
@@ -33,7 +35,7 @@ sealed class SstSegment : IDisposable {
     /// </summary>
     /// <exception cref="InvalidDataException">The file is not a valid, uncorrupted SST segment.</exception>
     public static async Task<SstSegment> OpenAsync(string path, CancellationToken cancellationToken = default) {
-        var handle = File.OpenHandle(path);
+        var handle = OpenHandle(path);
 
         // Ownership of `handle` only transfers to the returned SstSegment on success — any
         // exception below (bad magic, invalid footer) must dispose it here, or the handle leaks.
@@ -42,37 +44,79 @@ sealed class SstSegment : IDisposable {
             var footer = new byte[Sst.FooterLength];
             await RandomAccess.ReadAsync(handle, footer, fileLength - Sst.FooterLength, cancellationToken);
 
-            if (!footer.AsSpan(0, 8).SequenceEqual(Sst.Magic))
-                throw new InvalidDataException($"'{path}' is not a valid SST segment (bad magic).");
-
-            var minOffset = BinaryPrimitives.ReadUInt64LittleEndian(footer.AsSpan(8, 8));
-            var maxOffset = BinaryPrimitives.ReadUInt64LittleEndian(footer.AsSpan(16, 8));
-            var indexOffset = (long)BinaryPrimitives.ReadUInt64LittleEndian(footer.AsSpan(24, 8));
-            var indexLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(footer.AsSpan(32, 4));
-
-            var dataSize = fileLength - Sst.FooterLength;
-            if (indexOffset < 0 || indexOffset > dataSize)
-                throw new InvalidDataException($"'{path}' has an invalid index offset {indexOffset}.");
-            if (indexLength < 0 || indexLength % 16 != 0 || indexOffset + indexLength > dataSize)
-                throw new InvalidDataException($"'{path}' has an invalid index length {indexLength}.");
-            if (minOffset > maxOffset)
-                throw new InvalidDataException($"'{path}' has MinOffset {minOffset} greater than MaxOffset {maxOffset}.");
+            var (minOffset, maxOffset, indexOffset, indexLength) = ParseAndValidateFooter(footer, path, fileLength - Sst.FooterLength);
 
             var indexBytes = new byte[indexLength];
             await RandomAccess.ReadAsync(handle, indexBytes, indexOffset, cancellationToken);
 
-            var index = new SstIndexEntry[indexLength / 16];
-            for (var i = 0; i < index.Length; i++) {
-                var offset = BinaryPrimitives.ReadUInt64LittleEndian(indexBytes.AsSpan(i * 16, 8));
-                var position = (long)BinaryPrimitives.ReadUInt64LittleEndian(indexBytes.AsSpan(i * 16 + 8, 8));
-                index[i] = new SstIndexEntry(offset, position);
-            }
-
-            return new SstSegment(handle, minOffset, maxOffset, indexOffset, index);
+            return new SstSegment(path, handle, minOffset, maxOffset, indexOffset, ParseIndex(indexBytes));
         } catch {
             handle.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// Synchronous counterpart to <see cref="OpenAsync"/>, for call sites already running
+    /// off-thread where a real synchronous read is simpler than awaiting a task that resolves
+    /// immediately (e.g. opening a freshly merged segment right after a compaction completes).
+    /// The underlying I/O is <see cref="RandomAccess"/> either way — this isn't sync-over-async,
+    /// it's the genuinely synchronous overload of the same primitive.
+    /// </summary>
+    /// <exception cref="InvalidDataException">The file is not a valid, uncorrupted SST segment.</exception>
+    public static SstSegment Open(string path) {
+        var handle = OpenHandle(path);
+
+        try {
+            var fileLength = RandomAccess.GetLength(handle);
+            Span<byte> footer = stackalloc byte[Sst.FooterLength];
+            RandomAccess.Read(handle, footer, fileLength - Sst.FooterLength);
+
+            var (minOffset, maxOffset, indexOffset, indexLength) = ParseAndValidateFooter(footer, path, fileLength - Sst.FooterLength);
+
+            var indexBytes = new byte[indexLength];
+            RandomAccess.Read(handle, indexBytes, indexOffset);
+
+            return new SstSegment(path, handle, minOffset, maxOffset, indexOffset, ParseIndex(indexBytes));
+        } catch {
+            handle.Dispose();
+            throw;
+        }
+    }
+
+    // FileShare.Delete: a segment can be deleted by compaction (once merged into a new one)
+    // while this SstSegment still has it open for reads — without this flag, that delete fails
+    // with a sharing violation on Windows.
+    static SafeFileHandle OpenHandle(string path) =>
+        File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+
+    static (ulong MinOffset, ulong MaxOffset, long IndexOffset, int IndexLength) ParseAndValidateFooter(ReadOnlySpan<byte> footer, string path, long dataSize) {
+        if (!footer.Slice(0, 8).SequenceEqual(Sst.Magic))
+            throw new InvalidDataException($"'{path}' is not a valid SST segment (bad magic).");
+
+        var minOffset = BinaryPrimitives.ReadUInt64LittleEndian(footer.Slice(8, 8));
+        var maxOffset = BinaryPrimitives.ReadUInt64LittleEndian(footer.Slice(16, 8));
+        var indexOffset = (long)BinaryPrimitives.ReadUInt64LittleEndian(footer.Slice(24, 8));
+        var indexLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(footer.Slice(32, 4));
+
+        if (indexOffset < 0 || indexOffset > dataSize)
+            throw new InvalidDataException($"'{path}' has an invalid index offset {indexOffset}.");
+        if (indexLength < 0 || indexLength % 16 != 0 || indexOffset + indexLength > dataSize)
+            throw new InvalidDataException($"'{path}' has an invalid index length {indexLength}.");
+        if (minOffset > maxOffset)
+            throw new InvalidDataException($"'{path}' has MinOffset {minOffset} greater than MaxOffset {maxOffset}.");
+
+        return (minOffset, maxOffset, indexOffset, indexLength);
+    }
+
+    static SstIndexEntry[] ParseIndex(ReadOnlySpan<byte> indexBytes) {
+        var index = new SstIndexEntry[indexBytes.Length / 16];
+        for (var i = 0; i < index.Length; i++) {
+            var offset = BinaryPrimitives.ReadUInt64LittleEndian(indexBytes.Slice(i * 16, 8));
+            var position = (long)BinaryPrimitives.ReadUInt64LittleEndian(indexBytes.Slice(i * 16 + 8, 8));
+            index[i] = new SstIndexEntry(offset, position);
+        }
+        return index;
     }
 
     /// <summary>

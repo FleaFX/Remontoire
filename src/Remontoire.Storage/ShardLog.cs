@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
 
@@ -14,21 +15,26 @@ public sealed partial class ShardLog : IAsyncDisposable {
     readonly Task _tailingLoop;
     readonly Task _actorLoop;
     readonly Channel<ShardLogMessage> _mailbox = Channel.CreateUnbounded<ShardLogMessage>(new UnboundedChannelOptions { SingleReader = true });
+    readonly CompactionPolicy? _compactionPolicy;
+    readonly Task? _compactionWorkerLoop;
 
     MemTable _memTable;
     SstSegment[] _segments;
     ulong _nextLogicalOffset;
+    TaskCompletionSource<CompactionPlan>? _pendingPlanRequest;
 
-    internal ShardLog(string directory, WalWriter walWriter, MemTable memTable, SstSegment[] segments, ulong nextLogicalOffset, long flushThresholdBytes) {
+    internal ShardLog(string directory, WalWriter walWriter, MemTable memTable, SstSegment[] segments, ulong nextLogicalOffset, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null) {
         _directory = directory;
         _walWriter = walWriter;
         _memTable = memTable;
         _segments = segments;
         _nextLogicalOffset = nextLogicalOffset;
         _flushThresholdBytes = flushThresholdBytes;
+        _compactionPolicy = compactionPolicy;
 
         _actorLoop = Task.Run(RunActorAsync);
         _tailingLoop = Task.Run(RunTailingLoopAsync);
+        _compactionWorkerLoop = compactionPolicy is null ? null : Task.Run(new CompactionWorker(_mailbox.Writer).RunAsync);
     }
 
     /// <summary>
@@ -42,6 +48,12 @@ public sealed partial class ShardLog : IAsyncDisposable {
         // sitting in the mailbox trying to write to an already-disposed WalWriter.
         _mailbox.Writer.TryComplete();
         await _actorLoop;
+
+        // The compaction worker stops on its own once the mailbox closes (its next TryWrite
+        // fails) or its outstanding plan request gets cancelled (RunActorAsync's cleanup below)
+        // — same pattern as the tailing loop, no separate cancellation token needed.
+        if (_compactionWorkerLoop is not null)
+            await _compactionWorkerLoop;
 
         // NOW safe: every append the actor accepted has already reached WalWriter. Disposing it
         // drains everything to durable completion, then completes its ReadCommittedAsync
@@ -69,11 +81,17 @@ public sealed partial class ShardLog : IAsyncDisposable {
                 case WalRecordCommitted committed:
                     await HandleWalRecordCommittedAsync(committed);
                     break;
+                case CompactionPlanRequest request:
+                    HandleCompactionPlanRequest(request);
+                    break;
+                case CompactionCompleted completed:
+                    HandleCompactionCompleted(completed);
+                    break;
             }
         }
-    }
 
-    abstract record ShardLogMessage;
-    sealed record AppendCommand(AppendRequest Request, TaskCompletionSource<ulong> Completion) : ShardLogMessage;
-    sealed record WalRecordCommitted(WalRecord Record) : ShardLogMessage;
+        // No outstanding plan request may block the compaction worker forever when ShardLog
+        // shuts down while there happened to be nothing left to compact.
+        _pendingPlanRequest?.TrySetCanceled();
+    }
 }

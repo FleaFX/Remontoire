@@ -150,6 +150,45 @@ public class ShardLogTests {
         }
     }
 
+    public class Compaction {
+        [Fact]
+        public async Task Merges_flushed_segments_down_to_one_and_keeps_every_entry_readable() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(
+                    directory, flushThresholdBytes: 1, compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null));
+
+                const int count = 5;
+                for (var i = 0; i < count; i++)
+                    await log.AppendAsync(SampleRequest(payload: $"entry-{i}"));
+
+                await WaitForVisibleAsync(log, count - 1);
+                await WaitForSegmentCountAsync(directory, 1);
+
+                for (ulong offset = 0; offset < count; offset++) {
+                    log.TryGet(offset, out var handle).Should().BeTrue();
+                    using (handle)
+                        Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be($"entry-{offset}");
+                }
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Disposing_with_a_compaction_policy_set_but_nothing_to_compact_does_not_hang() {
+            var directory = CreateTempDirectory();
+            try {
+                var log = await ShardLog.OpenAsync(directory, compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null));
+                await log.AppendAsync(SampleRequest());
+
+                await log.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     public class Recovery {
         [Fact]
         public async Task Restarting_replays_identical_data_from_the_WAL_tail() {
@@ -327,6 +366,17 @@ public class ShardLogTests {
         }
 
         throw new TimeoutException($"Offset {offset} never became visible.");
+    }
+
+    static async Task WaitForSegmentCountAsync(string directory, int expected) {
+        for (var i = 0; i < 500; i++) {
+            if (Directory.GetFiles(directory, "*.sst").Length == expected)
+                return;
+
+            await Task.Delay(10);
+        }
+
+        throw new TimeoutException($"Segment count never reached {expected}.");
     }
 
     static AppendRequest SampleRequest(string payload = "hello world") =>

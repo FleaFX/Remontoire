@@ -38,7 +38,7 @@ static class Compactor {
         return candidates;
     }
 
-    static IEnumerable<List<SegmentCandidate>> GroupForMerge(List<SegmentCandidate> candidates, long? maxMergedSegmentBytes) {
+    public static IEnumerable<List<SegmentCandidate>> GroupForMerge(List<SegmentCandidate> candidates, long? maxMergedSegmentBytes) {
         var group = new List<SegmentCandidate>();
         var groupBytes = 0L;
 
@@ -80,7 +80,7 @@ static class Compactor {
                     yield return result.Entry;
     }
 
-    readonly record struct SegmentCandidate(string Path, SstSegment Segment);
+    public readonly record struct SegmentCandidate(string Path, SstSegment Segment);
 }
 
 /// <summary>
