@@ -2,7 +2,7 @@
 
 Remontoire is a durable, Raft-replicated, sharded messaging log for inbox/outbox patterns — self-hosted, at-least-once delivery, with either ack-driven retention (queue-style) or unbounded retention (event-sourcing-style).
 
-> **Status:** early development — solution skeleton in place, no functionality yet.
+> **Status:** active development.
 
 ## Core ideas
 
@@ -26,5 +26,3 @@ Requires .NET 10 SDK.
 dotnet build src/Remontoire.slnx
 dotnet test src/Remontoire.slnx
 ```
-
-No functionality yet — this builds and tests an empty project skeleton.
