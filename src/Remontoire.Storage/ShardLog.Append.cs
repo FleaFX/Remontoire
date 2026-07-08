@@ -7,11 +7,32 @@ public sealed partial class ShardLog {
     /// <see cref="ReadFromAsync"/>, which lag slightly behind (the live-apply tailing loop).
     /// </summary>
     public ValueTask<ulong> AppendAsync(AppendRequest request, CancellationToken cancellationToken = default) {
+        ValidateRequest(request);
+
         var completion = new TaskCompletionSource<ulong>(TaskCreationOptions.RunContinuationsAsynchronously);
         var accepted = _mailbox.Writer.TryWrite(new AppendCommand(request, completion));
         ObjectDisposedException.ThrowIf(!accepted, this);
 
         return new ValueTask<ulong>(completion.Task.WaitAsync(cancellationToken));
+    }
+
+    // PartitionKey/header keys are encoded with a 16-bit length prefix on disk (WalRecordSerializer,
+    // via VariableLengthTail) — validated here, at the public API boundary, rather than deep in the
+    // serializer or on the actor loop: an exception escaping HandleAppend would crash _actorLoop
+    // itself (nobody observes that Task until DisposeAsync), hanging every future append instead
+    // of failing this one cleanly. Payload/header values use a 32-bit prefix (~4 GB) — not
+    // validated, an unreachable scenario in practice.
+    static void ValidateRequest(AppendRequest request) {
+        if (request.PartitionKey.Length > ushort.MaxValue)
+            throw new ArgumentException($"PartitionKey is {request.PartitionKey.Length} bytes, exceeds the 16-bit length-prefix limit of {ushort.MaxValue}.", nameof(request));
+
+        if (request.Headers.Count > ushort.MaxValue)
+            throw new ArgumentException($"Request has {request.Headers.Count} headers, exceeds the 16-bit count-prefix limit of {ushort.MaxValue}.", nameof(request));
+
+        foreach (var header in request.Headers) {
+            if (header.Key.Length > ushort.MaxValue)
+                throw new ArgumentException($"A header key is {header.Key.Length} bytes, exceeds the 16-bit length-prefix limit of {ushort.MaxValue}.", nameof(request));
+        }
     }
 
     // Runs on the actor loop's single thread (ShardLog.cs's RunActorAsync) — assigning the

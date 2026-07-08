@@ -32,6 +32,69 @@ public class ShardLogTests {
                 Directory.Delete(directory, recursive: true);
             }
         }
+
+        [Fact]
+        public async Task Throws_when_the_partition_key_exceeds_65535_bytes() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory);
+                var request = new AppendRequest(new byte[65536], [], "hello"u8.ToArray());
+
+                var act = async () => await log.AppendAsync(request);
+
+                await act.Should().ThrowAsync<ArgumentException>();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Throws_when_a_header_key_exceeds_65535_bytes() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory);
+                var request = new AppendRequest(
+                    Encoding.UTF8.GetBytes("order-42"), [new Header(new byte[65536], "v"u8.ToArray())], "hello"u8.ToArray());
+
+                var act = async () => await log.AppendAsync(request);
+
+                await act.Should().ThrowAsync<ArgumentException>();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Throws_when_there_are_more_than_65535_headers() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory);
+                var headers = Enumerable.Range(0, 65536).Select(_ => new Header("k"u8.ToArray(), "v"u8.ToArray())).ToArray();
+                var request = new AppendRequest(Encoding.UTF8.GetBytes("order-42"), headers, "hello"u8.ToArray());
+
+                var act = async () => await log.AppendAsync(request);
+
+                await act.Should().ThrowAsync<ArgumentException>();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Does_not_assign_or_consume_an_offset_when_validation_fails() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory);
+                var invalid = new AppendRequest(new byte[65536], [], "hello"u8.ToArray());
+
+                var act = async () => await log.AppendAsync(invalid);
+                await act.Should().ThrowAsync<ArgumentException>();
+
+                (await log.AppendAsync(SampleRequest())).Should().Be(0);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     public class DisposeAsync {
@@ -119,6 +182,54 @@ public class ShardLogTests {
                         offsets.Add(handle.Entry.LogicalOffset);
 
                 offsets.Should().Equal(0ul, 1ul, 2ul, 3ul, 4ul);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Does_not_skip_an_entry_that_a_concurrent_flush_moves_from_MemTable_into_a_new_segment() {
+            var directory = CreateTempDirectory();
+            try {
+                var segmentPath = Path.Combine(directory, $"segment-{0:D20}.sst");
+                await SstWriter.WriteAsync(segmentPath, [
+                    new LogEntry(0, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("entry-0")),
+                ]);
+                var segmentA = await SstSegment.OpenAsync(segmentPath);
+
+                var memTable = new MemTable();
+                memTable.Append(new LogEntry(1, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("entry-1")));
+
+                var walWriter = await WalWriter.OpenAsync(Path.Combine(directory, "wal.log"));
+                await using var log = new ShardLog(directory, walWriter, memTable, [segmentA], nextLogicalOffset: 2, flushThresholdBytes: 1);
+
+                await using var enumerator = log.ReadFromAsync(0).GetAsyncEnumerator();
+
+                // Pauses exactly after yielding segmentA's only entry — the segments snapshot for
+                // this enumeration is already fixed at this point, but the MemTable has not been
+                // read yet.
+                (await enumerator.MoveNextAsync()).Should().BeTrue();
+                enumerator.Current.Entry.LogicalOffset.Should().Be(0);
+                enumerator.Current.Dispose();
+
+                // Forces a real flush while the enumeration above is paused — moves entry 1 out
+                // of the MemTable and into a new segment this enumeration never captured.
+                await log.AppendAsync(SampleRequest(payload: "entry-2"));
+                await WaitForSegmentCountAsync(directory, 2);
+
+                var remaining = new List<ulong>();
+                while (await enumerator.MoveNextAsync()) {
+                    remaining.Add(enumerator.Current.Entry.LogicalOffset);
+                    enumerator.Current.Dispose();
+                }
+
+                // Entry 1 existed (in the MemTable) for the entire duration of this
+                // ReadFromAsync call and must never be skipped entirely. Whether entry 2 (appended
+                // concurrently, while the enumeration was paused) also shows up is a genuine race —
+                // MemTable is a mutable, shared object, so the actor may still be appending to the
+                // very instance this call already captured, right up until the flush swaps it out.
+                // That's not the invariant under test here; only entry 1's presence is.
+                remaining.Should().Contain(1ul);
             } finally {
                 Directory.Delete(directory, recursive: true);
             }

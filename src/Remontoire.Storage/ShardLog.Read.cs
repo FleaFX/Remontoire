@@ -28,12 +28,27 @@ public sealed partial class ShardLog {
     }
 
     /// <summary>
-    /// Enumerates entries from <paramref name="logicalOffset"/> onward — segments first (oldest
-    /// to newest), then whatever is still in the MemTable. The caller must dispose each yielded
-    /// <see cref="LogEntryHandle"/>.
+    /// Enumerates entries from <paramref name="logicalOffset"/> onward, as of the moment this
+    /// method is called — segments first (oldest to newest), then whatever was in the MemTable
+    /// at that moment. The caller must dispose each yielded <see cref="LogEntryHandle"/>.
     /// </summary>
-    public async IAsyncEnumerable<LogEntryHandle> ReadFromAsync(ulong logicalOffset, [EnumeratorCancellation] CancellationToken cancellationToken = default) {
-        foreach (var segment in Volatile.Read(ref _segments)) {
+    public IAsyncEnumerable<LogEntryHandle> ReadFromAsync(ulong logicalOffset, CancellationToken cancellationToken = default) {
+        // Snapshot eagerly, right here — NOT inside EnumerateFromAsync below, and in the same
+        // order TryGet reads these fields (MemTable first, then segments). ReadFromAsync itself
+        // must stay an ordinary (non-iterator) method for both reasons: an iterator method would
+        // defer these reads to the caller's first MoveNextAsync (same pitfall MemTable.ScanFrom's
+        // own remarks describe), and reading segments before MemTable — the reverse of TryGet's
+        // safe order — can observe neither the entry's old MemTable (already emptied by a
+        // concurrent flush) nor its new segment (published before this call started reading),
+        // skipping it entirely for this call.
+        var memTable = Volatile.Read(ref _memTable);
+        var segments = Volatile.Read(ref _segments);
+        return EnumerateFromAsync(segments, memTable, logicalOffset, cancellationToken);
+    }
+
+    static async IAsyncEnumerable<LogEntryHandle> EnumerateFromAsync(
+        SstSegment[] segments, MemTable memTable, ulong logicalOffset, [EnumeratorCancellation] CancellationToken cancellationToken) {
+        foreach (var segment in segments) {
             cancellationToken.ThrowIfCancellationRequested();
             if (segment.MaxOffset < logicalOffset)
                 continue;
@@ -42,7 +57,7 @@ public sealed partial class ShardLog {
                 yield return result.ToHandle(); // NEVER `using (result)` here — see TryGet's note
         }
 
-        foreach (var entry in Volatile.Read(ref _memTable).ScanFrom(logicalOffset))
+        foreach (var entry in memTable.ScanFrom(logicalOffset))
             yield return new LogEntryHandle(entry);
     }
 }

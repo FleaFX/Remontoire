@@ -15,6 +15,8 @@ sealed class WalWriter : IAsyncDisposable {
     readonly Channel<WalRecord> _committed = Channel.CreateUnbounded<WalRecord>(new UnboundedChannelOptions { SingleReader = true });
     readonly Task _commitLoop;
 
+    Exception? _fault;
+
     internal WalWriter(FileStream file) {
         _file = file;
         _commitLoop = Task.Run(RunCommitLoopAsync);
@@ -41,6 +43,9 @@ sealed class WalWriter : IAsyncDisposable {
     /// from waiting, but does not abort the underlying write; it will still be durably written.
     /// </summary>
     public ValueTask AppendAsync(WalRecord record, CancellationToken cancellationToken = default) {
+        if (Volatile.Read(ref _fault) is { } fault)
+            return ValueTask.FromException(fault);
+
         var pending = new PendingAppend(record, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
         var accepted = _pending.Writer.TryWrite(pending);
         ObjectDisposedException.ThrowIf(!accepted, this);
@@ -59,12 +64,23 @@ sealed class WalWriter : IAsyncDisposable {
 
             if (batch.Count > 0)
                 await WriteBatchAsync(batch);
+
+            if (Volatile.Read(ref _fault) is not null)
+                break; // unrecoverable — stop processing further batches
         }
+
+        // A permanent fault can leave items sitting in `_pending` that arrived just before
+        // AppendAsync started rejecting new calls — resolve them too, so nothing is left hanging.
+        if (Volatile.Read(ref _fault) is { } fault)
+            while (reader.TryRead(out var pending))
+                pending.Completion.TrySetException(fault);
 
         _committed.Writer.TryComplete();
     }
 
     async Task WriteBatchAsync(List<PendingAppend> batch) {
+        var positionBeforeBatch = _file.Position;
+
         try {
             foreach (var pending in batch) {
                 var length = WalRecordSerializer.GetEncodedLength(pending.Record);
@@ -89,6 +105,18 @@ sealed class WalWriter : IAsyncDisposable {
                 _committed.Writer.TryWrite(pending.Record);
             }
         } catch (Exception ex) {
+            // Undo whatever this batch already wrote — otherwise a later, successful batch's
+            // flush would fsync these bytes too, silently making a failed append durable anyway.
+            try {
+                _file.SetLength(positionBeforeBatch);
+                _file.Position = positionBeforeBatch;
+            } catch (Exception truncateEx) {
+                Volatile.Write(ref _fault, new IOException(
+                    "WalWriter could not recover from a write failure and is now permanently unusable.",
+                    new AggregateException(ex, truncateEx))
+                );
+            }
+
             foreach (var pending in batch)
                 pending.Completion.TrySetException(ex);
         }

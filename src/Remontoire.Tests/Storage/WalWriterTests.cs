@@ -141,6 +141,58 @@ public class WalWriterTests {
         }
 
         [Fact]
+        public async Task A_failed_batchs_bytes_never_become_durable_via_a_later_batchs_flush() {
+            var path = Path.GetTempFileName();
+            try {
+                var stream = new FlushFailsOnceFileStream(path);
+                var writer = new WalWriter(stream);
+                try {
+                    var act = async () => await writer.AppendAsync(SampleRecord(logicalOffset: 1));
+                    await act.Should().ThrowAsync<IOException>();
+
+                    await writer.AppendAsync(SampleRecord(logicalOffset: 2)); // succeeds, flushes the whole file
+                } finally {
+                    await writer.DisposeAsync();
+                }
+
+                var reader = new WalReader(path);
+                var offsets = new List<ulong>();
+                await foreach (var result in reader.ReadFromAsync())
+                    using (result)
+                        offsets.Add(result.Record.LogicalOffset);
+
+                // Record 1's bytes must never resurface, even though they were already written to
+                // the file before its batch's flush failed — the later, successful flush for
+                // record 2 must not have promoted them to durable along the way.
+                offsets.Should().Equal(2ul);
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task A_write_failure_that_cannot_be_truncated_away_permanently_faults_the_writer() {
+            var path = Path.GetTempFileName();
+            try {
+                var stream = new UntruncatableFileStream(path);
+                var writer = new WalWriter(stream);
+                try {
+                    var act1 = async () => await writer.AppendAsync(SampleRecord(logicalOffset: 1));
+                    await act1.Should().ThrowAsync<IOException>();
+
+                    // The writer is now permanently faulted — a second append must fail
+                    // immediately, not hang waiting on a commit loop that has stopped processing.
+                    var act2 = async () => await writer.AppendAsync(SampleRecord(logicalOffset: 2)).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+                    await act2.Should().ThrowAsync<IOException>();
+                } finally {
+                    await writer.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+                }
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
         public async Task A_batch_write_failure_publishes_nothing_to_ReadCommittedAsync() {
             var path = Path.GetTempFileName();
             try {
@@ -256,6 +308,42 @@ public class WalWriterTests {
 
             base.Flush(flushToDisk);
         }
+    }
+
+    sealed class FlushFailsOnceFileStream(string path)
+        : FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, bufferSize: 0, useAsync: true) {
+        bool _hasFailedOnce;
+
+        public override void Flush(bool flushToDisk) {
+            if (flushToDisk && !_hasFailedOnce) {
+                _hasFailedOnce = true;
+                throw new IOException("Simulated transient disk failure.");
+            }
+
+            base.Flush(flushToDisk);
+        }
+    }
+
+    // Simulates a device that fails a flush exactly once (recoverable, in principle) but can
+    // never truncate — e.g. an append-only/log-structured device. Lets a test distinguish "this
+    // specific write failed" from "the writer is now permanently unusable": if the writer weren't
+    // escalating to a permanent fault, a second append would succeed outright (this stream's one
+    // and only forced Flush failure is already spent), instead of failing immediately.
+    sealed class UntruncatableFileStream(string path)
+        : FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, bufferSize: 0, useAsync: true) {
+        bool _hasFailedOnce;
+
+        public override void Flush(bool flushToDisk) {
+            if (flushToDisk && !_hasFailedOnce) {
+                _hasFailedOnce = true;
+                throw new IOException("Simulated disk failure.");
+            }
+
+            base.Flush(flushToDisk);
+        }
+
+        public override void SetLength(long value) =>
+            throw new IOException("Simulated unrecoverable disk failure — cannot even truncate.");
     }
 
     sealed class GatedFlushFileStream(string path)
