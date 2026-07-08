@@ -10,7 +10,7 @@ public class ShardRouterTests {
         // externally published test vector for this exact (algorithm, seed) combination, unlike
         // Crc32C's Castagnoli check value — these values are this project's own anchor. If this
         // test ever goes red without an intentional RoutingAlgorithm change, routing for every
-        // existing stream has silently shifted (shard-routing-design.md §6/§8).
+        // existing stream has silently shifted.
         [Theory]
         [InlineData("order-12345", 1024, 433)]
         [InlineData("customer-A", 16, 9)]
@@ -62,10 +62,9 @@ public class ShardRouterTests {
         }
 
         // Sanity-checks the application of XxHash3's already-proven distribution quality, not
-        // the algorithm itself (shard-routing-design.md §8) — a large, fixed-seed sample of
-        // random keys should spread roughly evenly across virtual shards, including for small
-        // and prime virtualShardCount values (not only powers of two). Deterministic: Random(42)
-        // is fixed, so this never flakes run-to-run.
+        // the algorithm itself — a large, fixed-seed sample of random keys should spread roughly
+        // evenly across virtual shards, including for small and prime virtualShardCount values
+        // (not only powers of two). Deterministic: Random(42) is fixed, so this never flakes run-to-run.
         [Theory]
         [InlineData(1024)]
         [InlineData(3)]

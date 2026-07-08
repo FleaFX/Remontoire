@@ -3,8 +3,7 @@ using System.IO.Hashing;
 namespace Remontoire.Sharding;
 
 /// <summary>
-/// Deterministically maps a partition key to a virtual shard index, per the routing rule
-/// specified in the product design document (§4.4): <c>hash(key) mod virtualShardCount</c>.
+/// Deterministically maps a partition key to a virtual shard index: <c>hash(key) mod virtualShardCount</c>.
 /// This mapping never changes for a given (key, virtualShardCount, algorithm) triple — it is
 /// the sole implementation, shared byte-for-byte between <c>Remontoire.Client</c> and
 /// <c>Remontoire.Server</c>, of the single most safety-critical computation in the routing

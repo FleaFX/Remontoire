@@ -3,7 +3,7 @@ namespace Remontoire.Storage;
 /// <summary>
 /// Distinguishes the purpose of a <see cref="WalRecord"/>.
 /// </summary>
-enum WalRecordType : byte {
+public enum WalRecordType : byte {
     /// <summary>
     /// A new message appended to the shard's log.
     /// </summary>

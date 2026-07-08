@@ -13,7 +13,7 @@ namespace Remontoire.Storage;
 /// <param name="PartitionKey">The raw, UTF-8-encoded partition key; kept as bytes to avoid decoding on the hot path.</param>
 /// <param name="Headers">Free-form key/value metadata attached to the message.</param>
 /// <param name="Payload">The opaque message payload.</param>
-readonly record struct WalRecord(
+public readonly record struct WalRecord(
     WalRecordType RecordType,
     ulong RaftTerm,
     ulong RaftIndex,
@@ -21,4 +21,5 @@ readonly record struct WalRecord(
     ulong TimestampMicros,
     ReadOnlyMemory<byte> PartitionKey,
     IReadOnlyList<Header> Headers,
-    ReadOnlyMemory<byte> Payload);
+    ReadOnlyMemory<byte> Payload
+);
