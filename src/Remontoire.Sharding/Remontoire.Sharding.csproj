@@ -4,7 +4,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <IsPackable>false</IsPackable>
+    <PackageId>$(AssemblyName)</PackageId>
+    <Title>Remontoire.Sharding</Title>
+    <Description>Deterministic partition-key-to-virtual-shard routing, shared between Remontoire.Client and Remontoire.Server.</Description>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
   </PropertyGroup>
 
   <ItemGroup>

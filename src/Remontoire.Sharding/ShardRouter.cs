@@ -27,8 +27,7 @@ public static class ShardRouter {
     /// <paramref name="virtualShardCount"/> is not positive, or <paramref name="algorithm"/> is not a known member.
     /// </exception>
     public static int GetVirtualShardIndex(ReadOnlySpan<byte> partitionKey, int virtualShardCount, RoutingAlgorithm algorithm = RoutingAlgorithm.XxHash3V1) {
-        if (virtualShardCount <= 0)
-            throw new ArgumentOutOfRangeException(nameof(virtualShardCount), virtualShardCount, "Virtual shard count must be positive.");
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(virtualShardCount);
 
         var hash = algorithm switch {
             RoutingAlgorithm.XxHash3V1 => XxHash3.HashToUInt64(partitionKey, Seed),
