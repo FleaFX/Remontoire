@@ -41,6 +41,12 @@ public sealed partial class RaftReplica {
     // Floors RecoverNextLogicalOffsetAsync's scan for the compacted log prefix.
     ulong _snapshotNextLogicalOffset;
 
+    // Mirrors RaftPersistentState.SnapshotConfiguration after every SaveAsync — the group's
+    // membership as of the log's own compacted base, a serialized ShardConfiguration (null when
+    // no snapshot was ever taken). Floors RecoverActiveConfigurationAsync's scan the same way
+    // _snapshotNextLogicalOffset floors RecoverNextLogicalOffsetAsync's.
+    byte[]? _snapshotConfiguration;
+
     // Non-null exactly while a prepareSnapshot round trip is in flight (background task, not yet
     // replied) — set by TryTriggerSnapshotAsync, cleared by HandleSnapshotPreparedAsync/
     // HandleSnapshotPreparationFailedAsync. Guards against firing a second round trip for every
@@ -59,6 +65,34 @@ public sealed partial class RaftReplica {
     // superseded term must never be finished into this replica's own state.
     SnapshotInstallState? _snapshotInstall;
 
+    // The group's membership, effective the moment a ShardConfigChange is appended (RaftReplica.
+    // Membership.cs) — never gated on commit, per the paper. Set at StartAsync from
+    // RecoverActiveConfigurationAsync; replicaConfig.Peers is only ever its bootstrap value, for
+    // a group that has never had a membership change. Always peers only — never includes self,
+    // same meaning as replicaConfig.Peers.
+    IReadOnlyList<RaftGroupMember> _activeConfiguration = [];
+    ulong _activeConfigurationIndex; // the RaftIndex _activeConfiguration came from; 0 = still on the bootstrap value
+
+    // Whether replicaConfig.NodeId was still part of the full membership the last time a
+    // ShardConfigChange was applied — in-memory only, never persisted: a restart re-derives
+    // _activeConfiguration from whatever the log/snapshot says and simply behaves accordingly, no
+    // separate "was I removed" bookkeeping needs to survive a restart.
+    bool _selfIsMember = true;
+
+    // Set alongside _activeConfiguration/_selfIsMember whenever a ShardConfigChange is applied,
+    // so a later TruncateFromAsync that discards that same entry (RaftReplica.Replication.cs) can
+    // revert to this instead of re-scanning the log. Cleared once the pending change resolves
+    // (commit, in AdvanceCommitIndexAsync, or the revert itself) — "one at a time" (below)
+    // guarantees there is never a second one to remember underneath it.
+    (IReadOnlyList<RaftGroupMember> Configuration, ulong Index, bool SelfIsMember)? _configurationBeforePending;
+
+    // Non-null exactly while a ShardConfigChange is appended but not yet committed — set at
+    // apply-time (propose or receive), cleared at commit or revert. ProposeConfigChangeAsync
+    // refuses a new change while this is set — the single-server-changes overlap guarantee only
+    // holds for one change at a time, never for two in flight concurrently.
+    ulong? _pendingConfigChangeIndex;
+    TaskCompletionSource? _pendingConfigChangeReply;
+
     /// <summary>
     /// A proposal awaiting quorum commit: the result it will resolve to (RaftIndex and
     /// LogicalOffset are assigned at propose time) and the caller's completion.
@@ -68,7 +102,7 @@ public sealed partial class RaftReplica {
     /// <summary>
     /// The number of replicas (self included) that constitutes a majority of the group.
     /// </summary>
-    int QuorumSize => (replicaConfig.Peers.Count + 1) / 2 + 1;
+    int QuorumSize => (_activeConfiguration.Count + 1) / 2 + 1;
 
     // Test-only seams: internal, reached via InternalsVisibleTo (testprojecten-only convention).
     // Tests inject messages directly rather than driving them through a real or simulated
@@ -86,6 +120,12 @@ public sealed partial class RaftReplica {
     /// it hasn't voted yet.
     /// </summary>
     internal string? VotedFor => _votedFor;
+
+    /// <summary>
+    /// The group's current peers (self excluded, same meaning as <c>RaftReplicaConfig.Peers</c>)
+    /// — effective the moment a <c>ShardConfigChange</c> is appended, not gated on commit.
+    /// </summary>
+    internal IReadOnlyList<RaftGroupMember> ActiveConfiguration => _activeConfiguration;
 
     /// <summary>
     /// Posts <paramref name="message"/> directly to the actor's mailbox — the test-only
@@ -117,7 +157,7 @@ public sealed partial class RaftReplica {
         if (term > _currentTerm) {
             Volatile.Write(ref _currentTerm, term);
             _votedFor = null;
-            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
+            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset, _snapshotConfiguration));
 
             // A term change invalidates any InstallSnapshot chunk-reassembly in progress — its
             // chunks belong to a now-superseded term.
@@ -144,16 +184,18 @@ public sealed partial class RaftReplica {
     }
 
     /// <summary>
-    /// Fails all pending proposals with <see cref="NotLeaderException"/>. Safe to call when
-    /// there are no pending proposals (no-op).
+    /// Fails all pending proposals — regular and the one outstanding config change, if any —
+    /// with <see cref="NotLeaderException"/>. Safe to call when there are none (no-op).
     /// </summary>
     void FailPendingProposals() {
-        if (_pendingProposals is null)
-            return;
+        if (_pendingProposals is not null) {
+            foreach (var pending in _pendingProposals.Values)
+                pending.Reply.TrySetException(new NotLeaderException(GroupId, _leaderHint));
 
-        foreach (var pending in _pendingProposals.Values)
-            pending.Reply.TrySetException(new NotLeaderException(GroupId, _leaderHint));
+            _pendingProposals = null;
+        }
 
-        _pendingProposals = null;
+        _pendingConfigChangeReply?.TrySetException(new NotLeaderException(GroupId, _leaderHint));
+        _pendingConfigChangeReply = null;
     }
 }

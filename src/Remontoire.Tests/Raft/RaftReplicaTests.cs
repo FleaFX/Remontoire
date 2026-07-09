@@ -2,6 +2,7 @@ using FluentAssertions;
 using Google.Protobuf;
 using Remontoire.Raft.V1;
 using Remontoire.Storage;
+using Remontoire.Storage.Serialization;
 
 namespace Remontoire.Raft;
 
@@ -555,6 +556,134 @@ public class RaftReplicaTests {
             callCount.Should().Be(1);
 
             gate.SetResult();
+        }
+    }
+
+    public class ProposeConfigChangeAsync {
+        [Fact]
+        public async Task Throws_NotLeaderException_when_this_replica_is_not_the_ready_leader() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+
+            var act = () => replica.ProposeConfigChangeAsync([Peer("node-2"), Peer("node-3")]).AsTask();
+
+            await act.Should().ThrowAsync<NotLeaderException>();
+        }
+
+        // Becomes ready leader in a 2-node group (node-1 + node-2) via explicit message
+        // injection only — no canned transport responses, so nothing can auto-commit in the
+        // background and race with this test's own "not yet committed" assertions. Self-vote
+        // alone is not enough here (2-member quorum is 2): node-2's vote and, separately, its
+        // ack of the term-opening NoOp are both driven explicitly.
+        static async Task<RaftReplica> StartAsReadyLeaderOfTwoAsync() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> candidate
+            await replica.DrainAsync();
+            replica.TryPost(new VoteResponseReceived("node-2", new VoteResponse { Term = 1, VoteGranted = true }, 1));
+            await replica.DrainAsync(); // -> leader
+            replica.TryPost(new AppendEntriesResponseReceived("node-2", new AppendEntriesResponse { Term = 1, Success = true }, 1, SentUpToIndex: 1));
+            await replica.DrainAsync(); // NoOp commits -> ready leader
+            replica.IsLeader.Should().BeTrue();
+            return replica;
+        }
+
+        [Fact]
+        public async Task Is_effective_on_append_and_resolves_the_caller_once_committed() {
+            var replica = await StartAsReadyLeaderOfTwoAsync();
+
+            var proposeTask = replica.ProposeConfigChangeAsync([Peer("node-2"), Peer("node-3")]).AsTask();
+            await replica.DrainAsync();
+
+            // Effective immediately, well before commit — the paper's rule, not gated on quorum.
+            replica.ActiveConfiguration.Select(m => m.NodeId).Should().BeEquivalentTo(["node-2", "node-3"]);
+            proposeTask.IsCompleted.Should().BeFalse("neither peer has acked this entry yet, and the new 3-member group needs 2 of 3");
+
+            replica.TryPost(new AppendEntriesResponseReceived("node-2", new AppendEntriesResponse { Term = 1, Success = true }, 1, SentUpToIndex: 2));
+            await replica.DrainAsync();
+
+            await proposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+            proposeTask.IsCompletedSuccessfully.Should().BeTrue();
+        }
+
+        [Fact]
+        public async Task Refuses_a_second_change_while_one_is_already_outstanding() {
+            var replica = await StartAsReadyLeaderOfTwoAsync(); // node-2 never acks the change below — it stays pending
+
+            var firstTask = replica.ProposeConfigChangeAsync([Peer("node-2"), Peer("node-3")]).AsTask();
+            await replica.DrainAsync();
+
+            var act = () => replica.ProposeConfigChangeAsync([Peer("node-2")]).AsTask();
+
+            await act.Should().ThrowAsync<InvalidOperationException>();
+            firstTask.IsCompleted.Should().BeFalse();
+        }
+
+        [Fact]
+        public async Task A_leader_that_removes_itself_steps_down_once_the_change_commits() {
+            var replica = await StartAsReadyLeaderOfTwoAsync();
+
+            var proposeTask = replica.ProposeConfigChangeAsync([Peer("node-2")]).AsTask(); // node-1 excluded — removes itself
+            await replica.DrainAsync();
+            replica.ActiveConfiguration.Select(m => m.NodeId).Should().BeEquivalentTo(["node-2"]); // peer list itself is unchanged
+
+            replica.TryPost(new AppendEntriesResponseReceived("node-2", new AppendEntriesResponse { Term = 1, Success = true }, 1, SentUpToIndex: 2));
+            await replica.DrainAsync();
+
+            await proposeTask.WaitAsync(TimeSpan.FromSeconds(5));
+            replica.Role.Should().Be(ReplicaRole.Follower);
+            replica.CurrentTerm.Should().Be(1, "stepping down is a plain role change, never a term bump");
+        }
+
+        [Fact]
+        public async Task A_truncated_config_change_reverts_to_the_previous_configuration() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+            var original = replica.ActiveConfiguration;
+
+            var reply1 = new TaskCompletionSource<AppendEntriesResponse>();
+            replica.TryPost(new AppendEntriesReceived(new AppendEntriesRequest {
+                GroupId = "group-1", Term = 1, LeaderId = "node-3", PrevLogIndex = 0, PrevLogTerm = 0, LeaderCommit = 0,
+                Entries = { EncodeEntry(new WalRecord(WalRecordType.ShardConfigChange, 1, 1, 0, 0, ReadOnlyMemory<byte>.Empty, [],
+                    SerializeFullMembership([Peer("node-4")]))) },
+            }, reply1));
+            await replica.DrainAsync();
+            (await reply1.Task).Success.Should().BeTrue();
+            replica.ActiveConfiguration.Select(m => m.NodeId).Should().BeEquivalentTo(["node-4"]);
+
+            // A different (higher-term) leader overwrites index 1 with something else entirely —
+            // the conflicting ShardConfigChange never committed, so it must revert cleanly.
+            var reply2 = new TaskCompletionSource<AppendEntriesResponse>();
+            replica.TryPost(new AppendEntriesReceived(new AppendEntriesRequest {
+                GroupId = "group-1", Term = 2, LeaderId = "node-5", PrevLogIndex = 0, PrevLogTerm = 0, LeaderCommit = 0,
+                Entries = { EncodeEntry(new WalRecord(WalRecordType.NoOp, 2, 1, 0, 0, ReadOnlyMemory<byte>.Empty, [], ReadOnlyMemory<byte>.Empty)) },
+            }, reply2));
+            await replica.DrainAsync();
+
+            (await reply2.Task).Success.Should().BeTrue();
+            replica.ActiveConfiguration.Should().BeEquivalentTo(original);
+        }
+
+        [Fact]
+        public async Task StartAsync_recovers_the_active_configuration_from_the_log() {
+            var raftLog = new InMemoryRaftLog();
+            await raftLog.AppendAsync([new WalRecord(WalRecordType.ShardConfigChange, 1, 1, 0, 0, ReadOnlyMemory<byte>.Empty, [],
+                SerializeFullMembership([Peer("node-2"), Peer("node-9")]))]);
+
+            var replica = new RaftReplica(new InMemoryRaftStateStore(), raftLog, new RecordingRaftTransport(), Config("node-1", [Peer("node-2")]));
+            await replica.StartAsync();
+
+            replica.ActiveConfiguration.Select(m => m.NodeId).Should().BeEquivalentTo(["node-2", "node-9"]);
+        }
+
+        static ReadOnlyMemory<byte> SerializeFullMembership(IReadOnlyList<RaftGroupMember> members) {
+            var proto = new ShardConfiguration();
+            foreach (var member in members)
+                proto.Members.Add(new ShardConfigMember { NodeId = member.NodeId, Address = member.Address.ToString() });
+            return proto.ToByteArray();
+        }
+
+        static ByteString EncodeEntry(WalRecord record) {
+            var buffer = new byte[WalRecordSerializer.GetEncodedLength(record)];
+            var written = WalRecordSerializer.Write(record, buffer);
+            return ByteString.CopyFrom(buffer.AsSpan(0, written));
         }
     }
 

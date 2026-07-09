@@ -56,3 +56,15 @@ message InstallSnapshotRequest {
 message InstallSnapshotResponse {
   uint64 term = 1;
 }
+
+// The WalRecordType.ShardConfigChange payload — the full new member list (not a delta), so
+// recovery can read it back idempotently without replaying every prior change. Also this
+// project's one reusable wire format for a member list, should a future RPC ever need one.
+message ShardConfiguration {
+  repeated ShardConfigMember members = 1;
+}
+
+message ShardConfigMember {
+  string node_id = 1;
+  string address = 2; // RaftGroupMember.Address, as a Uri string
+}

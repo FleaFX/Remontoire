@@ -76,6 +76,13 @@ sealed record InstallSnapshotTransferFailed(string PeerId) : RaftReplicaMessage;
 sealed record ProposeReceived(AppendRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
 
 /// <summary>
+/// Posted by <see cref="RaftReplica.ProposeConfigChangeAsync"/>. <paramref name="Reply"/>
+/// resolves once the change is quorum-committed — it takes effect on this replica immediately on
+/// append, well before that, per the paper.
+/// </summary>
+sealed record ProposeConfigChangeReceived(IReadOnlyList<RaftGroupMember> FullMembership, TaskCompletionSource Reply) : RaftReplicaMessage;
+
+/// <summary>
 /// Posted by the background task that ran <c>prepareSnapshot</c> successfully — the log tail up
 /// to <paramref name="LastIncludedIndex"/> is now durable in a segment, so it's safe to compact.
 /// </summary>

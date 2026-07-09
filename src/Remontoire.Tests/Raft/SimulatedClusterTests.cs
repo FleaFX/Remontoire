@@ -161,4 +161,60 @@ public class SimulatedClusterTests {
         var caughtUp = await RunUntilAsync(cluster, () => cluster.Replicas[laggingNodeId].CommitIndex >= lastResult!.Value.RaftIndex);
         caughtUp.Should().BeTrue("InstallSnapshot must bring the restarted node's log base forward, since normal AppendEntries no longer can");
     }
+
+    [Fact]
+    public async Task A_config_change_commits_and_the_remaining_members_reflect_the_new_membership() {
+        await using var cluster = new SimulatedCluster(nodeCount: 3, seed: 7, ReliableNetwork);
+        await cluster.StartAllAsync();
+
+        // Captured atomically within the polling predicate itself, unlike the CurrentLeader(cluster)
+        // + separate by-reference lookup pattern used elsewhere in this file: this test's extra
+        // CrashAsync call below widens the real-thread scheduling window enough that a second,
+        // independent re-fetch of "the" leader occasionally observes none (a step-down raced in
+        // between), which this closes by never re-fetching at all.
+        (string LeaderNodeId, RaftReplica Leader)? leaderPair = null;
+        await RunUntilAsync(cluster, () => {
+            var found = cluster.Replicas.FirstOrDefault(pair => pair.Value.IsLeader);
+            if (found.Value is null)
+                return false;
+            leaderPair = (found.Key, found.Value);
+            return true;
+        });
+        var (leaderNodeId, leader) = leaderPair!.Value;
+
+        var nodeIds = cluster.Replicas.Keys.ToArray();
+        var remainingFollowerNodeId = nodeIds.First(nodeId => nodeId != leaderNodeId);
+        var removedNodeId = nodeIds.First(nodeId => nodeId != leaderNodeId && nodeId != remainingFollowerNodeId);
+
+        var newMembership = new[] {
+            new RaftGroupMember(leaderNodeId, new Uri($"https://{leaderNodeId}.simulated")),
+            new RaftGroupMember(remainingFollowerNodeId, new Uri($"https://{remainingFollowerNodeId}.simulated")),
+        };
+
+        // Crashed before the removal is proposed, not after: once out of the group it stops
+        // receiving heartbeats and, without Pre-Vote (deliberately out of scope), would otherwise
+        // time out and disrupt the surviving members with an election under its own stale peer
+        // list — the documented, deferred-to-Pre-Vote disruptor-node limitation. A real operator
+        // removing a node sequences it the same way: stop it, then propose the removal.
+        await cluster.CrashAsync(removedNodeId);
+
+        var configChangeTask = leader.ProposeConfigChangeAsync(newMembership).AsTask();
+        (await RunUntilAsync(cluster, () => configChangeTask.IsCompleted))
+            .Should().BeTrue($"'{removedNodeId}' is dropped from quorum the moment the change is appended, per the paper's effective-on-append rule");
+        await configChangeTask;
+
+        leader.ActiveConfiguration.Select(m => m.NodeId).Should().BeEquivalentTo([remainingFollowerNodeId]);
+        (await RunUntilAsync(cluster, () =>
+                cluster.Replicas[remainingFollowerNodeId].ActiveConfiguration.Select(m => m.NodeId).SequenceEqual([leaderNodeId])))
+            .Should().BeTrue($"'{remainingFollowerNodeId}' must pick up the same membership change via ordinary replication over the wire");
+
+        // The shrunk group must still be able to make progress afterward — proves the change was
+        // more than cosmetic on the surviving members.
+        var proposeTask = leader.ProposeAsync(SampleRequest()).AsTask();
+        (await RunUntilAsync(cluster, () => proposeTask.IsCompleted)).Should().BeTrue();
+        var result = await proposeTask;
+
+        (await RunUntilAsync(cluster, () => cluster.Replicas[remainingFollowerNodeId].CommitIndex >= result.RaftIndex))
+            .Should().BeTrue();
+    }
 }

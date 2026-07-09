@@ -18,8 +18,8 @@ public sealed partial class RaftReplica {
         Volatile.Write(ref _leaderHint, replicaConfig.NodeId);
         _electionTimerGeneration++; // a leader has no election timeout — invalidate without re-arming
 
-        _nextIndex = replicaConfig.Peers.ToDictionary(peer => peer.NodeId, _ => raftLog.LastIndex + 1);
-        _matchIndex = replicaConfig.Peers.ToDictionary(peer => peer.NodeId, _ => 0UL);
+        _nextIndex = _activeConfiguration.ToDictionary(peer => peer.NodeId, _ => raftLog.LastIndex + 1);
+        _matchIndex = _activeConfiguration.ToDictionary(peer => peer.NodeId, _ => 0UL);
         _installSnapshotInProgressPeers = [];
         _pendingProposals = new SortedDictionary<ulong, PendingProposal>();
         _nextLogicalOffset = await RecoverNextLogicalOffsetAsync();
@@ -42,7 +42,7 @@ public sealed partial class RaftReplica {
     }
 
     async Task ReplicateToAllPeersAsync() {
-        foreach (var peer in replicaConfig.Peers)
+        foreach (var peer in _activeConfiguration)
             await SendAppendEntriesAsync(peer.NodeId);
     }
 

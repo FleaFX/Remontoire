@@ -47,7 +47,7 @@ public sealed partial class RaftReplica {
         // voted for grants again without a second save — the vote is already durable.
         if (grant && _votedFor is null) {
             _votedFor = request.CandidateId;
-            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
+            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset, _snapshotConfiguration));
         }
 
         if (grant)
@@ -67,7 +67,7 @@ public sealed partial class RaftReplica {
     async Task BecomeCandidateAsync() {
         Volatile.Write(ref _currentTerm, _currentTerm + 1);
         _votedFor = replicaConfig.NodeId;
-        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
+        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset, _snapshotConfiguration));
 
         // A term change invalidates any InstallSnapshot chunk-reassembly in progress — its
         // chunks belong to a now-superseded term.
@@ -96,7 +96,7 @@ public sealed partial class RaftReplica {
             LastLogTerm = raftLog.LastTerm,
         };
 
-        foreach (var peer in replicaConfig.Peers)
+        foreach (var peer in _activeConfiguration)
             SendVoteRequest(peer.NodeId, request);
     }
 

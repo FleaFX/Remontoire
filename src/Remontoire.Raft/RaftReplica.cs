@@ -48,7 +48,8 @@ public sealed partial class RaftReplica(
     /// Loads durable state, starts the actor loop and arms the election timer.
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default) {
-        (_currentTerm, _votedFor, _snapshotNextLogicalOffset) = await stateStore.LoadAsync(cancellationToken);
+        (_currentTerm, _votedFor, _snapshotNextLogicalOffset, _snapshotConfiguration) = await stateStore.LoadAsync(cancellationToken);
+        (_activeConfiguration, _activeConfigurationIndex) = await RecoverActiveConfigurationAsync();
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _actorLoopTask = Task.Run(() => RunActorLoopAsync(_cts.Token), cancellationToken);
@@ -90,6 +91,7 @@ public sealed partial class RaftReplica(
                     InstallSnapshotReceived installSnapshotReceived => HandleInstallSnapshotReceivedAsync(installSnapshotReceived),
                     InstallSnapshotResponseReceived installSnapshotResponseReceived => HandleInstallSnapshotResponseReceivedAsync(installSnapshotResponseReceived),
                     InstallSnapshotTransferFailed installSnapshotTransferFailed => HandleInstallSnapshotTransferFailedAsync(installSnapshotTransferFailed),
+                    ProposeConfigChangeReceived proposeConfigChangeReceived => HandleProposeConfigChangeReceivedAsync(proposeConfigChangeReceived),
                     ProposeReceived proposeReceived => HandleProposeReceivedAsync(proposeReceived),
                     SnapshotPrepared snapshotPrepared => HandleSnapshotPreparedAsync(snapshotPrepared),
                     SnapshotPreparationFailed snapshotPreparationFailed => HandleSnapshotPreparationFailedAsync(snapshotPreparationFailed),

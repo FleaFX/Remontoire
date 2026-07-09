@@ -151,13 +151,17 @@ public sealed partial class RaftReplica {
                     // Conflicting suffix: ours loses. Never below the commit index — committed
                     // entries cannot conflict with the current leader.
                     await raftLog.TruncateFromAsync(entry.RaftIndex);
+                    RevertConfigurationIfTruncated(entry.RaftIndex);
                 }
                 newEntries.Add(entry);
             }
 
             // (5) Durable append BEFORE the reply below.
-            if (newEntries.Count > 0)
+            if (newEntries.Count > 0) {
                 await raftLog.AppendAsync(newEntries);
+                foreach (var entry in newEntries)
+                    ApplyConfigChangeIfPresent(entry);
+            }
 
             // (6) Commit follows the leader, bounded by what this request actually confirmed.
             var lastNewIndex = request.PrevLogIndex + (ulong)request.Entries.Count;
@@ -182,6 +186,12 @@ public sealed partial class RaftReplica {
             await BecomeFollowerAsync(message.Response.Term, leaderHint: null);
             return;
         }
+
+        // The membership can now change mid-term (RaftReplica.Membership.cs) — a response can
+        // arrive for a peer a since-applied ShardConfigChange already dropped from _nextIndex.
+        // Checked after the term step-down above: that one is worth honoring regardless.
+        if (!_nextIndex!.ContainsKey(message.PeerId))
+            return;
 
         if (message.Response.Success) {
             // Monotonic max: a reordered older response must never move either cursor backwards.
@@ -234,6 +244,22 @@ public sealed partial class RaftReplica {
 
         // Bounds this replica's own WAL — applies to both roles, unlike everything below.
         await TryTriggerSnapshotAsync();
+
+        // A ShardConfigChange's commit resolves its caller's promise and clears the "one at a
+        // time" tracking — role-independent, unlike everything below this. A leader that just
+        // committed its own removal steps down right here too.
+        if (_pendingConfigChangeIndex is { } pendingConfigChangeIndex && newCommitIndex >= pendingConfigChangeIndex) {
+            _pendingConfigChangeIndex = null;
+            _configurationBeforePending = null;
+            _pendingConfigChangeReply?.TrySetResult();
+            _pendingConfigChangeReply = null;
+
+            // Not a term bump — a plain role change, same term. The process itself keeps
+            // running; whether/when a removed node fully stops is an operator decision, outside
+            // this class (the known, accepted disruptor-node caveat this documents elsewhere).
+            if (_role == ReplicaRole.Leader && !_selfIsMember)
+                await BecomeFollowerAsync(_currentTerm, leaderHint: null);
+        }
 
         if (_role != ReplicaRole.Leader)
             return;

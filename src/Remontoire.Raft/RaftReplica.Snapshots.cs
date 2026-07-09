@@ -82,7 +82,15 @@ public sealed partial class RaftReplica {
     // raftLog.SnapshotIndex, which RecoverNextLogicalOffsetAsync's scan still covers safely.
     async Task FinishSnapshotInstallAsync(SnapshotInstallState install) {
         _snapshotNextLogicalOffset = install.NextLogicalOffset;
-        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
+
+        // Persists whatever _activeConfiguration already is — the InstallSnapshot wire protocol
+        // carries no membership data of its own. A membership change compacted away on the
+        // leader before this replica ever saw it stays unrecoverable through this path; only a
+        // later ShardConfigChange (ordinary replication, once this replica resumes past
+        // install.LastIncludedIndex) can correct it. Accepted for fase 3: membership changes are
+        // rare, one-at-a-time, deliberate operator actions — unlike the data path.
+        _snapshotConfiguration = SerializeSnapshotConfiguration();
+        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset, _snapshotConfiguration));
         await raftLog.InstallSnapshotAsync(install.LastIncludedIndex, install.LastIncludedTerm);
 
         if (installSnapshot is not null)
@@ -199,9 +207,15 @@ public sealed partial class RaftReplica {
             return;
         }
 
+        // The membership can now change mid-term (RaftReplica.Membership.cs) — a since-applied
+        // ShardConfigChange may already have dropped this peer. The dictionary indexer's setter
+        // would otherwise silently resurrect a departed peer's entry rather than throw.
+        if (!_nextIndex!.ContainsKey(message.PeerId))
+            return;
+
         // A successful transfer means the peer is now caught up to the snapshot's own base —
         // resume ordinary AppendEntries replication for anything above it.
-        _nextIndex![message.PeerId] = message.SentSnapshotIndex + 1;
+        _nextIndex[message.PeerId] = message.SentSnapshotIndex + 1;
         _matchIndex![message.PeerId] = message.SentSnapshotIndex;
         await TryAdvanceLeaderCommitAsync();
         await SendAppendEntriesAsync(message.PeerId);
@@ -262,7 +276,8 @@ public sealed partial class RaftReplica {
     async Task HandleSnapshotPreparedAsync(SnapshotPrepared message) {
         _snapshotInProgress = false;
         _snapshotNextLogicalOffset = message.NextLogicalOffset;
-        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
+        _snapshotConfiguration = SerializeSnapshotConfiguration(); // whatever is active right now
+        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset, _snapshotConfiguration));
         await raftLog.CompactToAsync(message.LastIncludedIndex, message.LastIncludedTerm);
     }
 
