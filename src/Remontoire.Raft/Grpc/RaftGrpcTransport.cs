@@ -38,21 +38,29 @@ public sealed class RaftGrpcTransport : IRaftTransport, IDisposable {
         _channels = new Dictionary<string, GrpcChannel>(peers.Count);
         _clients = new Dictionary<string, RaftTransport.RaftTransportClient>(peers.Count);
 
-        foreach (var peer in peers) {
-            var handler = new SocketsHttpHandler {
-                EnableMultipleHttp2Connections = true,
-                KeepAlivePingDelay = TimeSpan.FromSeconds(15),
-                KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
-                KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
-            };
-            var channel = GrpcChannel.ForAddress(peer.Address, new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true });
-            _channels[peer.NodeId] = channel;
+        // A later peer's channel/interceptor construction throwing must not leak the ones already
+        // created for earlier peers — the constructor never finishes, so nothing else will ever
+        // get a reference to call Dispose() on them.
+        try {
+            foreach (var peer in peers) {
+                var handler = new SocketsHttpHandler {
+                    EnableMultipleHttp2Connections = true,
+                    KeepAlivePingDelay = TimeSpan.FromSeconds(15),
+                    KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+                    KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
+                };
+                var channel = GrpcChannel.ForAddress(peer.Address, new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true });
+                _channels[peer.NodeId] = channel;
 
-            CallInvoker invoker = channel.CreateCallInvoker();
-            foreach (var interceptor in interceptors)
-                invoker = invoker.Intercept(interceptor);
+                CallInvoker invoker = channel.CreateCallInvoker();
+                foreach (var interceptor in interceptors)
+                    invoker = invoker.Intercept(interceptor);
 
-            _clients[peer.NodeId] = new RaftTransport.RaftTransportClient(invoker);
+                _clients[peer.NodeId] = new RaftTransport.RaftTransportClient(invoker);
+            }
+        } catch {
+            Dispose();
+            throw;
         }
     }
 

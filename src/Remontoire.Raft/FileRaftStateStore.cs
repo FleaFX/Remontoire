@@ -25,17 +25,25 @@ public sealed class FileRaftStateStore(string directory) : IRaftStateStore {
             throw new InvalidDataException($"'{path}' is not a valid Raft state file.");
         span = span[8..];
 
-        var currentTerm = BinaryPrimitives.ReadUInt64LittleEndian(span);
-        span = span[8..];
+        // A truncated or otherwise corrupted file (short of the magic-check above) makes any of
+        // the fixed-size reads or length-prefixed slices below throw ArgumentOutOfRangeException
+        // — surfaced as the same InvalidDataException the magic-check already establishes as
+        // this method's malformed-file contract, rather than an unrelated-looking BCL exception.
+        try {
+            var currentTerm = BinaryPrimitives.ReadUInt64LittleEndian(span);
+            span = span[8..];
 
-        var votedFor = ReadString(ref span);
+            var votedFor = ReadString(ref span);
 
-        var snapshotNextLogicalOffset = BinaryPrimitives.ReadUInt64LittleEndian(span);
-        span = span[8..];
+            var snapshotNextLogicalOffset = BinaryPrimitives.ReadUInt64LittleEndian(span);
+            span = span[8..];
 
-        var snapshotConfiguration = ReadBytes(ref span);
+            var snapshotConfiguration = ReadBytes(ref span);
 
-        return new RaftPersistentState(currentTerm, votedFor, snapshotNextLogicalOffset, snapshotConfiguration);
+            return new RaftPersistentState(currentTerm, votedFor, snapshotNextLogicalOffset, snapshotConfiguration);
+        } catch (ArgumentOutOfRangeException ex) {
+            throw new InvalidDataException($"'{path}' is not a valid Raft state file.", ex);
+        }
     }
 
     /// <inheritdoc />

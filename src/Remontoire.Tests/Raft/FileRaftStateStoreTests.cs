@@ -18,6 +18,21 @@ public class FileRaftStateStoreTests {
     }
 
     [Fact]
+    public async Task LoadAsync_throws_InvalidDataException_for_a_file_truncated_right_after_the_magic() {
+        var directory = TempDirectory();
+        try {
+            await File.WriteAllBytesAsync(Path.Combine(directory, "raft-state.dat"), "RMTRSTAT"u8.ToArray());
+            var store = new FileRaftStateStore(directory);
+
+            var act = () => store.LoadAsync().AsTask();
+
+            await act.Should().ThrowAsync<InvalidDataException>();
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task SaveAsync_then_LoadAsync_round_trips_every_field() {
         var directory = TempDirectory();
         try {
