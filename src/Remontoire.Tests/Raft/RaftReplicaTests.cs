@@ -191,6 +191,21 @@ public class RaftReplicaTests {
         }
 
         [Fact]
+        public async Task Recovers_nextLogicalOffset_from_persisted_state_when_the_log_tail_has_no_Append_entries() {
+            var stateStore = new InMemoryRaftStateStore();
+            await stateStore.SaveAsync(new RaftPersistentState(CurrentTerm: 0, VotedFor: null, SnapshotNextLogicalOffset: 100));
+            var replica = new RaftReplica(stateStore, new InMemoryRaftLog(), new RecordingRaftTransport(), Config("node-1", []));
+            await replica.StartAsync();
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader
+            await replica.DrainAsync();
+
+            var result = await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
+
+            result.LogicalOffset.Should().Be(100);
+        }
+
+        [Fact]
         public async Task Sends_a_vote_request_carrying_its_own_term_and_log_position_to_every_peer() {
             var (replica, transport) = await StartAsync("node-1", Peer("node-2"), Peer("node-3"));
             transport.OnRequestVote = (_, _) => new VoteResponse { Term = replica.CurrentTerm, VoteGranted = false };

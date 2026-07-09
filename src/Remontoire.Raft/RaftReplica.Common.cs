@@ -36,8 +36,9 @@ public sealed partial class RaftReplica {
     ulong _nextLogicalOffset;
     ulong _leaderNoOpIndex;
 
-    // The nextLogicalOffset recorded in the newest snapshot manifest; zero when none. Floors
-    // RecoverNextLogicalOffsetAsync's scan for the compacted log prefix.
+    // Mirrors RaftPersistentState.SnapshotNextLogicalOffset after every SaveAsync — the
+    // nextLogicalOffset as of the log's own compacted base, zero when none was ever taken.
+    // Floors RecoverNextLogicalOffsetAsync's scan for the compacted log prefix.
     ulong _snapshotNextLogicalOffset;
 
     /// <summary>
@@ -98,7 +99,7 @@ public sealed partial class RaftReplica {
         if (term > _currentTerm) {
             Volatile.Write(ref _currentTerm, term);
             _votedFor = null;
-            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor));
+            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
         }
 
         _role = ReplicaRole.Follower;

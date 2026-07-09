@@ -47,7 +47,7 @@ public sealed partial class RaftReplica {
         // voted for grants again without a second save — the vote is already durable.
         if (grant && _votedFor is null) {
             _votedFor = request.CandidateId;
-            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor));
+            await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
         }
 
         if (grant)
@@ -67,7 +67,7 @@ public sealed partial class RaftReplica {
     async Task BecomeCandidateAsync() {
         Volatile.Write(ref _currentTerm, _currentTerm + 1);
         _votedFor = replicaConfig.NodeId;
-        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor));
+        await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
 
         _role = ReplicaRole.Candidate;
         Volatile.Write(ref _leaderHint, null);

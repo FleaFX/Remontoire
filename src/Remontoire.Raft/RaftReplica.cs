@@ -46,7 +46,7 @@ public sealed partial class RaftReplica(
     /// Loads durable state, starts the actor loop and arms the election timer.
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default) {
-        (_currentTerm, _votedFor) = await stateStore.LoadAsync(cancellationToken);
+        (_currentTerm, _votedFor, _snapshotNextLogicalOffset) = await stateStore.LoadAsync(cancellationToken);
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _actorLoopTask = Task.Run(() => RunActorLoopAsync(_cts.Token), cancellationToken);
