@@ -6,7 +6,7 @@ namespace Remontoire.Raft;
 
 public class RaftReplicaTests {
     // Long, effectively-unreachable-in-a-test timeouts: every transition in these tests is
-    // driven by direct message injection (§10.1 — "the actor as a pure state machine"), never
+    // driven by direct message injection — the actor as a pure state machine — never
     // by an actually-firing background timer. A real timer racing with an injected message would
     // reintroduce exactly the class of flakiness this test layer exists to avoid.
     static RaftReplicaConfig Config(string nodeId, IReadOnlyList<RaftGroupMember> peers) =>
@@ -286,7 +286,7 @@ public class RaftReplicaTests {
         }
     }
 
-    // The MSSP incident (raft-consensus-design.md §2.1), as a regression test: a replica becomes
+    // A sister project's real term-explosion incident, as a regression test: a replica becomes
     // candidate (its election timer re-arms to generation g for the round after this one), wins
     // the election via injected votes BEFORE that g-stamped message is ever processed, and only
     // THEN does the stale ElectionTimeoutElapsed(g) arrive. It must not demote the now-leader

@@ -36,5 +36,5 @@ sealed class RecordingRaftTransport : IRaftTransport {
     }
 
     public ValueTask<InstallSnapshotResponse> InstallSnapshotAsync(string peerId, InstallSnapshotRequest request, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException("Snapshots are not covered by layer-1 tests yet (fase 3, sub-order step 6).");
+        throw new NotImplementedException("Snapshots are not covered by layer-1 tests yet.");
 }
