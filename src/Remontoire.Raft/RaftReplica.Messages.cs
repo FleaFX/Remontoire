@@ -70,10 +70,18 @@ sealed record InstallSnapshotResponseReceived(string PeerId, InstallSnapshotResp
 sealed record InstallSnapshotTransferFailed(string PeerId) : RaftReplicaMessage;
 
 /// <summary>
-/// Posted by <see cref="RaftReplica.ProposeAsync"/> — an application request to replicate one
-/// record. <paramref name="Reply"/> resolves once the entry is quorum-committed, never before.
+/// Posted by <see cref="RaftReplica.ProposeAsync(AppendRequest, CancellationToken)"/> — an
+/// application request to replicate one record. <paramref name="Reply"/> resolves once the entry
+/// is quorum-committed, never before.
 /// </summary>
 sealed record ProposeReceived(AppendRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
+
+/// <summary>
+/// Posted by <see cref="RaftReplica.ProposeAsync(AckRequest, CancellationToken)"/> —
+/// same commit-then-resolve contract as <see cref="ProposeReceived"/>, minus the
+/// <see cref="ProposeResult.LogicalOffset"/> assignment.
+/// </summary>
+sealed record ProposeAckReceived(AckRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
 
 /// <summary>
 /// Posted by <see cref="RaftReplica.ProposeConfigChangeAsync"/>. <paramref name="Reply"/>

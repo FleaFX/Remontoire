@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Text;
 using Remontoire.Raft.V1;
 using Remontoire.Storage;
 using Remontoire.Storage.Serialization;
@@ -15,6 +17,22 @@ public sealed partial class RaftReplica {
 
         var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         var accepted = _channel.Writer.TryWrite(new ProposeReceived(request, completion));
+        ObjectDisposedException.ThrowIf(!accepted, this);
+
+        return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
+    }
+
+    /// <summary>
+    /// Proposes a consumer-group acknowledgment for replication — same overload family as
+    /// <see cref="ProposeAsync(AppendRequest, CancellationToken)"/>. Unlike the
+    /// <see cref="AppendRequest"/> overload, no <see cref="ProposeResult.LogicalOffset"/> is
+    /// consumed: an ack is not a consumer-visible message.
+    /// </summary>
+    public ValueTask<ProposeResult> ProposeAsync(AckRequest request, CancellationToken cancellationToken = default) {
+        ValidateRequest(request);
+
+        var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = _channel.Writer.TryWrite(new ProposeAckReceived(request, completion));
         ObjectDisposedException.ThrowIf(!accepted, this);
 
         return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
@@ -39,6 +57,13 @@ public sealed partial class RaftReplica {
         }
     }
 
+    // ConsumerGroup becomes the record's PartitionKey (UTF-8-encoded) — same 16-bit length-prefix
+    // contract as ValidateRequest above, so it needs the same boundary check.
+    static void ValidateRequest(AckRequest request) {
+        if (Encoding.UTF8.GetByteCount(request.ConsumerGroup) > ushort.MaxValue)
+            throw new ArgumentException($"ConsumerGroup exceeds the 16-bit length-prefix limit of {ushort.MaxValue} bytes.", nameof(request));
+    }
+
     /// <summary>
     /// Yields every record in the exact order it became quorum-committed on this replica. Only
     /// one consumer may enumerate this at a time.
@@ -56,19 +81,34 @@ public sealed partial class RaftReplica {
     }
 
     async Task HandleProposeReceivedAsync(ProposeReceived message) {
+        var request = message.Request;
+        await ProposeRecordAsync(WalRecordType.Append, request.PartitionKey, request.Headers, request.Payload,
+            consumesLogicalOffset: true, message.Reply);
+    }
+
+    async Task HandleProposeAckReceivedAsync(ProposeAckReceived message) {
+        var request = message.Request;
+        await ProposeRecordAsync(WalRecordType.Ack, Encoding.UTF8.GetBytes(request.ConsumerGroup), headers: [],
+            EncodeAckPayload(request.Offsets), consumesLogicalOffset: false, message.Reply);
+    }
+
+    // Shared by both ProposeAsync overloads' handlers — the only place _nextLogicalOffset++ is
+    // ever called, and only when consumesLogicalOffset is true: an Ack is not a consumer-visible
+    // message, so it must never open a gap in the LogicalOffset sequence Append entries hand out.
+    async Task ProposeRecordAsync(WalRecordType recordType, ReadOnlyMemory<byte> partitionKey, IReadOnlyList<Header> headers,
+        ReadOnlyMemory<byte> payload, bool consumesLogicalOffset, TaskCompletionSource<ProposeResult> reply) {
         if (_role != ReplicaRole.Leader || !_isLeaderReady) {
-            message.Reply.TrySetException(new NotLeaderException(GroupId, _leaderHint));
+            reply.TrySetException(new NotLeaderException(GroupId, _leaderHint));
             return;
         }
 
-        var request = message.Request;
-        var record = new WalRecord(WalRecordType.Append, _currentTerm, raftLog.LastIndex + 1, _nextLogicalOffset++,
-            (ulong)_timeProvider.GetUtcNow().ToUnixTimeMilliseconds() * 1000,
-            request.PartitionKey, request.Headers, request.Payload);
+        var timestampMicros = (ulong)_timeProvider.GetUtcNow().ToUnixTimeMilliseconds() * 1000;
+        var logicalOffset = consumesLogicalOffset ? _nextLogicalOffset++ : 0;
+        var record = new WalRecord(recordType, _currentTerm, raftLog.LastIndex + 1, logicalOffset, timestampMicros, partitionKey, headers, payload);
 
         // The reply resolves in AdvanceCommitIndexAsync, on quorum commit — never here: no
-        // LogicalOffset escapes the replica before its entry is committed.
-        _pendingProposals!.Add(record.RaftIndex, new PendingProposal(new ProposeResult(record.RaftIndex, record.LogicalOffset), message.Reply));
+        // ProposeResult escapes the replica before its entry is committed.
+        _pendingProposals!.Add(record.RaftIndex, new PendingProposal(new ProposeResult(record.RaftIndex, logicalOffset, timestampMicros), reply));
 
         // Durable local append before replication: the leader's own entry counts toward the
         // quorum, and it may only count once fsynced.
@@ -81,6 +121,19 @@ public sealed partial class RaftReplica {
         await TryAdvanceLeaderCommitAsync();
 
         await ReplicateToAllPeersAsync();
+    }
+
+    // [uint32 count][uint64 offsets...], little-endian — small enough (typically a handful of
+    // offsets per batch-ack) that a dedicated encoder needs no pooling or streaming; Payload's
+    // own 32-bit length prefix is otherwise unvalidated (see ValidateRequest above), same here.
+    static byte[] EncodeAckPayload(IReadOnlyList<ulong> offsets) {
+        var buffer = new byte[4 + offsets.Count * 8];
+        BinaryPrimitives.WriteUInt32LittleEndian(buffer, (uint)offsets.Count);
+
+        for (var i = 0; i < offsets.Count; i++)
+            BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(4 + i * 8, 8), offsets[i]);
+
+        return buffer;
     }
 
     async Task HandleAppendEntriesReceivedAsync(AppendEntriesReceived message) {
