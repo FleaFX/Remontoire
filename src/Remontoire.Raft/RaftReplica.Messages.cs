@@ -66,6 +66,18 @@ sealed record InstallSnapshotResponseReceived(string PeerId, InstallSnapshotResp
 sealed record ProposeReceived(AppendRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
 
 /// <summary>
+/// Posted by the background task that ran <c>prepareSnapshot</c> successfully — the log tail up
+/// to <paramref name="LastIncludedIndex"/> is now durable in a segment, so it's safe to compact.
+/// </summary>
+sealed record SnapshotPrepared(ulong LastIncludedIndex, ulong LastIncludedTerm, ulong NextLogicalOffset) : RaftReplicaMessage;
+
+/// <summary>
+/// Posted by the background task that ran <c>prepareSnapshot</c> when it threw — clears the
+/// in-progress marker so a later commit advance gets to try again.
+/// </summary>
+sealed record SnapshotPreparationFailed : RaftReplicaMessage;
+
+/// <summary>
 /// Used exclusively by tests to detect that the actor has processed every previously injected
 /// message: the actor resolves <paramref name="Completion"/> the moment it dequeues this.
 /// </summary>

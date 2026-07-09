@@ -41,6 +41,12 @@ public sealed partial class RaftReplica {
     // Floors RecoverNextLogicalOffsetAsync's scan for the compacted log prefix.
     ulong _snapshotNextLogicalOffset;
 
+    // Non-null exactly while a prepareSnapshot round trip is in flight (background task, not yet
+    // replied) — set by TryTriggerSnapshotAsync, cleared by HandleSnapshotPreparedAsync/
+    // HandleSnapshotPreparationFailedAsync. Guards against firing a second round trip for every
+    // commit advance while one is already outstanding.
+    bool _snapshotInProgress;
+
     /// <summary>
     /// A proposal awaiting quorum commit: the result it will resolve to (RaftIndex and
     /// LogicalOffset are assigned at propose time) and the caller's completion.

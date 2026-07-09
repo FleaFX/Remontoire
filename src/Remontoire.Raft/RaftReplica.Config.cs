@@ -16,6 +16,12 @@ namespace Remontoire.Raft;
 /// <paramref name="HeartbeatInterval"/> when not set explicitly.
 /// </param>
 /// <param name="SnapshotChunkSizeBytes">Maximum bytes per <c>InstallSnapshot</c> chunk. Default 1 MiB.</param>
+/// <param name="SnapshotThresholdEntries">
+/// A snapshot is taken once the log tail beyond <c>SnapshotIndex</c> grows past this many
+/// entries. Entry count, not bytes — keeps <see cref="IRaftLog"/> free of any size-estimation
+/// contract. Starting point: 10,000; ignored entirely when no snapshot-preparation delegate is
+/// wired up.
+/// </param>
 /// <param name="ElectionRandomSeed">Optional seed for the election-timeout randomization</param>
 public sealed record RaftReplicaConfig(
     string GroupId,
@@ -26,5 +32,6 @@ public sealed record RaftReplicaConfig(
     TimeSpan ElectionTimeoutMax,
     TimeSpan? RpcTimeout = null,
     int SnapshotChunkSizeBytes = 1 << 20,
+    ulong SnapshotThresholdEntries = 10_000,
     int? ElectionRandomSeed = null
 );

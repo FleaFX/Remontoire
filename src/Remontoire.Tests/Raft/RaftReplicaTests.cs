@@ -9,9 +9,10 @@ public class RaftReplicaTests {
     // driven by direct message injection — the actor as a pure state machine — never
     // by an actually-firing background timer. A real timer racing with an injected message would
     // reintroduce exactly the class of flakiness this test layer exists to avoid.
-    static RaftReplicaConfig Config(string nodeId, IReadOnlyList<RaftGroupMember> peers) =>
+    static RaftReplicaConfig Config(string nodeId, IReadOnlyList<RaftGroupMember> peers, ulong? snapshotThresholdEntries = null) =>
         new(GroupId: "group-1", NodeId: nodeId, Peers: peers,
-            HeartbeatInterval: TimeSpan.FromMinutes(10), ElectionTimeoutMin: TimeSpan.FromMinutes(10), ElectionTimeoutMax: TimeSpan.FromMinutes(11));
+            HeartbeatInterval: TimeSpan.FromMinutes(10), ElectionTimeoutMin: TimeSpan.FromMinutes(10), ElectionTimeoutMax: TimeSpan.FromMinutes(11),
+            SnapshotThresholdEntries: snapshotThresholdEntries ?? 10_000);
 
     static async Task<(RaftReplica Replica, RecordingRaftTransport Transport)> StartAsync(string nodeId = "node-1", params RaftGroupMember[] peers) {
         var transport = new RecordingRaftTransport();
@@ -285,6 +286,89 @@ public class RaftReplicaTests {
 
             var result = await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
             result.LogicalOffset.Should().Be(0);
+        }
+    }
+
+    public class TryTriggerSnapshotAsync {
+        [Fact]
+        public async Task Compacts_the_log_once_prepareSnapshot_resolves() {
+            var raftLog = new InMemoryRaftLog();
+            var config = Config("node-1", [], snapshotThresholdEntries: 0);
+            var replica = new RaftReplica(new InMemoryRaftStateStore(), raftLog, new RecordingRaftTransport(), config,
+                prepareSnapshot: (_, _) => Task.FromResult<IReadOnlyList<string>>([]));
+            await replica.StartAsync();
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader, commits a NoOp
+            await replica.DrainAsync();
+
+            (await WaitUntilAsync(() => raftLog.SnapshotIndex == 1)).Should().BeTrue();
+            raftLog.SnapshotTerm.Should().Be(1);
+        }
+
+        [Fact]
+        public async Task Does_not_call_prepareSnapshot_again_while_one_is_already_in_flight() {
+            var raftLog = new InMemoryRaftLog();
+            var gate = new TaskCompletionSource();
+            var callCount = 0;
+            var config = Config("node-1", [], snapshotThresholdEntries: 0);
+            var replica = new RaftReplica(new InMemoryRaftStateStore(), raftLog, new RecordingRaftTransport(), config,
+                prepareSnapshot: async (_, _) => {
+                    Interlocked.Increment(ref callCount);
+                    await gate.Task;
+                    return [];
+                });
+            await replica.StartAsync();
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader, commits a NoOp, triggers a snapshot
+            await replica.DrainAsync();
+            (await WaitUntilAsync(() => callCount == 1)).Should().BeTrue();
+
+            // Commits a second entry, well past the threshold again — must not start a second
+            // prepareSnapshot round trip while the first is still outstanding.
+            await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
+
+            callCount.Should().Be(1);
+
+            gate.SetResult();
+            (await WaitUntilAsync(() => raftLog.SnapshotIndex > 0)).Should().BeTrue();
+        }
+
+        [Fact]
+        public async Task A_failed_prepareSnapshot_clears_the_in_flight_marker_so_a_later_commit_retries() {
+            var raftLog = new InMemoryRaftLog();
+            var callCount = 0;
+            var config = Config("node-1", [], snapshotThresholdEntries: 0);
+            var replica = new RaftReplica(new InMemoryRaftStateStore(), raftLog, new RecordingRaftTransport(), config,
+                prepareSnapshot: (_, _) => {
+                    Interlocked.Increment(ref callCount);
+                    return callCount == 1
+                        ? Task.FromException<IReadOnlyList<string>>(new IOException("simulated"))
+                        : Task.FromResult<IReadOnlyList<string>>([]);
+                });
+            await replica.StartAsync();
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader, commits a NoOp
+            await replica.DrainAsync();
+            (await WaitUntilAsync(() => callCount == 1)).Should().BeTrue();
+
+            await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
+
+            (await WaitUntilAsync(() => callCount == 2)).Should().BeTrue();
+            (await WaitUntilAsync(() => raftLog.SnapshotIndex > 0)).Should().BeTrue();
+        }
+
+        [Fact]
+        public async Task Does_nothing_when_no_prepareSnapshot_delegate_is_configured() {
+            var raftLog = new InMemoryRaftLog();
+            var config = Config("node-1", [], snapshotThresholdEntries: 0);
+            var replica = new RaftReplica(new InMemoryRaftStateStore(), raftLog, new RecordingRaftTransport(), config);
+            await replica.StartAsync();
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader, commits a NoOp
+            await replica.DrainAsync();
+            await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
+
+            raftLog.SnapshotIndex.Should().Be(0);
         }
     }
 

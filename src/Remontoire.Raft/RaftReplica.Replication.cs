@@ -232,6 +232,9 @@ public sealed partial class RaftReplica {
             _committed.Writer.TryWrite(record);
         }
 
+        // Bounds this replica's own WAL — applies to both roles, unlike everything below.
+        await TryTriggerSnapshotAsync();
+
         if (_role != ReplicaRole.Leader)
             return;
 

@@ -13,7 +13,8 @@ public sealed partial class RaftReplica(
     IRaftTransport transport,
     RaftReplicaConfig replicaConfig,
     TimeProvider? timeProvider = null,
-    ILogger<RaftReplica>? logger = null
+    ILogger<RaftReplica>? logger = null,
+    Func<ulong, CancellationToken, Task<IReadOnlyList<string>>>? prepareSnapshot = null
 ) : IAsyncDisposable {
     /// <summary>
     /// The physical shard group this replica belongs to.
@@ -88,6 +89,8 @@ public sealed partial class RaftReplica(
                     InstallSnapshotReceived installSnapshotReceived => HandleInstallSnapshotReceivedAsync(installSnapshotReceived),
                     InstallSnapshotResponseReceived installSnapshotResponseReceived => HandleInstallSnapshotResponseReceivedAsync(installSnapshotResponseReceived),
                     ProposeReceived proposeReceived => HandleProposeReceivedAsync(proposeReceived),
+                    SnapshotPrepared snapshotPrepared => HandleSnapshotPreparedAsync(snapshotPrepared),
+                    SnapshotPreparationFailed snapshotPreparationFailed => HandleSnapshotPreparationFailedAsync(snapshotPreparationFailed),
                     VoteRequestReceived voteRequestReceived => HandleVoteRequestReceivedAsync(voteRequestReceived),
                     VoteResponseReceived voteResponseReceived => HandleVoteResponseReceivedAsync(voteResponseReceived),
                     _ => Task.CompletedTask
