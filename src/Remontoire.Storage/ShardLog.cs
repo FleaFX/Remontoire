@@ -16,6 +16,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
     readonly Task _tailingLoop;
     readonly Task _actorLoop;
     readonly Channel<ShardLogMessage> _mailbox = Channel.CreateUnbounded<ShardLogMessage>(new UnboundedChannelOptions { SingleReader = true });
+    readonly Channel<WalRecord> _applied = Channel.CreateUnbounded<WalRecord>(new UnboundedChannelOptions { SingleReader = true });
     readonly CompactionPolicy? _compactionPolicy;
     readonly Task? _compactionWorkerLoop;
 
@@ -24,6 +25,12 @@ public sealed partial class ShardLog : IAsyncDisposable {
     ulong _nextOffsetToApply;
     TaskCompletionSource<CompactionPlan>? _pendingPlanRequest;
     readonly List<PrepareSnapshotRequested> _pendingSnapshotRequests = [];
+
+    // A signal, not a data channel — completed and replaced every time an Append is applied, so
+    // any number of concurrent ConsumeAsync-style waiters can each await it independently. The
+    // waiter re-reads (TryGet/ReadFromAsync) after it completes; this never carries the record
+    // itself, only "something changed, look again."
+    volatile TaskCompletionSource _appended = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal ShardLog(
         string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource, MemTable memTable, SstSegment[] segments,

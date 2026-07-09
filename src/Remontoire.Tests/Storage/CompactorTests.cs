@@ -92,6 +92,70 @@ public class CompactorTests {
         }
     }
 
+    public class PruneAckedSegmentsAsync {
+        [Fact]
+        public async Task Deletes_a_segment_fully_covered_by_the_watermark() {
+            var directory = CreateTempDirectory();
+            try {
+                var path = await WriteSegmentAsync(directory, SampleEntries(0, 5)); // offsets 0..4
+                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(4UL));
+
+                await Compactor.PruneAckedSegmentsAsync(directory, policy);
+
+                File.Exists(path).Should().BeFalse();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Leaves_a_segment_that_straddles_the_watermark_untouched() {
+            var directory = CreateTempDirectory();
+            try {
+                var path = await WriteSegmentAsync(directory, SampleEntries(0, 5)); // offsets 0..4
+                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(2UL));
+
+                await Compactor.PruneAckedSegmentsAsync(directory, policy);
+
+                File.Exists(path).Should().BeTrue("offset 3 and 4 in this segment are not yet covered by the watermark");
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Deletes_only_the_segments_fully_covered_among_several() {
+            var directory = CreateTempDirectory();
+            try {
+                var covered = await WriteSegmentAsync(directory, SampleEntries(0, 5)); // offsets 0..4
+                var straddling = await WriteSegmentAsync(directory, SampleEntries(5, 5)); // offsets 5..9
+                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(4UL));
+
+                await Compactor.PruneAckedSegmentsAsync(directory, policy);
+
+                File.Exists(covered).Should().BeFalse();
+                File.Exists(straddling).Should().BeTrue();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Does_nothing_when_the_policy_has_no_watermark_delegate() {
+            var directory = CreateTempDirectory();
+            try {
+                var path = await WriteSegmentAsync(directory, SampleEntries(0, 5));
+                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null);
+
+                await Compactor.PruneAckedSegmentsAsync(directory, policy);
+
+                File.Exists(path).Should().BeTrue();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     static string CreateTempDirectory() {
         var directory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(directory);

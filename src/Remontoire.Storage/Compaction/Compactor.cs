@@ -1,9 +1,9 @@
 namespace Remontoire.Storage;
 
 /// <summary>
-/// Merges multiple small, adjacent SST segments in a directory into fewer, larger ones.
-/// Phase 1: age-/size-driven only — no ack-driven pruning yet (needs
-/// Remontoire.Messaging's ack-index, a later phase).
+/// Merges multiple small, adjacent SST segments in a directory into fewer, larger ones. Also
+/// runs ack-driven pruning (<see cref="PruneAckedSegmentsAsync"/>) when the policy carries a
+/// watermark delegate — that operation drops fully-acked segments outright rather than merging.
 /// </summary>
 static class Compactor {
     /// <summary>
@@ -81,12 +81,42 @@ static class Compactor {
     }
 
     public readonly record struct SegmentCandidate(string Path, SstSegment Segment);
+
+    /// <summary>
+    /// Drops every segment whose entire offset range is already covered by every consumer
+    /// group's low watermark — the first of the retention conditions a message must satisfy
+    /// before it may ever be discarded; the others (audit/max-age windows, a size-driven
+    /// emergency floor) are a later phase's concern. A no-op when <paramref name="policy"/>
+    /// carries no <see cref="CompactionPolicy.GetAckedLowWatermarkAsync"/> delegate — the
+    /// age-/size-driven <see cref="RunAsync"/> pass (unchanged) is the only pruning that happens
+    /// for a policy without one.
+    /// </summary>
+    public static async Task PruneAckedSegmentsAsync(string directory, CompactionPolicy policy, CancellationToken cancellationToken = default) {
+        if (policy.GetAckedLowWatermarkAsync is not { } getWatermark)
+            return;
+
+        var watermark = await getWatermark(cancellationToken);
+
+        foreach (var path in Directory.EnumerateFiles(directory, "*.sst")) {
+            using var segment = await SstSegment.OpenAsync(path, cancellationToken);
+            if (segment.MaxOffset <= watermark)
+                File.Delete(path); // whole, fully-acked segment — no partial rewrite needed
+        }
+    }
 }
 
 /// <summary>
-/// Phase-1 compaction policy: purely age-/size-driven. Ack-driven pruning is a later phase
-/// (Remontoire.Messaging's ack-index does not exist yet).
+/// Phase-1 compaction policy: age-/size-driven merging, plus an optional ack-driven pruning
+/// hook.
 /// </summary>
 /// <param name="MaxAge">Segments written more recently than this are left alone. <c>null</c> considers every segment regardless of age.</param>
 /// <param name="MaxMergedSegmentBytes">The target maximum size, in bytes, of a merged output segment — consecutive small segments are packed together up to this size. <c>null</c> means unlimited (pack everything into one segment).</param>
-public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes);
+/// <param name="GetAckedLowWatermarkAsync">
+/// Optional injection point: returns the lowest low-watermark across every registered consumer
+/// group on this shard, so <see cref="Compactor.PruneAckedSegmentsAsync"/> can drop segments no
+/// group can still read from. This project never references the ack-tracking layer directly —
+/// same one-way dependency discipline as everywhere else a lower layer needs a fact only a
+/// higher one can supply. <c>null</c> disables ack-driven pruning entirely — nothing is ever
+/// dropped on age/size grounds alone.
+/// </param>
+public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null);
