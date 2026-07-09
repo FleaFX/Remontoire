@@ -13,7 +13,9 @@ namespace Remontoire.Messaging;
 public sealed class AckIndex {
     readonly ConcurrentDictionary<string, ConsumerGroupAckState> _groups = new();
 
-    /// <summary>Applies one Ack record — a no-op for any other <see cref="WalRecordType"/>.</summary>
+    /// <summary>
+    /// Applies one Ack record — a no-op for any other <see cref="WalRecordType"/>.
+    /// </summary>
     public void Apply(WalRecord record) {
         if (record.RecordType != WalRecordType.Ack)
             return;

@@ -306,7 +306,9 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
             File.Delete(path);
     }
 
-    /// <summary>Disposes the active <see cref="WalWriter"/>, draining it to durable completion first.</summary>
+    /// <summary>
+    /// Disposes the active <see cref="WalWriter"/>, draining it to durable completion first.
+    /// </summary>
     public ValueTask DisposeAsync() => _activeWriter.DisposeAsync();
 
     List<WalFileRange> AllFileRanges() {

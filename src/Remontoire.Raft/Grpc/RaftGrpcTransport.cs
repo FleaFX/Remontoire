@@ -1,4 +1,3 @@
-using System.Net.Http;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
@@ -86,7 +85,9 @@ public sealed class RaftGrpcTransport : IRaftTransport, IDisposable {
         ? client
         : throw new InvalidOperationException($"'{peerId}' is not a configured peer for this transport.");
 
-    /// <summary>Disposes every underlying channel.</summary>
+    /// <summary>
+    /// Disposes every underlying channel.
+    /// </summary>
     public void Dispose() {
         foreach (var channel in _channels.Values)
             channel.Dispose();
