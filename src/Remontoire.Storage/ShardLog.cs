@@ -56,7 +56,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
             await _compactionWorkerLoop;
 
         // NOW safe: every append the actor accepted has already reached WalWriter. Disposing it
-        // drains everything to durable completion, then completes its ReadCommittedAsync
+        // drains everything to durable completion, then completes its ReadDurableAsync
         // stream, which lets the tailing loop end naturally below. Any final WalRecordCommitted
         // messages the tailing loop tries to post after this point are silently dropped (mailbox
         // already closed) — harmless, the next OpenAsync's recovery picks them up from the WAL.

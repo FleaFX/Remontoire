@@ -47,7 +47,7 @@ public sealed partial class ShardLog {
     // Reads the WAL from byte 0, skipping anything already covered by an existing segment
     // (LogicalOffset < flushedWatermark), applying the rest. This is a one-shot read — once
     // ShardLog is live, new appends never round-trip back through the WAL file at all; they
-    // flow directly from WalWriter's own in-memory ReadCommittedAsync stream instead.
+    // flow directly from WalWriter's own in-memory ReadDurableAsync stream instead.
     static async Task<(ShardState State, ulong NextLogicalOffset)> ReplayWalAsync(
         string directory, WalReader walReader, ShardState state, ulong flushedWatermark, long flushThresholdBytes, CancellationToken cancellationToken) {
         var nextLogicalOffset = flushedWatermark;

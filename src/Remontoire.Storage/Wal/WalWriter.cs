@@ -9,7 +9,7 @@ namespace Remontoire.Storage;
 /// are batched into a single fsync per batch ("group commit") instead of one fsync per record.
 /// Never touches any in-memory state (no MemTable, no index) — purely a durability primitive.
 /// </summary>
-sealed class WalWriter : IAsyncDisposable {
+public sealed class WalWriter : IAsyncDisposable {
     readonly FileStream _file;
     readonly Channel<PendingAppend> _pending = Channel.CreateUnbounded<PendingAppend>(new UnboundedChannelOptions { SingleReader = true });
     readonly Channel<WalRecord> _committed = Channel.CreateUnbounded<WalRecord>(new UnboundedChannelOptions { SingleReader = true });
@@ -17,17 +17,26 @@ sealed class WalWriter : IAsyncDisposable {
 
     Exception? _fault;
 
-    internal WalWriter(FileStream file) {
+    /// <summary>
+    /// Wraps an already-open <paramref name="file"/>. Prefer <see cref="OpenAsync"/> for the
+    /// common case of opening a WAL file by path; this constructor exists for callers that need
+    /// to supply their own already-open <see cref="FileStream"/> (tests, or a caller that owns
+    /// file lifetime differently).
+    /// </summary>
+    public WalWriter(FileStream file) {
         _file = file;
         _commitLoop = Task.Run(RunCommitLoopAsync);
     }
 
     /// <summary>
-    /// Yields each record in the exact order it was durably committed — the same in-memory
+    /// Yields each record in the exact order it was durably fsynced — the same in-memory
     /// <see cref="WalRecord"/> just written, handed off directly, never re-read from disk. Only
-    /// one caller may enumerate this at a time.
+    /// one caller may enumerate this at a time. Named "durable", not "committed": a durable
+    /// record can still be truncated away (<see cref="TruncateFromAsync"/>) before it ever
+    /// reaches quorum — <c>RaftReplica.ReadCommittedAsync</c> is the stream that actually means
+    /// "committed".
     /// </summary>
-    public IAsyncEnumerable<WalRecord> ReadCommittedAsync(CancellationToken cancellationToken = default) =>
+    public IAsyncEnumerable<WalRecord> ReadDurableAsync(CancellationToken cancellationToken = default) =>
         _committed.Reader.ReadAllAsync(cancellationToken);
 
     /// <summary>
@@ -51,6 +60,29 @@ sealed class WalWriter : IAsyncDisposable {
         ObjectDisposedException.ThrowIf(!accepted, this);
 
         return new ValueTask(pending.Completion.Task.WaitAsync(cancellationToken));
+    }
+
+    /// <summary>
+    /// Discards every byte from <paramref name="position"/> onward, permanently. Caller
+    /// contract: no <see cref="AppendAsync"/> may be in flight when this is called — the only
+    /// real caller is driven by a single-threaded actor loop that always awaits one WAL
+    /// operation to completion before issuing the next, so this is enforced by construction,
+    /// not by a runtime guard here.
+    /// </summary>
+    public Task TruncateFromAsync(long position, CancellationToken cancellationToken = default) {
+        if (Volatile.Read(ref _fault) is { } fault)
+            return Task.FromException(fault);
+
+        try {
+            _file.SetLength(position);
+            _file.Position = position;
+        } catch (Exception ex) {
+            var truncateFault = new IOException("WalWriter could not truncate and is now permanently unusable.", ex);
+            Volatile.Write(ref _fault, truncateFault);
+            return Task.FromException(truncateFault);
+        }
+
+        return Task.CompletedTask;
     }
 
     async Task RunCommitLoopAsync() {
@@ -96,10 +128,10 @@ sealed class WalWriter : IAsyncDisposable {
             _file.Flush(flushToDisk: true);
 
             // Publish each record — the same in-memory WalRecord just written, handed off
-            // directly to ReadCommittedAsync — right after resolving its caller, in the exact
+            // directly to ReadDurableAsync — right after resolving its caller, in the exact
             // order this single, sequential commit loop wrote them. No re-read from disk, and
             // no risk of two records ever being observed out of order: this loop is the one and
-            // only place that decides "committed" order in the first place.
+            // only place that decides "durable" order in the first place.
             foreach (var pending in batch) {
                 pending.Completion.TrySetResult();
                 _committed.Writer.TryWrite(pending.Record);

@@ -193,14 +193,14 @@ public class WalWriterTests {
         }
 
         [Fact]
-        public async Task A_batch_write_failure_publishes_nothing_to_ReadCommittedAsync() {
+        public async Task A_batch_write_failure_publishes_nothing_to_ReadDurableAsync() {
             var path = Path.GetTempFileName();
             try {
                 var stream = new ThrowingFlushFileStream(path);
                 var writer = new WalWriter(stream);
                 var committed = new List<ulong>();
                 var reading = Task.Run(async () => {
-                    await foreach (var record in writer.ReadCommittedAsync())
+                    await foreach (var record in writer.ReadDurableAsync())
                         committed.Add(record.LogicalOffset);
                 });
 
@@ -234,7 +234,7 @@ public class WalWriterTests {
         }
     }
 
-    public class ReadCommittedAsync {
+    public class ReadDurableAsync {
         [Fact]
         public async Task Yields_each_record_in_commit_order() {
             var path = Path.GetTempFileName();
@@ -242,7 +242,7 @@ public class WalWriterTests {
                 var writer = await WalWriter.OpenAsync(path);
                 var committed = new List<ulong>();
                 var reading = Task.Run(async () => {
-                    await foreach (var record in writer.ReadCommittedAsync())
+                    await foreach (var record in writer.ReadDurableAsync())
                         committed.Add(record.LogicalOffset);
                 });
 
@@ -250,7 +250,7 @@ public class WalWriterTests {
                 await writer.AppendAsync(SampleRecord(2));
                 await writer.AppendAsync(SampleRecord(3));
 
-                await writer.DisposeAsync(); // completes the commit loop, and so ReadCommittedAsync's enumeration
+                await writer.DisposeAsync(); // completes the commit loop, and so ReadDurableAsync's enumeration
                 await reading;
 
                 committed.Should().Equal(1ul, 2ul, 3ul);
@@ -267,7 +267,7 @@ public class WalWriterTests {
                 var writer = new WalWriter(stream);
                 var committed = new List<ulong>();
                 var reading = Task.Run(async () => {
-                    await foreach (var record in writer.ReadCommittedAsync())
+                    await foreach (var record in writer.ReadDurableAsync())
                         committed.Add(record.LogicalOffset);
                 });
 
