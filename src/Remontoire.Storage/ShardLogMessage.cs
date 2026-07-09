@@ -10,14 +10,10 @@ namespace Remontoire.Storage;
 abstract record ShardLogMessage;
 
 /// <summary>
-/// Posted by <see cref="ShardLog.AppendAsync"/>; <paramref name="Completion"/> is completed once
-/// the actor has assigned an offset and handed the record to <c>WalWriter</c>.
-/// </summary>
-sealed record AppendCommand(AppendRequest Request, TaskCompletionSource<ulong> Completion) : ShardLogMessage;
-
-/// <summary>
-/// Posted by the tailing loop for every record <c>WalWriter</c> just committed — the actor's
-/// only way of learning a record is durable and ready to apply to the MemTable.
+/// Posted by the tailing loop for every record the injected committed-source yields — the
+/// actor's only way of learning a record is committed and ready to apply to the MemTable. Also
+/// reachable directly via <see cref="ShardLog.TryPost"/>, for tests that inject records without
+/// a real committed-source.
 /// </summary>
 sealed record WalRecordCommitted(WalRecord Record) : ShardLogMessage;
 

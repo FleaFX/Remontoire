@@ -15,8 +15,17 @@ public sealed partial class ShardLog {
         if (committed.Record.RecordType != WalRecordType.Append)
             return;
 
+        // The committed-source may replay its full history from the start on every restart —
+        // this layer doesn't know or care why, only that it must tolerate it. Anything at or
+        // below the watermark already reached a segment or the MemTable in an earlier session;
+        // re-applying it here would flush it a second time. Filtering purely by LogicalOffset
+        // keeps this a plain, idempotent skip.
+        if (committed.Record.LogicalOffset < _nextOffsetToApply)
+            return;
+
         var before = _segments;
         var (memTable, sstSegments) = await ApplyAndMaybeFlushAsync(_directory, new ShardState(_memTable, before), committed.Record, _flushThresholdBytes, CancellationToken.None);
+        _nextOffsetToApply = committed.Record.LogicalOffset + 1;
 
         // Publish the NEW source of truth before retracting the old one — otherwise a
         // concurrent TryGet/ReadFromAsync could observe neither the (already-emptied) old

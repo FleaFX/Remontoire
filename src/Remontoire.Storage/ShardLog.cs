@@ -11,7 +11,8 @@ namespace Remontoire.Storage;
 public sealed partial class ShardLog : IAsyncDisposable {
     readonly string _directory;
     readonly long _flushThresholdBytes;
-    readonly WalWriter _walWriter;
+    readonly Func<CancellationToken, IAsyncEnumerable<WalRecord>> _committedSource;
+    readonly CancellationTokenSource _tailingCts = new();
     readonly Task _tailingLoop;
     readonly Task _actorLoop;
     readonly Channel<ShardLogMessage> _mailbox = Channel.CreateUnbounded<ShardLogMessage>(new UnboundedChannelOptions { SingleReader = true });
@@ -20,15 +21,17 @@ public sealed partial class ShardLog : IAsyncDisposable {
 
     MemTable _memTable;
     SstSegment[] _segments;
-    ulong _nextLogicalOffset;
+    ulong _nextOffsetToApply;
     TaskCompletionSource<CompactionPlan>? _pendingPlanRequest;
 
-    internal ShardLog(string directory, WalWriter walWriter, MemTable memTable, SstSegment[] segments, ulong nextLogicalOffset, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null) {
+    internal ShardLog(
+        string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource, MemTable memTable, SstSegment[] segments,
+        ulong nextOffsetToApply, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null) {
         _directory = directory;
-        _walWriter = walWriter;
+        _committedSource = committedSource;
         _memTable = memTable;
         _segments = segments;
-        _nextLogicalOffset = nextLogicalOffset;
+        _nextOffsetToApply = nextOffsetToApply;
         _flushThresholdBytes = flushThresholdBytes;
         _compactionPolicy = compactionPolicy;
 
@@ -38,46 +41,44 @@ public sealed partial class ShardLog : IAsyncDisposable {
     }
 
     /// <summary>
-    /// Shuts down in the order that guarantees every already-accepted <see cref="AppendAsync"/>
-    /// call is durably written before anything else stops.
+    /// Posts <paramref name="message"/> directly to the actor's mailbox — lets tests inject a
+    /// committed record (or a compaction message) without a real committed-source.
+    /// </summary>
+    internal bool TryPost(ShardLogMessage message) => _mailbox.Writer.TryWrite(message);
+
+    /// <summary>
+    /// Shuts down in the order that guarantees every message already sitting in the mailbox is
+    /// applied before anything stops. The committed-source itself is owned by its caller — this
+    /// never disposes or completes it, only stops reading from it.
     /// </summary>
     public async ValueTask DisposeAsync() {
-        // Drain the mailbox FIRST, while WalWriter is still alive — every already-accepted
-        // AppendCommand must reach HandleAppend (which calls into WalWriter) before WalWriter
-        // stops accepting appends. Disposing WalWriter first would risk an AppendCommand still
-        // sitting in the mailbox trying to write to an already-disposed WalWriter.
+        // Stop pulling new records from the committed-source first — nothing new can reach the
+        // mailbox after this, so completing it below can't race with the tailing loop.
+        await _tailingCts.CancelAsync();
+        await _tailingLoop;
+        _tailingCts.Dispose();
+
         _mailbox.Writer.TryComplete();
         await _actorLoop;
 
         // The compaction worker stops on its own once the mailbox closes (its next TryWrite
         // fails) or its outstanding plan request gets cancelled (RunActorAsync's cleanup below)
-        // — same pattern as the tailing loop, no separate cancellation token needed.
+        // — no separate cancellation token needed.
         if (_compactionWorkerLoop is not null)
             await _compactionWorkerLoop;
-
-        // NOW safe: every append the actor accepted has already reached WalWriter. Disposing it
-        // drains everything to durable completion, then completes its ReadDurableAsync
-        // stream, which lets the tailing loop end naturally below. Any final WalRecordCommitted
-        // messages the tailing loop tries to post after this point are silently dropped (mailbox
-        // already closed) — harmless, the next OpenAsync's recovery picks them up from the WAL.
-        await _walWriter.DisposeAsync();
-        await _tailingLoop;
 
         foreach (var segment in Volatile.Read(ref _segments))
             segment.Dispose();
     }
 
-    // One shared mailbox for everything that mutates this shard's live state: append requests
-    // (from external callers) and newly-committed WAL records (from the tailing loop, which
-    // only ever posts — it never touches _memTable/_segments itself). Both are just messages,
-    // processed one at a time in strict arrival order, so the two can never interleave in a way
-    // that corrupts ordering or applies things out of sequence.
+    // One shared mailbox for everything that mutates this shard's live state: newly-committed
+    // records (from the tailing loop, which only ever posts — it never touches
+    // _memTable/_segments itself) and compaction messages. All are just messages, processed one
+    // at a time in strict arrival order, so none can ever interleave in a way that corrupts
+    // ordering or applies things out of sequence.
     async Task RunActorAsync() {
         await foreach (var message in _mailbox.Reader.ReadAllAsync()) {
             switch (message) {
-                case AppendCommand append:
-                    HandleAppend(append);
-                    break;
                 case WalRecordCommitted committed:
                     await HandleWalRecordCommittedAsync(committed);
                     break;

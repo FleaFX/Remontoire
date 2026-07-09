@@ -226,6 +226,51 @@ public class RaftReplicaTests {
             result.LogicalOffset.Should().Be(0);
             replica.CommitIndex.Should().BeGreaterThanOrEqualTo(result.RaftIndex);
         }
+
+        [Fact]
+        public async Task Throws_when_the_partition_key_exceeds_65535_bytes() {
+            var (replica, _) = await StartAsync("node-1");
+            var request = new AppendRequest(new byte[65536], [], "payload"u8.ToArray());
+
+            var act = () => replica.ProposeAsync(request).AsTask();
+
+            await act.Should().ThrowAsync<ArgumentException>();
+        }
+
+        [Fact]
+        public async Task Throws_when_a_header_key_exceeds_65535_bytes() {
+            var (replica, _) = await StartAsync("node-1");
+            var request = new AppendRequest("key"u8.ToArray(), [new Header(new byte[65536], "v"u8.ToArray())], "payload"u8.ToArray());
+
+            var act = () => replica.ProposeAsync(request).AsTask();
+
+            await act.Should().ThrowAsync<ArgumentException>();
+        }
+
+        [Fact]
+        public async Task Throws_when_there_are_more_than_65535_headers() {
+            var (replica, _) = await StartAsync("node-1");
+            var headers = Enumerable.Range(0, 65536).Select(_ => new Header("k"u8.ToArray(), "v"u8.ToArray())).ToArray();
+            var request = new AppendRequest("key"u8.ToArray(), headers, "payload"u8.ToArray());
+
+            var act = () => replica.ProposeAsync(request).AsTask();
+
+            await act.Should().ThrowAsync<ArgumentException>();
+        }
+
+        [Fact]
+        public async Task Does_not_post_to_the_actor_when_validation_fails() {
+            var (replica, _) = await StartAsync("node-1");
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader
+            await replica.DrainAsync();
+            var invalid = new AppendRequest(new byte[65536], [], "payload"u8.ToArray());
+
+            var act = () => replica.ProposeAsync(invalid).AsTask();
+            await act.Should().ThrowAsync<ArgumentException>();
+
+            var result = await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
+            result.LogicalOffset.Should().Be(0);
+        }
     }
 
     public class StaleResponses {

@@ -32,9 +32,8 @@ public sealed class WalWriter : IAsyncDisposable {
     /// Yields each record in the exact order it was durably fsynced — the same in-memory
     /// <see cref="WalRecord"/> just written, handed off directly, never re-read from disk. Only
     /// one caller may enumerate this at a time. Named "durable", not "committed": a durable
-    /// record can still be truncated away (<see cref="TruncateFromAsync"/>) before it ever
-    /// reaches quorum — <c>RaftReplica.ReadCommittedAsync</c> is the stream that actually means
-    /// "committed".
+    /// record can still be truncated away (<see cref="TruncateFromAsync"/>) before a caller's
+    /// own notion of "committed" — whatever that means to them — is ever satisfied.
     /// </summary>
     public IAsyncEnumerable<WalRecord> ReadDurableAsync(CancellationToken cancellationToken = default) =>
         _committed.Reader.ReadAllAsync(cancellationToken);
