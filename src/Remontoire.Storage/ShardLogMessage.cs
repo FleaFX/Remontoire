@@ -30,3 +30,17 @@ sealed record CompactionCompleted(CompactionPlan Plan, string? MergedPath, Excep
 /// (see <c>ShardLog.TryFulfillPendingPlanRequest</c>) until a later flush makes one possible.
 /// </summary>
 sealed record CompactionPlanRequest(TaskCompletionSource<CompactionPlan> Response) : ShardLogMessage;
+
+/// <summary>
+/// Posted by <see cref="ShardLog.PrepareSnapshotAsync"/>. <paramref name="Completion"/> resolves
+/// once every record below <paramref name="UpToLogicalOffsetExclusive"/> is durable in a
+/// segment — immediately if the actor has already caught up that far, or later, once it does.
+/// </summary>
+sealed record PrepareSnapshotRequested(ulong UpToLogicalOffsetExclusive, TaskCompletionSource<IReadOnlyList<string>> Completion) : ShardLogMessage;
+
+/// <summary>
+/// Posted by <see cref="ShardLog.InstallSnapshotAsync"/> — replaces the actor's own segments and
+/// MemTable wholesale with a snapshot received from elsewhere (typically a Raft leader this
+/// replica had fallen too far behind to catch up to via ordinary replication).
+/// </summary>
+sealed record SnapshotInstalled(IReadOnlyList<string> SegmentPaths, ulong NextOffsetToApply, TaskCompletionSource Completion) : ShardLogMessage;

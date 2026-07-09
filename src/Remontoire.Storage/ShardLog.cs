@@ -23,6 +23,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
     SstSegment[] _segments;
     ulong _nextOffsetToApply;
     TaskCompletionSource<CompactionPlan>? _pendingPlanRequest;
+    readonly List<PrepareSnapshotRequested> _pendingSnapshotRequests = [];
 
     internal ShardLog(
         string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource, MemTable memTable, SstSegment[] segments,
@@ -88,11 +89,18 @@ public sealed partial class ShardLog : IAsyncDisposable {
                 case CompactionCompleted completed:
                     HandleCompactionCompleted(completed);
                     break;
+                case PrepareSnapshotRequested prepareSnapshotRequested:
+                    await HandlePrepareSnapshotRequestedAsync(prepareSnapshotRequested);
+                    break;
+                case SnapshotInstalled snapshotInstalled:
+                    await HandleSnapshotInstalledAsync(snapshotInstalled);
+                    break;
             }
         }
 
-        // No outstanding plan request may block the compaction worker forever when ShardLog
-        // shuts down while there happened to be nothing left to compact.
+        // No outstanding request may block a caller forever when ShardLog shuts down mid-flight.
         _pendingPlanRequest?.TrySetCanceled();
+        foreach (var pending in _pendingSnapshotRequests)
+            pending.Completion.TrySetCanceled();
     }
 }

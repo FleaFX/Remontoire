@@ -303,6 +303,118 @@ public class ShardLogTests {
         }
     }
 
+    public class PrepareSnapshotAsync {
+        [Fact]
+        public async Task Flushes_and_returns_the_segment_list_once_already_caught_up() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                await WaitForVisibleAsync(log, 0);
+
+                var segmentPaths = await log.PrepareSnapshotAsync(upToLogicalOffsetExclusive: 1);
+
+                segmentPaths.Should().ContainSingle();
+                Directory.GetFiles(directory, "*.sst").Should().HaveCount(1);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Does_not_flush_an_empty_MemTable() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+
+                var segmentPaths = await log.PrepareSnapshotAsync(upToLogicalOffsetExclusive: 0);
+
+                segmentPaths.Should().BeEmpty();
+                Directory.GetFiles(directory, "*.sst").Should().BeEmpty();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Waits_until_the_actor_catches_up_to_the_requested_offset() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+
+                var prepareTask = log.PrepareSnapshotAsync(upToLogicalOffsetExclusive: 1);
+                await Task.Delay(20);
+                prepareTask.IsCompleted.Should().BeFalse("offset 0 hasn't been applied yet");
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+
+                var segmentPaths = await prepareTask.WaitAsync(TimeSpan.FromSeconds(5));
+                segmentPaths.Should().ContainSingle();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    public class InstallSnapshotAsync {
+        [Fact]
+        public async Task Replaces_segments_and_MemTable_wholesale() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                log.TryPost(new WalRecordCommitted(SampleRecord(0, "stale-entry")));
+                await WaitForVisibleAsync(log, 0);
+
+                var snapshotDirectory = CreateTempDirectory();
+                try {
+                    var snapshotPath = Path.Combine(snapshotDirectory, $"segment-{100:D20}.sst");
+                    await SstWriter.WriteAsync(snapshotPath, [
+                        new LogEntry(100, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("from-snapshot")),
+                    ]);
+
+                    await log.InstallSnapshotAsync([snapshotPath], nextOffsetToApply: 101);
+
+                    log.TryGet(0, out _).Should().BeFalse("the stale entry must be gone");
+                    log.TryGet(100, out var handle).Should().BeTrue();
+                    using (handle)
+                        Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be("from-snapshot");
+                } finally {
+                    Directory.Delete(snapshotDirectory, recursive: true);
+                }
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task A_record_redelivered_below_the_new_offset_is_skipped() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+
+                var snapshotDirectory = CreateTempDirectory();
+                try {
+                    var snapshotPath = Path.Combine(snapshotDirectory, $"segment-{100:D20}.sst");
+                    await SstWriter.WriteAsync(snapshotPath, [
+                        new LogEntry(100, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("from-snapshot")),
+                    ]);
+                    await log.InstallSnapshotAsync([snapshotPath], nextOffsetToApply: 101);
+
+                    // A redelivered pre-snapshot record (e.g. a slow committed-source catching up
+                    // on old history) must not be re-applied on top of the snapshot's own state.
+                    log.TryPost(new WalRecordCommitted(SampleRecord(0, "stale-entry")));
+                    await Task.Delay(20);
+
+                    log.TryGet(0, out _).Should().BeFalse();
+                } finally {
+                    Directory.Delete(snapshotDirectory, recursive: true);
+                }
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     public class Concurrency {
         [Fact]
         public async Task An_entry_never_becomes_invisible_again_once_visible_across_many_flushes() {

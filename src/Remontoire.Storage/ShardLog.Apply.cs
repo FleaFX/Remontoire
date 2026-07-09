@@ -38,6 +38,9 @@ public sealed partial class ShardLog {
         // valid plan — only worth checking when a flush actually grew the segment list.
         if (sstSegments.Length != before.Length)
             TryFulfillPendingPlanRequest();
+
+        // A pending PrepareSnapshotAsync call may have been waiting on exactly this offset.
+        await TryFulfillPendingSnapshotRequestsAsync();
     }
 
     /// <summary>
