@@ -2,23 +2,20 @@ namespace Remontoire.Storage;
 
 public sealed partial class ShardLog {
     /// <summary>
-    /// Opens (creating if necessary) the shard log in <paramref name="directory"/>. Recovery
-    /// replays the WAL from the start, skipping whatever is already covered by existing SST
-    /// segments, and applies the rest to a fresh MemTable.
+    /// Opens (creating if necessary) the shard log in <paramref name="directory"/>, consuming
+    /// committed records from <paramref name="committedSource"/> from wherever it currently
+    /// stands. Recovery here is limited to loading existing SST segments; replaying the durable
+    /// log tail is the committed-source's own owner's responsibility, not <see cref="ShardLog"/>'s.
     /// </summary>
     public static async Task<ShardLog> OpenAsync(
-        string directory, long flushThresholdBytes = 64 * 1024 * 1024, CompactionPolicy? compactionPolicy = null, CancellationToken cancellationToken = default) {
+        string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource,
+        long flushThresholdBytes = 64 * 1024 * 1024, CompactionPolicy? compactionPolicy = null, CancellationToken cancellationToken = default) {
         RecoverInterruptedCompactions(directory);
 
         var segments = await LoadSegmentsAsync(directory, cancellationToken);
-        var flushedWatermark = segments.Length > 0 ? segments[^1].MaxOffset + 1 : 0UL;
+        var nextOffsetToApply = segments.Length > 0 ? segments[^1].MaxOffset + 1 : 0UL;
 
-        var walPath = EnsureWalFileExists(Path.Combine(directory, "wal.log"));
-        var (state, nextLogicalOffset) = await ReplayWalAsync(
-            directory, new WalReader(walPath), new ShardState(new MemTable(), segments), flushedWatermark, flushThresholdBytes, cancellationToken);
-
-        var walWriter = await WalWriter.OpenAsync(walPath, cancellationToken);
-        return new ShardLog(directory, walWriter, state.MemTable, state.Segments, nextLogicalOffset, flushThresholdBytes, compactionPolicy);
+        return new ShardLog(directory, committedSource, new MemTable(), segments, nextOffsetToApply, flushThresholdBytes, compactionPolicy);
     }
 
     // A crash between a compaction's "delete old inputs" and "rename to final name" steps
@@ -36,31 +33,5 @@ public sealed partial class ShardLog {
 
         segments.Sort((a, b) => a.MinOffset.CompareTo(b.MinOffset));
         return segments.ToArray();
-    }
-
-    static string EnsureWalFileExists(string walPath) {
-        if (!File.Exists(walPath))
-            File.Create(walPath).Dispose();
-        return walPath;
-    }
-
-    // Reads the WAL from byte 0, skipping anything already covered by an existing segment
-    // (LogicalOffset < flushedWatermark), applying the rest. This is a one-shot read — once
-    // ShardLog is live, new appends never round-trip back through the WAL file at all; they
-    // flow directly from WalWriter's own in-memory ReadCommittedAsync stream instead.
-    static async Task<(ShardState State, ulong NextLogicalOffset)> ReplayWalAsync(
-        string directory, WalReader walReader, ShardState state, ulong flushedWatermark, long flushThresholdBytes, CancellationToken cancellationToken) {
-        var nextLogicalOffset = flushedWatermark;
-
-        await foreach (var result in walReader.ReadFromAsync(0, cancellationToken)) {
-            using (result) {
-                if (result.Record.RecordType == WalRecordType.Append && result.Record.LogicalOffset >= flushedWatermark) {
-                    state = await ApplyAndMaybeFlushAsync(directory, state, result.Record, flushThresholdBytes, cancellationToken);
-                    nextLogicalOffset = result.Record.LogicalOffset + 1;
-                }
-            }
-        }
-
-        return (state, nextLogicalOffset);
     }
 }

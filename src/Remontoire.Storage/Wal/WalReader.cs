@@ -7,9 +7,10 @@ namespace Remontoire.Storage;
 /// Reads <see cref="WalRecord"/>s sequentially from a WAL file. Used for recovery (reading
 /// from the start, or from a known-good position) — the only other consumer of WAL content,
 /// live-apply, no longer reads the WAL back at all; it consumes <see cref="WalWriter"/>'s own
-/// in-memory <see cref="WalWriter.ReadCommittedAsync"/> stream instead.
+/// in-memory <see cref="WalWriter.ReadDurableAsync"/> stream instead.
 /// </summary>
-sealed class WalReader(string path) {
+/// <param name="path">Path to the WAL file to read from.</param>
+public sealed class WalReader(string path) {
     /// <summary>
     /// Reads records starting at byte position <paramref name="startPosition"/>, up to
     /// whatever is currently on disk. Stops — without throwing — at the first incomplete or

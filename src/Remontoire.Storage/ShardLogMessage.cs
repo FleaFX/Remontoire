@@ -10,14 +10,10 @@ namespace Remontoire.Storage;
 abstract record ShardLogMessage;
 
 /// <summary>
-/// Posted by <see cref="ShardLog.AppendAsync"/>; <paramref name="Completion"/> is completed once
-/// the actor has assigned an offset and handed the record to <c>WalWriter</c>.
-/// </summary>
-sealed record AppendCommand(AppendRequest Request, TaskCompletionSource<ulong> Completion) : ShardLogMessage;
-
-/// <summary>
-/// Posted by the tailing loop for every record <c>WalWriter</c> just committed — the actor's
-/// only way of learning a record is durable and ready to apply to the MemTable.
+/// Posted by the tailing loop for every record the injected committed-source yields — the
+/// actor's only way of learning a record is committed and ready to apply to the MemTable. Also
+/// reachable directly via <see cref="ShardLog.TryPost"/>, for tests that inject records without
+/// a real committed-source.
 /// </summary>
 sealed record WalRecordCommitted(WalRecord Record) : ShardLogMessage;
 
@@ -34,3 +30,17 @@ sealed record CompactionCompleted(CompactionPlan Plan, string? MergedPath, Excep
 /// (see <c>ShardLog.TryFulfillPendingPlanRequest</c>) until a later flush makes one possible.
 /// </summary>
 sealed record CompactionPlanRequest(TaskCompletionSource<CompactionPlan> Response) : ShardLogMessage;
+
+/// <summary>
+/// Posted by <see cref="ShardLog.PrepareSnapshotAsync"/>. <paramref name="Completion"/> resolves
+/// once every record below <paramref name="UpToLogicalOffsetExclusive"/> is durable in a
+/// segment — immediately if the actor has already caught up that far, or later, once it does.
+/// </summary>
+sealed record PrepareSnapshotRequested(ulong UpToLogicalOffsetExclusive, TaskCompletionSource<IReadOnlyList<string>> Completion) : ShardLogMessage;
+
+/// <summary>
+/// Posted by <see cref="ShardLog.InstallSnapshotAsync"/> — replaces the actor's own segments and
+/// MemTable wholesale with a snapshot received from elsewhere (typically a Raft leader this
+/// replica had fallen too far behind to catch up to via ordinary replication).
+/// </summary>
+sealed record SnapshotInstalled(IReadOnlyList<string> SegmentPaths, ulong NextOffsetToApply, TaskCompletionSource Completion) : ShardLogMessage;

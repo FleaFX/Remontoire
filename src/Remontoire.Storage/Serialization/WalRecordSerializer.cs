@@ -6,7 +6,7 @@ namespace Remontoire.Storage.Serialization;
 /// <summary>
 /// Converts <see cref="WalRecord"/>s to and from their on-disk binary representation.
 /// </summary>
-static class WalRecordSerializer {
+public static class WalRecordSerializer {
     const byte CurrentVersion = 0x01;
     const int PrefixLength = 5; // Version(1) + RecordLength(4)
 

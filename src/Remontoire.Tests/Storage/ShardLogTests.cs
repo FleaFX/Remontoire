@@ -1,133 +1,44 @@
+using System.Runtime.CompilerServices;
 using System.Text;
 using FluentAssertions;
 
 namespace Remontoire.Storage;
 
 public class ShardLogTests {
-    public class AppendAsync {
-        [Fact]
-        public async Task Assigns_sequential_offsets_starting_at_zero() {
-            var directory = CreateTempDirectory();
-            try {
-                await using var log = await ShardLog.OpenAsync(directory);
-
-                (await log.AppendAsync(SampleRequest())).Should().Be(0);
-                (await log.AppendAsync(SampleRequest())).Should().Be(1);
-                (await log.AppendAsync(SampleRequest())).Should().Be(2);
-            } finally {
-                Directory.Delete(directory, recursive: true);
-            }
-        }
-
-        [Fact]
-        public async Task Assigned_offsets_stay_sequential_under_concurrent_callers() {
-            var directory = CreateTempDirectory();
-            try {
-                await using var log = await ShardLog.OpenAsync(directory);
-
-                var offsets = await Task.WhenAll(Enumerable.Range(0, 50).Select(_ => log.AppendAsync(SampleRequest()).AsTask()));
-
-                offsets.OrderBy(o => o).Should().Equal(Enumerable.Range(0, 50).Select(i => (ulong)i));
-            } finally {
-                Directory.Delete(directory, recursive: true);
-            }
-        }
-
-        [Fact]
-        public async Task Throws_when_the_partition_key_exceeds_65535_bytes() {
-            var directory = CreateTempDirectory();
-            try {
-                await using var log = await ShardLog.OpenAsync(directory);
-                var request = new AppendRequest(new byte[65536], [], "hello"u8.ToArray());
-
-                var act = async () => await log.AppendAsync(request);
-
-                await act.Should().ThrowAsync<ArgumentException>();
-            } finally {
-                Directory.Delete(directory, recursive: true);
-            }
-        }
-
-        [Fact]
-        public async Task Throws_when_a_header_key_exceeds_65535_bytes() {
-            var directory = CreateTempDirectory();
-            try {
-                await using var log = await ShardLog.OpenAsync(directory);
-                var request = new AppendRequest(
-                    Encoding.UTF8.GetBytes("order-42"), [new Header(new byte[65536], "v"u8.ToArray())], "hello"u8.ToArray());
-
-                var act = async () => await log.AppendAsync(request);
-
-                await act.Should().ThrowAsync<ArgumentException>();
-            } finally {
-                Directory.Delete(directory, recursive: true);
-            }
-        }
-
-        [Fact]
-        public async Task Throws_when_there_are_more_than_65535_headers() {
-            var directory = CreateTempDirectory();
-            try {
-                await using var log = await ShardLog.OpenAsync(directory);
-                var headers = Enumerable.Range(0, 65536).Select(_ => new Header("k"u8.ToArray(), "v"u8.ToArray())).ToArray();
-                var request = new AppendRequest(Encoding.UTF8.GetBytes("order-42"), headers, "hello"u8.ToArray());
-
-                var act = async () => await log.AppendAsync(request);
-
-                await act.Should().ThrowAsync<ArgumentException>();
-            } finally {
-                Directory.Delete(directory, recursive: true);
-            }
-        }
-
-        [Fact]
-        public async Task Does_not_assign_or_consume_an_offset_when_validation_fails() {
-            var directory = CreateTempDirectory();
-            try {
-                await using var log = await ShardLog.OpenAsync(directory);
-                var invalid = new AppendRequest(new byte[65536], [], "hello"u8.ToArray());
-
-                var act = async () => await log.AppendAsync(invalid);
-                await act.Should().ThrowAsync<ArgumentException>();
-
-                (await log.AppendAsync(SampleRequest())).Should().Be(0);
-            } finally {
-                Directory.Delete(directory, recursive: true);
-            }
-        }
-    }
-
     public class DisposeAsync {
+        // ShardLog no longer owns any durable storage of its own (that moved to WalRaftLog) —
+        // a record only survives a restart once it reached a segment. What DisposeAsync itself
+        // must still guarantee is that every message already sitting in the mailbox before it's
+        // called gets applied before it returns, rather than being abandoned mid-flight.
+
         [Fact]
-        public async Task Completes_an_already_accepted_append_instead_of_abandoning_it() {
+        public async Task Applies_a_record_already_posted_before_dispose_is_called() {
             var directory = CreateTempDirectory();
             try {
-                var log = await ShardLog.OpenAsync(directory);
-                var appendTask = log.AppendAsync(SampleRequest()).AsTask();
+                var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
 
                 await log.DisposeAsync();
 
-                (await appendTask).Should().Be(0);
+                log.TryGet(0, out var handle).Should().BeTrue();
+                handle.Dispose();
             } finally {
                 Directory.Delete(directory, recursive: true);
             }
         }
 
         [Fact]
-        public async Task Every_accepted_append_survives_a_dispose_that_starts_mid_flight() {
+        public async Task Every_posted_record_survives_a_dispose_that_starts_mid_flight() {
             var directory = CreateTempDirectory();
             try {
-                var log = await ShardLog.OpenAsync(directory);
-                var appendTasks = Enumerable.Range(0, 50).Select(_ => log.AppendAsync(SampleRequest()).AsTask()).ToArray();
+                var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                for (ulong i = 0; i < 50; i++)
+                    log.TryPost(new WalRecordCommitted(SampleRecord(i)));
 
                 await log.DisposeAsync();
-                var offsets = await Task.WhenAll(appendTasks);
 
-                offsets.OrderBy(o => o).Should().Equal(Enumerable.Range(0, 50).Select(i => (ulong)i));
-
-                await using var reopened = await ShardLog.OpenAsync(directory);
-                foreach (var offset in offsets) {
-                    reopened.TryGet(offset, out var handle).Should().BeTrue();
+                for (ulong i = 0; i < 50; i++) {
+                    log.TryGet(i, out var handle).Should().BeTrue();
                     handle.Dispose();
                 }
             } finally {
@@ -141,7 +52,7 @@ public class ShardLogTests {
         public async Task Returns_false_for_an_offset_never_appended() {
             var directory = CreateTempDirectory();
             try {
-                await using var log = await ShardLog.OpenAsync(directory);
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
 
                 log.TryGet(0, out _).Should().BeFalse();
             } finally {
@@ -153,10 +64,10 @@ public class ShardLogTests {
         public async Task Eventually_finds_an_appended_entry() {
             var directory = CreateTempDirectory();
             try {
-                await using var log = await ShardLog.OpenAsync(directory);
-                var offset = await log.AppendAsync(SampleRequest(payload: "hello world"));
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                log.TryPost(new WalRecordCommitted(SampleRecord(0, payload: "hello world")));
 
-                var entry = await WaitForVisibleAsync(log, offset);
+                var entry = await WaitForVisibleAsync(log, 0);
 
                 Encoding.UTF8.GetString(entry.Payload.Span).Should().Be("hello world");
             } finally {
@@ -170,9 +81,9 @@ public class ShardLogTests {
         public async Task Yields_appended_entries_in_order() {
             var directory = CreateTempDirectory();
             try {
-                await using var log = await ShardLog.OpenAsync(directory);
-                for (var i = 0; i < 5; i++)
-                    await log.AppendAsync(SampleRequest());
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                for (ulong i = 0; i < 5; i++)
+                    log.TryPost(new WalRecordCommitted(SampleRecord(i)));
 
                 await WaitForVisibleAsync(log, 4);
 
@@ -200,8 +111,7 @@ public class ShardLogTests {
                 var memTable = new MemTable();
                 memTable.Append(new LogEntry(1, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("entry-1")));
 
-                var walWriter = await WalWriter.OpenAsync(Path.Combine(directory, "wal.log"));
-                await using var log = new ShardLog(directory, walWriter, memTable, [segmentA], nextLogicalOffset: 2, flushThresholdBytes: 1);
+                await using var log = new ShardLog(directory, EmptyCommittedSource, memTable, [segmentA], nextOffsetToApply: 2, flushThresholdBytes: 1);
 
                 await using var enumerator = log.ReadFromAsync(0).GetAsyncEnumerator();
 
@@ -214,7 +124,7 @@ public class ShardLogTests {
 
                 // Forces a real flush while the enumeration above is paused — moves entry 1 out
                 // of the MemTable and into a new segment this enumeration never captured.
-                await log.AppendAsync(SampleRequest(payload: "entry-2"));
+                log.TryPost(new WalRecordCommitted(SampleRecord(2, payload: "entry-2")));
                 await WaitForSegmentCountAsync(directory, 2);
 
                 var remaining = new List<ulong>();
@@ -241,9 +151,9 @@ public class ShardLogTests {
         public async Task Creates_a_segment_per_entry_when_the_threshold_is_tiny_and_all_entries_stay_readable() {
             var directory = CreateTempDirectory();
             try {
-                await using (var log = await ShardLog.OpenAsync(directory, flushThresholdBytes: 1)) {
-                    for (var i = 0; i < 3; i++)
-                        await log.AppendAsync(SampleRequest());
+                await using (var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1)) {
+                    for (ulong i = 0; i < 3; i++)
+                        log.TryPost(new WalRecordCommitted(SampleRecord(i)));
 
                     await WaitForVisibleAsync(log, 2);
 
@@ -267,11 +177,11 @@ public class ShardLogTests {
             var directory = CreateTempDirectory();
             try {
                 await using var log = await ShardLog.OpenAsync(
-                    directory, flushThresholdBytes: 1, compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null));
+                    directory, EmptyCommittedSource, flushThresholdBytes: 1, compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null));
 
                 const int count = 5;
-                for (var i = 0; i < count; i++)
-                    await log.AppendAsync(SampleRequest(payload: $"entry-{i}"));
+                for (ulong i = 0; i < count; i++)
+                    log.TryPost(new WalRecordCommitted(SampleRecord(i, payload: $"entry-{i}")));
 
                 await WaitForVisibleAsync(log, count - 1);
                 await WaitForSegmentCountAsync(directory, 1);
@@ -290,8 +200,8 @@ public class ShardLogTests {
         public async Task Disposing_with_a_compaction_policy_set_but_nothing_to_compact_does_not_hang() {
             var directory = CreateTempDirectory();
             try {
-                var log = await ShardLog.OpenAsync(directory, compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null));
-                await log.AppendAsync(SampleRequest());
+                var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null));
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
 
                 await log.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
             } finally {
@@ -302,22 +212,22 @@ public class ShardLogTests {
 
     public class Recovery {
         [Fact]
-        public async Task Restarting_replays_identical_data_from_the_WAL_tail() {
+        public async Task Restarting_after_a_flush_still_finds_segment_backed_entries() {
             var directory = CreateTempDirectory();
             try {
-                await using (var log = await ShardLog.OpenAsync(directory)) {
-                    for (var i = 0; i < 5; i++)
-                        await log.AppendAsync(SampleRequest(payload: $"entry-{i}"));
+                await using (var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1)) {
+                    for (ulong i = 0; i < 3; i++)
+                        log.TryPost(new WalRecordCommitted(SampleRecord(i, payload: $"entry-{i}")));
+
+                    await WaitForVisibleAsync(log, 2);
                 }
 
-                await using var reopened = await ShardLog.OpenAsync(directory);
+                await using var reopened = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1);
 
-                for (ulong offset = 0; offset < 5; offset++) {
+                for (ulong offset = 0; offset < 3; offset++) {
                     reopened.TryGet(offset, out var handle).Should().BeTrue();
-                    using (handle) {
-                        handle.Entry.LogicalOffset.Should().Be(offset);
+                    using (handle)
                         Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be($"entry-{offset}");
-                    }
                 }
             } finally {
                 Directory.Delete(directory, recursive: true);
@@ -325,26 +235,35 @@ public class ShardLogTests {
         }
 
         [Fact]
-        public async Task Restarting_after_a_flush_still_finds_segment_backed_entries() {
+        public async Task Restarting_skips_records_the_committed_source_redelivers_that_are_already_flushed() {
             var directory = CreateTempDirectory();
             try {
-                await using (var log = await ShardLog.OpenAsync(directory, flushThresholdBytes: 1)) {
-                    for (var i = 0; i < 3; i++)
-                        await log.AppendAsync(SampleRequest(payload: $"entry-{i}"));
+                await using (var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1)) {
+                    for (ulong i = 0; i < 3; i++)
+                        log.TryPost(new WalRecordCommitted(SampleRecord(i, payload: $"entry-{i}")));
 
                     await WaitForVisibleAsync(log, 2);
                 }
 
-                await using var reopened = await ShardLog.OpenAsync(directory, flushThresholdBytes: 1);
+                Directory.GetFiles(directory, "*.sst").Should().HaveCount(3);
 
-                for (ulong offset = 0; offset < 3; offset++) {
-                    reopened.TryGet(offset, out var handle).Should().BeTrue();
-                    using (handle)
-                        Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be($"entry-{offset}");
-                }
+                // Simulates a restart where the committed-source (RaftReplica.ReadCommittedAsync)
+                // replays its full history from the start, including offsets this ShardLog
+                // already flushed in the previous session, followed by one genuinely new record.
+                var redelivered = FixedCommittedSource(SampleRecord(0, "entry-0"), SampleRecord(1, "entry-1"), SampleRecord(2, "entry-2"), SampleRecord(3, "entry-3"));
+                await using var reopened = await ShardLog.OpenAsync(directory, redelivered, flushThresholdBytes: 1);
 
-                // appending after reopening must continue from the correct next offset, not restart at 0
-                (await reopened.AppendAsync(SampleRequest())).Should().Be(3);
+                await WaitForVisibleAsync(reopened, 3);
+
+                // Exactly one new segment — the redelivered offsets 0-2 must be skipped, not
+                // re-flushed into duplicate segments. Polls rather than asserting immediately:
+                // TryGet observing the new segment (Volatile.Write) and Directory.GetFiles
+                // observing its renamed-from-.tmp file on disk are two independent signals: one
+                // in-memory, one filesystem-level. Nothing here guarantees the second is
+                // observable at the exact instant the first is (SstWriter.WriteAsync's own
+                // create-temp-then-File.Move already runs before either becomes visible, but nothing
+                // orders "visible to this test's next syscall" against it more tightly than that).
+                await WaitForSegmentCountAsync(directory, 4);
             } finally {
                 Directory.Delete(directory, recursive: true);
             }
@@ -364,7 +283,7 @@ public class ShardLogTests {
                     new LogEntry(1, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("entry-1")),
                 ]);
 
-                await using var log = await ShardLog.OpenAsync(directory);
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
 
                 Directory.GetFiles(directory, "*.sst.merging").Should().BeEmpty();
                 Directory.GetFiles(directory, "*.sst").Should().ContainSingle();
@@ -375,43 +294,123 @@ public class ShardLogTests {
                         Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be($"entry-{offset}");
                 }
 
-                // appending after recovery must continue from offset 2, not restart at 0
-                (await log.AppendAsync(SampleRequest())).Should().Be(2);
+                // applying after recovery must continue from offset 2, not be filtered as stale
+                log.TryPost(new WalRecordCommitted(SampleRecord(2)));
+                await WaitForVisibleAsync(log, 2);
             } finally {
                 Directory.Delete(directory, recursive: true);
             }
         }
     }
 
-    public class FaultHandling {
+    public class PrepareSnapshotAsync {
         [Fact]
-        public async Task A_WAL_write_failure_faults_the_append_without_crashing_the_actor() {
+        public async Task Flushes_and_returns_the_segment_list_once_already_caught_up() {
             var directory = CreateTempDirectory();
             try {
-                var stream = new ThrowingFlushFileStream(Path.Combine(directory, "wal.log"));
-                var walWriter = new WalWriter(stream);
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                await WaitForVisibleAsync(log, 0);
 
-                await using var log = new ShardLog(directory, walWriter, new MemTable(), [], nextLogicalOffset: 0, flushThresholdBytes: 64 * 1024 * 1024);
+                var segmentPaths = await log.PrepareSnapshotAsync(upToLogicalOffsetExclusive: 1);
 
-                var act = async () => await log.AppendAsync(SampleRequest());
-                await act.Should().ThrowAsync<IOException>();
-
-                // the actor loop must still be alive afterward — a second append also fails
-                // cleanly (not hangs), proving one faulted append doesn't take the actor down
-                var act2 = async () => await log.AppendAsync(SampleRequest()).AsTask().WaitAsync(TimeSpan.FromSeconds(5));
-                await act2.Should().ThrowAsync<IOException>();
+                segmentPaths.Should().ContainSingle();
+                Directory.GetFiles(directory, "*.sst").Should().HaveCount(1);
             } finally {
                 Directory.Delete(directory, recursive: true);
             }
         }
 
-        sealed class ThrowingFlushFileStream(string path)
-            : FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, bufferSize: 0, useAsync: true) {
-            public override void Flush(bool flushToDisk) {
-                if (flushToDisk)
-                    throw new IOException("Simulated disk failure.");
+        [Fact]
+        public async Task Does_not_flush_an_empty_MemTable() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
 
-                base.Flush(flushToDisk);
+                var segmentPaths = await log.PrepareSnapshotAsync(upToLogicalOffsetExclusive: 0);
+
+                segmentPaths.Should().BeEmpty();
+                Directory.GetFiles(directory, "*.sst").Should().BeEmpty();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Waits_until_the_actor_catches_up_to_the_requested_offset() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+
+                var prepareTask = log.PrepareSnapshotAsync(upToLogicalOffsetExclusive: 1);
+                await Task.Delay(20);
+                prepareTask.IsCompleted.Should().BeFalse("offset 0 hasn't been applied yet");
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+
+                var segmentPaths = await prepareTask.WaitAsync(TimeSpan.FromSeconds(5));
+                segmentPaths.Should().ContainSingle();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    public class InstallSnapshotAsync {
+        [Fact]
+        public async Task Replaces_segments_and_MemTable_wholesale() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                log.TryPost(new WalRecordCommitted(SampleRecord(0, "stale-entry")));
+                await WaitForVisibleAsync(log, 0);
+
+                var snapshotDirectory = CreateTempDirectory();
+                try {
+                    var snapshotPath = Path.Combine(snapshotDirectory, $"segment-{100:D20}.sst");
+                    await SstWriter.WriteAsync(snapshotPath, [
+                        new LogEntry(100, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("from-snapshot")),
+                    ]);
+
+                    await log.InstallSnapshotAsync([snapshotPath], nextOffsetToApply: 101);
+
+                    log.TryGet(0, out _).Should().BeFalse("the stale entry must be gone");
+                    log.TryGet(100, out var handle).Should().BeTrue();
+                    using (handle)
+                        Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be("from-snapshot");
+                } finally {
+                    Directory.Delete(snapshotDirectory, recursive: true);
+                }
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task A_record_redelivered_below_the_new_offset_is_skipped() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+
+                var snapshotDirectory = CreateTempDirectory();
+                try {
+                    var snapshotPath = Path.Combine(snapshotDirectory, $"segment-{100:D20}.sst");
+                    await SstWriter.WriteAsync(snapshotPath, [
+                        new LogEntry(100, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes("from-snapshot")),
+                    ]);
+                    await log.InstallSnapshotAsync([snapshotPath], nextOffsetToApply: 101);
+
+                    // A redelivered pre-snapshot record (e.g. a slow committed-source catching up
+                    // on old history) must not be re-applied on top of the snapshot's own state.
+                    log.TryPost(new WalRecordCommitted(SampleRecord(0, "stale-entry")));
+                    await Task.Delay(20);
+
+                    log.TryGet(0, out _).Should().BeFalse();
+                } finally {
+                    Directory.Delete(snapshotDirectory, recursive: true);
+                }
+            } finally {
+                Directory.Delete(directory, recursive: true);
             }
         }
     }
@@ -424,12 +423,11 @@ public class ShardLogTests {
                 // A tiny threshold forces a flush after nearly every append, maximizing the
                 // chance of hitting the publish-order window (new segment published, THEN the
                 // old MemTable retracted) if that ordering were ever wrong.
-                await using var log = await ShardLog.OpenAsync(directory, flushThresholdBytes: 60);
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 60);
 
                 const int count = 100;
-                var offsets = new ulong[count];
-                for (var i = 0; i < count; i++)
-                    offsets[i] = await log.AppendAsync(SampleRequest());
+                for (ulong i = 0; i < count; i++)
+                    log.TryPost(new WalRecordCommitted(SampleRecord(i)));
 
                 var stop = 0;
                 var flickered = 0;
@@ -438,7 +436,7 @@ public class ShardLogTests {
                     var everVisible = new bool[count];
                     while (Volatile.Read(ref stop) == 0) {
                         for (var i = 0; i < count; i++) {
-                            var found = log.TryGet(offsets[i], out var handle);
+                            var found = log.TryGet((ulong)i, out var handle);
                             if (found)
                                 handle.Dispose();
 
@@ -450,7 +448,7 @@ public class ShardLogTests {
                     }
                 });
 
-                await WaitForVisibleAsync(log, offsets[^1]);
+                await WaitForVisibleAsync(log, count - 1);
                 Interlocked.Exchange(ref stop, 1);
                 await reader;
 
@@ -490,6 +488,28 @@ public class ShardLogTests {
         throw new TimeoutException($"Segment count never reached {expected}.");
     }
 
-    static AppendRequest SampleRequest(string payload = "hello world") =>
-        new(Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes(payload));
+    static WalRecord SampleRecord(ulong offset, string payload = "hello world") =>
+        new(WalRecordType.Append, RaftTerm: 0, RaftIndex: 0, offset, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes(payload));
+
+    // ShardLog's own tests inject committed records directly via TryPost — this stands in for a
+    // real committed-source (RaftReplica.ReadCommittedAsync) whenever a test has nothing to
+    // redeliver on open/reopen.
+    static async IAsyncEnumerable<WalRecord> EmptyCommittedSource([EnumeratorCancellation] CancellationToken cancellationToken) {
+        await Task.CompletedTask;
+        yield break;
+    }
+
+    // A committed-source stand-in that redelivers a fixed sequence — simulates a real
+    // committed-source replaying its full history across a restart (RaftReplica does this on
+    // every StartAsync, per its commitIndex never being persisted).
+    static Func<CancellationToken, IAsyncEnumerable<WalRecord>> FixedCommittedSource(params WalRecord[] records) =>
+        cancellationToken => YieldFixedAsync(records, cancellationToken);
+
+    static async IAsyncEnumerable<WalRecord> YieldFixedAsync(WalRecord[] records, [EnumeratorCancellation] CancellationToken cancellationToken) {
+        foreach (var record in records) {
+            cancellationToken.ThrowIfCancellationRequested();
+            await Task.Yield();
+            yield return record;
+        }
+    }
 }
