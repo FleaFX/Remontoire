@@ -47,6 +47,18 @@ public sealed partial class RaftReplica {
     // commit advance while one is already outstanding.
     bool _snapshotInProgress;
 
+    // Leader-side: peers with an InstallSnapshot transfer currently in flight (background task,
+    // not yet replied) — guards SendInstallSnapshotAsync against starting a second, overlapping
+    // transfer to the same peer on the next heartbeat tick. Initialized on every transition into
+    // Leader, nulled on step-down, same lifecycle as _nextIndex/_matchIndex.
+    HashSet<string>? _installSnapshotInProgressPeers;
+
+    // Receiver-side: the InstallSnapshot chunk-reassembly currently in progress, if any. Lives on
+    // the actor (not a role object) so it survives role transitions within the same term; cleared
+    // on any term change (BecomeFollowerAsync/BecomeCandidateAsync) — chunks belonging to a
+    // superseded term must never be finished into this replica's own state.
+    SnapshotInstallState? _snapshotInstall;
+
     /// <summary>
     /// A proposal awaiting quorum commit: the result it will resolve to (RaftIndex and
     /// LogicalOffset are assigned at propose time) and the caller's completion.
@@ -106,6 +118,11 @@ public sealed partial class RaftReplica {
             Volatile.Write(ref _currentTerm, term);
             _votedFor = null;
             await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
+
+            // A term change invalidates any InstallSnapshot chunk-reassembly in progress — its
+            // chunks belong to a now-superseded term.
+            _snapshotInstall?.Dispose();
+            _snapshotInstall = null;
         }
 
         _role = ReplicaRole.Follower;
@@ -114,6 +131,7 @@ public sealed partial class RaftReplica {
         _votesReceived = 0;
         _nextIndex = null;
         _matchIndex = null;
+        _installSnapshotInProgressPeers = null;
         _heartbeatTimerGeneration++; // invalidate any scheduled heartbeat tick without re-arming
 
         // A demoted leader can no longer decide commits. The entries behind these proposals may

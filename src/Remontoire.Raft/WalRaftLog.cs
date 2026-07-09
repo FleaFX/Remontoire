@@ -273,6 +273,39 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
         }
     }
 
+    /// <inheritdoc />
+    // Crash-safe by construction, not by explicit cleanup ordering: the new active file and
+    // marker are established BEFORE anything old is touched, so a crash midway just leaves old
+    // files behind — every one of them has FirstIndex <= lastIncludedIndex by definition (this
+    // replica only ever installs a snapshot because it had fallen behind), so OpenAsync's
+    // existing "finish an interrupted compaction" cleanup deletes them on the next recovery
+    // without ever needing to know their real, no-longer-relevant content.
+    public async ValueTask InstallSnapshotAsync(ulong lastIncludedIndex, ulong lastIncludedTerm, CancellationToken cancellationToken = default) {
+        var staleWriter = _activeWriter;
+        var staleFiles = new List<string>(_sealedFiles.Count + 1) { _activePath };
+        staleFiles.AddRange(_sealedFiles.Select(f => f.Path));
+
+        var newFirstIndex = lastIncludedIndex + 1;
+        var newPath = WalFilePath(_directory, newFirstIndex);
+        var newWriter = await WalWriter.OpenAsync(newPath, cancellationToken);
+        await SnapshotMarker.SaveAsync(_directory, lastIncludedIndex, lastIncludedTerm, cancellationToken);
+
+        _sealedFiles.Clear();
+        _positionByIndex.Clear();
+        _activeWriter = newWriter;
+        _activePath = newPath;
+        _activeFirstIndex = newFirstIndex;
+        _nextWritePosition = 0;
+        SnapshotIndex = lastIncludedIndex;
+        SnapshotTerm = lastIncludedTerm;
+        _lastIndex = lastIncludedIndex;
+        _lastTerm = lastIncludedTerm;
+
+        await staleWriter.DisposeAsync();
+        foreach (var path in staleFiles)
+            File.Delete(path);
+    }
+
     /// <summary>Disposes the active <see cref="WalWriter"/>, draining it to durable completion first.</summary>
     public ValueTask DisposeAsync() => _activeWriter.DisposeAsync();
 

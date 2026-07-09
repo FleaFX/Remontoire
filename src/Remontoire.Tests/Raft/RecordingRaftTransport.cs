@@ -13,9 +13,11 @@ namespace Remontoire.Raft;
 sealed class RecordingRaftTransport : IRaftTransport {
     public List<(string PeerId, VoteRequest Request)> VoteRequestsSent { get; } = [];
     public List<(string PeerId, AppendEntriesRequest Request)> AppendEntriesRequestsSent { get; } = [];
+    public List<(string PeerId, InstallSnapshotRequest Request)> InstallSnapshotRequestsSent { get; } = [];
 
     public Func<string, VoteRequest, VoteResponse>? OnRequestVote { get; set; }
     public Func<string, AppendEntriesRequest, AppendEntriesResponse>? OnAppendEntries { get; set; }
+    public Func<string, InstallSnapshotRequest, InstallSnapshotResponse>? OnInstallSnapshot { get; set; }
 
     public ValueTask<VoteResponse> RequestVoteAsync(string peerId, VoteRequest request, CancellationToken cancellationToken = default) {
         VoteRequestsSent.Add((peerId, request));
@@ -35,6 +37,12 @@ sealed class RecordingRaftTransport : IRaftTransport {
         return ValueTask.FromResult(OnAppendEntries(peerId, request));
     }
 
-    public ValueTask<InstallSnapshotResponse> InstallSnapshotAsync(string peerId, InstallSnapshotRequest request, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException("Snapshots are not covered by layer-1 tests yet.");
+    public ValueTask<InstallSnapshotResponse> InstallSnapshotAsync(string peerId, InstallSnapshotRequest request, CancellationToken cancellationToken = default) {
+        InstallSnapshotRequestsSent.Add((peerId, request));
+
+        if (OnInstallSnapshot is null)
+            throw new InvalidOperationException($"No canned InstallSnapshot response configured for peer '{peerId}'.");
+
+        return ValueTask.FromResult(OnInstallSnapshot(peerId, request));
+    }
 }

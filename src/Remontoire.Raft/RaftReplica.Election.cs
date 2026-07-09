@@ -69,6 +69,11 @@ public sealed partial class RaftReplica {
         _votedFor = replicaConfig.NodeId;
         await stateStore.SaveAsync(new RaftPersistentState(_currentTerm, _votedFor, _snapshotNextLogicalOffset));
 
+        // A term change invalidates any InstallSnapshot chunk-reassembly in progress — its
+        // chunks belong to a now-superseded term.
+        _snapshotInstall?.Dispose();
+        _snapshotInstall = null;
+
         _role = ReplicaRole.Candidate;
         Volatile.Write(ref _leaderHint, null);
         _votesReceived = 1; // the self-vote

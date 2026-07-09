@@ -58,9 +58,18 @@ sealed class SimulatedCluster : IAsyncDisposable {
             GroupId: "group-1", NodeId: nodeId, Peers: peers,
             HeartbeatInterval: TimeSpan.FromMilliseconds(50),
             ElectionTimeoutMin: TimeSpan.FromMilliseconds(150),
-            ElectionTimeoutMax: TimeSpan.FromMilliseconds(300));
+            ElectionTimeoutMax: TimeSpan.FromMilliseconds(300),
+            SnapshotThresholdEntries: _options.SnapshotThresholdEntries ?? 10_000);
 
-        Replicas[nodeId] = new RaftReplica(stateStore, log, new SimulatedTransport(nodeId, this), config, _timeProvider);
+        // No real segments exist at this layer (InMemoryRaftLog) — both delegates are trivial
+        // no-ops, only exercised at all when SnapshotThresholdEntries is set.
+        Func<ulong, CancellationToken, Task<IReadOnlyList<string>>>? prepareSnapshot = _options.SnapshotThresholdEntries is null
+            ? null : (_, _) => Task.FromResult<IReadOnlyList<string>>([]);
+        Func<IReadOnlyList<string>, ulong, CancellationToken, Task>? installSnapshot = _options.SnapshotThresholdEntries is null
+            ? null : (_, _, _) => Task.CompletedTask;
+
+        Replicas[nodeId] = new RaftReplica(stateStore, log, new SimulatedTransport(nodeId, this), config, _timeProvider,
+            prepareSnapshot: prepareSnapshot, installSnapshot: installSnapshot);
     }
 
     /// <summary>Starts every replica. Call once, before the first <see cref="StepAsync"/>.</summary>

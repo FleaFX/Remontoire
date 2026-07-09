@@ -43,9 +43,14 @@ message InstallSnapshotRequest {
   string leader_id = 3;
   uint64 last_included_index = 4;
   uint64 last_included_term = 5;
-  uint64 offset = 6;
+  uint64 offset = 6; // byte offset within the current file (file_name), not within the whole snapshot
   bytes data = 7;
-  bool done = 8;
+  bool done = 8; // true on the final chunk of the final file — the whole snapshot transfer is complete
+  // Lets the receiver set its own next-logical-offset floor directly, instead of re-deriving
+  // it — it has no log entries of its own to scan from yet.
+  uint64 next_logical_offset = 9;
+  string file_name = 10; // bare filename (no directory) this chunk belongs to
+  bool file_done = 11; // true on the final chunk of this file; a different file_name may follow unless `done` is also set
 }
 
 message InstallSnapshotResponse {

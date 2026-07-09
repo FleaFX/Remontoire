@@ -47,5 +47,12 @@ sealed class InMemoryRaftLog : IRaftLog {
         return ValueTask.CompletedTask;
     }
 
+    public ValueTask InstallSnapshotAsync(ulong lastIncludedIndex, ulong lastIncludedTerm, CancellationToken cancellationToken = default) {
+        _entries.Clear();
+        SnapshotIndex = lastIncludedIndex;
+        SnapshotTerm = lastIncludedTerm;
+        return ValueTask.CompletedTask;
+    }
+
     int PositionOf(ulong index) => (int)(index - SnapshotIndex) - 1;
 }

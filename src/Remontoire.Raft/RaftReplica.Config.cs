@@ -23,6 +23,10 @@ namespace Remontoire.Raft;
 /// wired up.
 /// </param>
 /// <param name="ElectionRandomSeed">Optional seed for the election-timeout randomization</param>
+/// <param name="SnapshotStagingDirectory">
+/// Where an incoming <c>InstallSnapshot</c> transfer writes its files while still in progress.
+/// Defaults to a <see cref="GroupId"/>-scoped subdirectory under the system temp path.
+/// </param>
 public sealed record RaftReplicaConfig(
     string GroupId,
     string NodeId,
@@ -33,5 +37,10 @@ public sealed record RaftReplicaConfig(
     TimeSpan? RpcTimeout = null,
     int SnapshotChunkSizeBytes = 1 << 20,
     ulong SnapshotThresholdEntries = 10_000,
-    int? ElectionRandomSeed = null
-);
+    int? ElectionRandomSeed = null,
+    string? SnapshotStagingDirectory = null
+) {
+    /// <summary>Resolves <see cref="SnapshotStagingDirectory"/>'s default when left unset.</summary>
+    public string ResolvedSnapshotStagingDirectory =>
+        SnapshotStagingDirectory ?? Path.Combine(Path.GetTempPath(), "remontoire-snapshot-staging", GroupId);
+}

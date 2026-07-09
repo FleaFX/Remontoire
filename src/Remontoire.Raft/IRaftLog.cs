@@ -40,8 +40,19 @@ public interface IRaftLog {
     ValueTask TruncateFromAsync(ulong fromIndex, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Advances the log's base past <paramref name="lastIncludedIndex"/> after a snapshot:
-    /// records the marker durably, then deletes WAL files entirely below it.
+    /// Advances the log's base past <paramref name="lastIncludedIndex"/> after a self-taken
+    /// snapshot: records the marker durably, then deletes WAL files entirely below it. Only
+    /// ever called with <paramref name="lastIncludedIndex"/> at or below <see cref="LastIndex"/>
+    /// — for a self-taken snapshot, the tail beyond it always still exists.
     /// </summary>
     ValueTask CompactToAsync(ulong lastIncludedIndex, ulong lastIncludedTerm, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Discards this log's entire existing content and resets its base to
+    /// (<paramref name="lastIncludedIndex"/>, <paramref name="lastIncludedTerm"/>) with an empty
+    /// tail — used when a snapshot was received from elsewhere because this replica had fallen
+    /// behind <see cref="SnapshotIndex"/>, unlike <see cref="CompactToAsync"/>'s incremental
+    /// prefix trim of an otherwise-intact log.
+    /// </summary>
+    ValueTask InstallSnapshotAsync(ulong lastIncludedIndex, ulong lastIncludedTerm, CancellationToken cancellationToken = default);
 }

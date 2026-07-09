@@ -267,6 +267,58 @@ public class WalRaftLogTests {
         }
     }
 
+    public class InstallSnapshotAsync {
+        [Fact]
+        public async Task Discards_all_existing_content_and_resets_the_base() {
+            var directory = TempWalDirectory();
+            try {
+                await using var log = await WalRaftLog.OpenAsync(directory, rotationThresholdBytes: 1);
+                await log.AppendAsync([Entry(term: 1, index: 1)]);
+                await log.AppendAsync([Entry(term: 1, index: 2)]);
+
+                await log.InstallSnapshotAsync(lastIncludedIndex: 100, lastIncludedTerm: 5);
+
+                log.SnapshotIndex.Should().Be(100);
+                log.SnapshotTerm.Should().Be(5);
+                log.LastIndex.Should().Be(100);
+                log.LastTerm.Should().Be(5);
+                (await ToListAsync(log.ReadFromAsync(101))).Should().BeEmpty(); // nothing beyond the new, empty base
+
+                await log.AppendAsync([Entry(term: 5, index: 101)]);
+                log.LastIndex.Should().Be(101);
+                (await log.GetTermAtAsync(101)).Should().Be(5);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task OpenAsync_recovers_correctly_after_installing_a_snapshot() {
+            var directory = TempWalDirectory();
+            try {
+                await using (var log = await WalRaftLog.OpenAsync(directory, rotationThresholdBytes: 1)) {
+                    await log.AppendAsync([Entry(term: 1, index: 1)]);
+                    await log.AppendAsync([Entry(term: 1, index: 2)]);
+                    await log.InstallSnapshotAsync(lastIncludedIndex: 100, lastIncludedTerm: 5);
+                    await log.AppendAsync([Entry(term: 5, index: 101)]);
+                }
+
+                // Pre-snapshot files are gone; index 101's own append immediately rotates (threshold
+                // 1) into its own sealed file plus a fresh, empty active one behind it.
+                Directory.GetFiles(directory, "wal-*.log").Should().HaveCount(2);
+
+                await using var reopened = await WalRaftLog.OpenAsync(directory, rotationThresholdBytes: 1);
+
+                reopened.SnapshotIndex.Should().Be(100);
+                reopened.SnapshotTerm.Should().Be(5);
+                reopened.LastIndex.Should().Be(101);
+                (await ToListAsync(reopened.ReadFromAsync(101))).Select(r => r.RaftIndex).Should().Equal(101ul);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     static string TempWalDirectory() {
         var directory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(directory);

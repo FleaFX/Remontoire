@@ -20,6 +20,7 @@ public sealed partial class RaftReplica {
 
         _nextIndex = replicaConfig.Peers.ToDictionary(peer => peer.NodeId, _ => raftLog.LastIndex + 1);
         _matchIndex = replicaConfig.Peers.ToDictionary(peer => peer.NodeId, _ => 0UL);
+        _installSnapshotInProgressPeers = [];
         _pendingProposals = new SortedDictionary<ulong, PendingProposal>();
         _nextLogicalOffset = await RecoverNextLogicalOffsetAsync();
 
@@ -48,8 +49,8 @@ public sealed partial class RaftReplica {
     async Task SendAppendEntriesAsync(string peerId) {
         var nextIndex = _nextIndex![peerId];
         if (nextIndex <= raftLog.SnapshotIndex) {
-            // The peer needs entries that were compacted away — AppendEntries cannot help; the
-            // InstallSnapshot path takes over for this peer (not yet implemented).
+            // The peer needs entries that were compacted away — AppendEntries cannot help.
+            await SendInstallSnapshotAsync(peerId);
             return;
         }
 

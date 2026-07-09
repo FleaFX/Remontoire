@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Google.Protobuf;
 using Remontoire.Raft.V1;
 using Remontoire.Storage;
 
@@ -22,6 +23,12 @@ public class RaftReplicaTests {
     }
 
     static RaftGroupMember Peer(string nodeId) => new(nodeId, new Uri($"https://{nodeId}.local"));
+
+    static string TempStagingDirectory() {
+        var directory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        Directory.CreateDirectory(directory);
+        return directory;
+    }
 
     // A small, honest stopgap: some fire-and-forget background sends (Task.Run inside
     // SendVoteRequest/SendAppendEntriesAsync) are not observable via DrainAsync alone, since
@@ -369,6 +376,185 @@ public class RaftReplicaTests {
             await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
 
             raftLog.SnapshotIndex.Should().Be(0);
+        }
+    }
+
+    public class InstallSnapshot {
+        [Fact]
+        public async Task Rejects_a_stale_term_with_its_own_current_term() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> term 1
+            await replica.DrainAsync();
+
+            var response = await replica.ReceiveInstallSnapshotAsync(
+                new InstallSnapshotRequest { GroupId = "group-1", Term = 0, LeaderId = "node-2", LastIncludedIndex = 10, LastIncludedTerm = 1, Done = true });
+
+            response.Term.Should().Be(replica.CurrentTerm);
+        }
+
+        [Fact]
+        public async Task Reassembles_a_single_chunk_file_and_calls_installSnapshot() {
+            var directory = TempStagingDirectory();
+            try {
+                var installCalls = new List<(IReadOnlyList<string> Paths, ulong NextOffset)>();
+                var config = Config("node-1", [Peer("node-2")]) with { SnapshotStagingDirectory = directory };
+                var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), new RecordingRaftTransport(), config,
+                    installSnapshot: (paths, nextOffset, _) => {
+                        installCalls.Add((paths, nextOffset));
+                        return Task.CompletedTask;
+                    });
+                await replica.StartAsync();
+
+                var response = await replica.ReceiveInstallSnapshotAsync(new InstallSnapshotRequest {
+                    GroupId = "group-1", Term = 1, LeaderId = "node-2",
+                    LastIncludedIndex = 10, LastIncludedTerm = 1, NextLogicalOffset = 5,
+                    FileName = "segment-a.sst", Data = ByteString.CopyFromUtf8("hello"), FileDone = true, Done = true,
+                });
+
+                response.Term.Should().Be(1);
+                installCalls.Should().HaveCount(1);
+                installCalls[0].Paths.Should().ContainSingle();
+                installCalls[0].NextOffset.Should().Be(5);
+                File.ReadAllText(installCalls[0].Paths[0]).Should().Be("hello");
+                replica.CommitIndex.Should().Be(10);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Reassembles_a_file_split_across_two_chunks() {
+            var directory = TempStagingDirectory();
+            try {
+                var installCalls = new List<IReadOnlyList<string>>();
+                var config = Config("node-1", [Peer("node-2")]) with { SnapshotStagingDirectory = directory };
+                var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), new RecordingRaftTransport(), config,
+                    installSnapshot: (paths, _, _) => {
+                        installCalls.Add(paths);
+                        return Task.CompletedTask;
+                    });
+                await replica.StartAsync();
+
+                await replica.ReceiveInstallSnapshotAsync(new InstallSnapshotRequest {
+                    GroupId = "group-1", Term = 1, LeaderId = "node-2", LastIncludedIndex = 10, LastIncludedTerm = 1,
+                    FileName = "segment-a.sst", Data = ByteString.CopyFromUtf8("hel"), FileDone = false, Done = false,
+                });
+                await replica.ReceiveInstallSnapshotAsync(new InstallSnapshotRequest {
+                    GroupId = "group-1", Term = 1, LeaderId = "node-2", LastIncludedIndex = 10, LastIncludedTerm = 1,
+                    FileName = "segment-a.sst", Data = ByteString.CopyFromUtf8("lo"), FileDone = true, Done = true,
+                });
+
+                installCalls.Should().HaveCount(1);
+                File.ReadAllText(installCalls[0][0]).Should().Be("hello");
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Calls_installSnapshot_with_an_empty_list_when_the_snapshot_has_no_files() {
+            var directory = TempStagingDirectory();
+            try {
+                var installCalls = new List<IReadOnlyList<string>>();
+                var config = Config("node-1", [Peer("node-2")]) with { SnapshotStagingDirectory = directory };
+                var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), new RecordingRaftTransport(), config,
+                    installSnapshot: (paths, _, _) => {
+                        installCalls.Add(paths);
+                        return Task.CompletedTask;
+                    });
+                await replica.StartAsync();
+
+                await replica.ReceiveInstallSnapshotAsync(
+                    new InstallSnapshotRequest { GroupId = "group-1", Term = 1, LeaderId = "node-2", LastIncludedIndex = 10, LastIncludedTerm = 1, Done = true });
+
+                installCalls.Should().HaveCount(1);
+                installCalls[0].Should().BeEmpty();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Sends_an_empty_chunk_and_advances_nextIndex_when_there_are_no_segments() {
+            var raftLog = new InMemoryRaftLog();
+            var transport = new RecordingRaftTransport {
+                OnAppendEntries = (peerId, request) => peerId == "node-2"
+                    ? new AppendEntriesResponse { Term = request.Term, Success = true }
+                    : throw new InvalidOperationException("node-3 never acks AppendEntries in this test"),
+                OnInstallSnapshot = (_, request) => new InstallSnapshotResponse { Term = request.Term },
+            };
+            var config = Config("node-1", [Peer("node-2"), Peer("node-3")], snapshotThresholdEntries: 0);
+            var replica = new RaftReplica(new InMemoryRaftStateStore(), raftLog, transport, config,
+                prepareSnapshot: (_, _) => Task.FromResult<IReadOnlyList<string>>([]));
+            await replica.StartAsync();
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> candidate, term 1
+            await replica.DrainAsync();
+            replica.TryPost(new VoteResponseReceived("node-2", new VoteResponse { Term = 1, VoteGranted = true }, 1));
+            await replica.DrainAsync(); // -> leader (self + node-2 satisfy quorum), sends the term-opening NoOp
+
+            // node-2 acks the NoOp — drives commit (which self-triggers a snapshot, threshold 0)
+            // and advances node-2's own nextIndex; node-3 never acks, so its nextIndex stays behind.
+            replica.TryPost(new AppendEntriesResponseReceived("node-2", new AppendEntriesResponse { Term = 1, Success = true }, 1, SentUpToIndex: 1));
+            await replica.DrainAsync();
+            (await WaitUntilAsync(() => raftLog.SnapshotIndex > 0)).Should().BeTrue("the self-triggered snapshot must run once the NoOp commits");
+
+            // The next heartbeat retries replication to node-3 — nextIndex(1) <= SnapshotIndex now,
+            // so AppendEntries can no longer serve it; InstallSnapshot must take over.
+            replica.TryPost(new HeartbeatIntervalElapsed(replica.HeartbeatTimerGeneration));
+            await replica.DrainAsync();
+
+            (await WaitUntilAsync(() => transport.InstallSnapshotRequestsSent.Any(sent => sent.PeerId == "node-3"))).Should().BeTrue();
+            var sent = transport.InstallSnapshotRequestsSent.First(pair => pair.PeerId == "node-3").Request;
+            sent.FileName.Should().BeEmpty();
+            sent.Done.Should().BeTrue();
+            sent.LastIncludedIndex.Should().Be(raftLog.SnapshotIndex);
+
+            (await WaitUntilAsync(() => replica.CommitIndex >= raftLog.SnapshotIndex)).Should().BeTrue();
+        }
+
+        [Fact]
+        public async Task Does_not_start_a_second_transfer_to_the_same_peer_while_one_is_in_flight() {
+            var raftLog = new InMemoryRaftLog();
+            var gate = new TaskCompletionSource();
+            var callCount = 0;
+            var transport = new RecordingRaftTransport {
+                OnAppendEntries = (peerId, request) => peerId == "node-2"
+                    ? new AppendEntriesResponse { Term = request.Term, Success = true }
+                    : throw new InvalidOperationException("node-3 never acks AppendEntries in this test"),
+                OnInstallSnapshot = (_, request) => {
+                    Interlocked.Increment(ref callCount);
+                    gate.Task.GetAwaiter().GetResult(); // blocks the first transfer open
+                    return new InstallSnapshotResponse { Term = request.Term };
+                },
+            };
+            var config = Config("node-1", [Peer("node-2"), Peer("node-3")], snapshotThresholdEntries: 0);
+            var replica = new RaftReplica(new InMemoryRaftStateStore(), raftLog, transport, config,
+                prepareSnapshot: (_, _) => Task.FromResult<IReadOnlyList<string>>([]));
+            await replica.StartAsync();
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> candidate, term 1
+            await replica.DrainAsync();
+            replica.TryPost(new VoteResponseReceived("node-2", new VoteResponse { Term = 1, VoteGranted = true }, 1));
+            await replica.DrainAsync(); // -> leader (self + node-2 satisfy quorum), sends the term-opening NoOp
+
+            replica.TryPost(new AppendEntriesResponseReceived("node-2", new AppendEntriesResponse { Term = 1, Success = true }, 1, SentUpToIndex: 1));
+            await replica.DrainAsync();
+            (await WaitUntilAsync(() => raftLog.SnapshotIndex > 0)).Should().BeTrue("the self-triggered snapshot must run once the NoOp commits");
+
+            replica.TryPost(new HeartbeatIntervalElapsed(replica.HeartbeatTimerGeneration));
+            await replica.DrainAsync();
+            (await WaitUntilAsync(() => callCount >= 1)).Should().BeTrue("node-3's stale nextIndex must trigger a transfer");
+
+            // A second heartbeat tick, while the first transfer is still gated open, must not
+            // start an overlapping one to the same peer.
+            replica.TryPost(new HeartbeatIntervalElapsed(replica.HeartbeatTimerGeneration));
+            await replica.DrainAsync();
+            await Task.Delay(20);
+
+            callCount.Should().Be(1);
+
+            gate.SetResult();
         }
     }
 

@@ -55,9 +55,19 @@ sealed record VoteResponseReceived(string PeerId, VoteResponse Response, ulong S
 sealed record AppendEntriesResponseReceived(string PeerId, AppendEntriesResponse Response, ulong SentTerm, ulong SentUpToIndex) : RaftReplicaMessage;
 
 /// <summary>
-/// Posted by the background task that sent an <see cref="InstallSnapshotRequest"/> chunk.
+/// Posted once by the background task that ran a full <c>InstallSnapshot</c> transfer to a peer,
+/// after its last chunk's response — not once per chunk. <paramref name="SentSnapshotIndex"/> is
+/// the transfer's own <c>lastIncludedIndex</c>, so the handler can advance <c>nextIndex</c>/
+/// <c>matchIndex</c> straight to it without re-deriving what was sent.
 /// </summary>
 sealed record InstallSnapshotResponseReceived(string PeerId, InstallSnapshotResponse Response, ulong SentTerm, ulong SentSnapshotIndex) : RaftReplicaMessage;
+
+/// <summary>
+/// Posted by the background task that ran an <c>InstallSnapshot</c> transfer when it threw
+/// (network failure, cancelled, or the disk read of a segment failed) — clears the in-flight
+/// marker for <paramref name="PeerId"/> so the next heartbeat tick retries from scratch.
+/// </summary>
+sealed record InstallSnapshotTransferFailed(string PeerId) : RaftReplicaMessage;
 
 /// <summary>
 /// Posted by <see cref="RaftReplica.ProposeAsync"/> — an application request to replicate one

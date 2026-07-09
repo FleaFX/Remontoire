@@ -127,4 +127,38 @@ public class SimulatedClusterTests {
 
         cluster.Heal();
     }
+
+    [Fact]
+    public async Task A_node_that_missed_a_compacted_prefix_catches_up_via_InstallSnapshot() {
+        var options = ReliableNetwork with { SnapshotThresholdEntries = 2 };
+        await using var cluster = new SimulatedCluster(nodeCount: 3, seed: 6, options);
+        await cluster.StartAllAsync();
+        await RunUntilAsync(cluster, () => CurrentLeader(cluster) is not null);
+
+        var leader = CurrentLeader(cluster)!;
+        var leaderNodeId = cluster.Replicas.First(pair => pair.Value == leader).Key;
+        var laggingNodeId = cluster.Replicas.Keys.First(nodeId => nodeId != leaderNodeId);
+
+        await cluster.CrashAsync(laggingNodeId);
+
+        // Enough proposals for the tail to exceed the (very low) snapshot threshold — the
+        // surviving two nodes still satisfy quorum without the crashed one.
+        ProposeResult? lastResult = null;
+        for (var i = 0; i < 6; i++) {
+            var proposeTask = leader.ProposeAsync(SampleRequest($"key-{i}")).AsTask();
+            (await RunUntilAsync(cluster, () => proposeTask.IsCompleted)).Should().BeTrue();
+            lastResult = await proposeTask;
+        }
+
+        // Confirms the leader actually compacted away the prefix the crashed node needs —
+        // structurally, that makes InstallSnapshot the only possible way it can ever catch up:
+        // SendAppendEntriesAsync refuses to serve anything at or below raftLog.SnapshotIndex.
+        var compacted = await RunUntilAsync(cluster, () => cluster.Logs[leaderNodeId].SnapshotIndex > 0);
+        compacted.Should().BeTrue("the tail comfortably exceeds the threshold after 6 proposals");
+
+        await cluster.RestartAsync(laggingNodeId);
+
+        var caughtUp = await RunUntilAsync(cluster, () => cluster.Replicas[laggingNodeId].CommitIndex >= lastResult!.Value.RaftIndex);
+        caughtUp.Should().BeTrue("InstallSnapshot must bring the restarted node's log base forward, since normal AppendEntries no longer can");
+    }
 }
