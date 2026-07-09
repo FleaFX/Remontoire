@@ -43,4 +43,7 @@ public sealed record RaftReplicaConfig(
     /// <summary>Resolves <see cref="SnapshotStagingDirectory"/>'s default when left unset.</summary>
     public string ResolvedSnapshotStagingDirectory =>
         SnapshotStagingDirectory ?? Path.Combine(Path.GetTempPath(), "remontoire-snapshot-staging", GroupId);
+
+    /// <summary>Resolves <see cref="RpcTimeout"/>'s default when left unset: five times <see cref="HeartbeatInterval"/>.</summary>
+    public TimeSpan ResolvedRpcTimeout => RpcTimeout ?? HeartbeatInterval * 5;
 }
