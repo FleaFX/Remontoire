@@ -84,6 +84,11 @@ public sealed partial class RaftReplica {
         await completion.Task.WaitAsync(cancellationToken);
     }
 
+    static Task HandleDrainSentinel(DrainSentinel sentinel) {
+        sentinel.Completion.TrySetResult();
+        return Task.CompletedTask;
+    }
+
     /// <summary>
     /// The one transition every "saw a higher term" rule funnels into. Persists the term bump
     /// before returning, so no caller can resolve an RPC reply before the durable-before-respond

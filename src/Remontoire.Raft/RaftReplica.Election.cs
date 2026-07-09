@@ -4,6 +4,18 @@ using Remontoire.Raft.V1;
 namespace Remontoire.Raft;
 
 public sealed partial class RaftReplica {
+    /// <summary>
+    /// Inbound RPC entry point — the transport posts the request as a mailbox message; the actor
+    /// resolves the reply only after the persist-before-respond ordering is satisfied.
+    /// </summary>
+    public ValueTask<VoteResponse> ReceiveVoteRequestAsync(VoteRequest request, CancellationToken cancellationToken = default) {
+        var reply = new TaskCompletionSource<VoteResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = _channel.Writer.TryWrite(new VoteRequestReceived(request, reply));
+        ObjectDisposedException.ThrowIf(!accepted, this);
+
+        return new ValueTask<VoteResponse>(reply.Task.WaitAsync(cancellationToken));
+    }
+
     // The single implementation of Raft's election restriction (paper §5.4.1). Everything that
     // ever answers "is that log at least as up-to-date as mine?" calls this — never inline
     // re-derivations: two divergent copies of this comparison can elect a leader that lacks

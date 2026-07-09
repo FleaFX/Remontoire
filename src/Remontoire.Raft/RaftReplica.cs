@@ -1,6 +1,4 @@
 using Microsoft.Extensions.Logging;
-using Remontoire.Raft.V1;
-using Remontoire.Storage;
 
 namespace Remontoire.Raft;
 
@@ -59,57 +57,6 @@ public sealed partial class RaftReplica(
     }
 
     /// <summary>
-    /// Proposes one record for replication — a message post plus an awaited reply, exactly
-    /// <c>ShardLog.AppendAsync</c>'s shape. Completes on quorum commit, never on mere local
-    /// durability. Throws <see cref="NotLeaderException"/> when this replica is not the ready
-    /// leader (see <see cref="IsLeader"/>).
-    /// </summary>
-    public ValueTask<ProposeResult> ProposeAsync(AppendRequest request, CancellationToken cancellationToken = default) {
-        var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var accepted = _channel.Writer.TryWrite(new ProposeReceived(request, completion));
-        ObjectDisposedException.ThrowIf(!accepted, this);
-
-        return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
-    }
-
-    /// <summary>
-    /// Yields every record in the exact order it became quorum-committed on this replica. Only
-    /// one consumer may enumerate this at a time.
-    /// </summary>
-    public IAsyncEnumerable<WalRecord> ReadCommittedAsync(CancellationToken cancellationToken = default) =>
-        _committed.Reader.ReadAllAsync(cancellationToken);
-
-    /// <summary>
-    /// Inbound RPC entry point — the transport posts the request as a mailbox message; the actor
-    /// resolves the reply only after the persist-before-respond ordering is satisfied.
-    /// </summary>
-    public ValueTask<VoteResponse> ReceiveVoteRequestAsync(VoteRequest request, CancellationToken cancellationToken = default) {
-        var reply = new TaskCompletionSource<VoteResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var accepted = _channel.Writer.TryWrite(new VoteRequestReceived(request, reply));
-        ObjectDisposedException.ThrowIf(!accepted, this);
-
-        return new ValueTask<VoteResponse>(reply.Task.WaitAsync(cancellationToken));
-    }
-
-    /// <inheritdoc cref="ReceiveVoteRequestAsync"/>
-    public ValueTask<AppendEntriesResponse> ReceiveAppendEntriesAsync(AppendEntriesRequest request, CancellationToken cancellationToken = default) {
-        var reply = new TaskCompletionSource<AppendEntriesResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var accepted = _channel.Writer.TryWrite(new AppendEntriesReceived(request, reply));
-        ObjectDisposedException.ThrowIf(!accepted, this);
-
-        return new ValueTask<AppendEntriesResponse>(reply.Task.WaitAsync(cancellationToken));
-    }
-
-    /// <inheritdoc cref="ReceiveVoteRequestAsync"/>
-    public ValueTask<InstallSnapshotResponse> ReceiveInstallSnapshotAsync(InstallSnapshotRequest request, CancellationToken cancellationToken = default) {
-        var reply = new TaskCompletionSource<InstallSnapshotResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var accepted = _channel.Writer.TryWrite(new InstallSnapshotReceived(request, reply));
-        ObjectDisposedException.ThrowIf(!accepted, this);
-
-        return new ValueTask<InstallSnapshotResponse>(reply.Task.WaitAsync(cancellationToken));
-    }
-
-    /// <summary>
     /// Cancels the actor loop, awaits shutdown, and fails any pending proposals.
     /// </summary>
     internal async Task StopAsync(CancellationToken cancellationToken = default) {
@@ -152,20 +99,6 @@ public sealed partial class RaftReplica(
             }
         }
     }
-
-    static Task HandleDrainSentinel(DrainSentinel sentinel) {
-        sentinel.Completion.TrySetResult();
-        return Task.CompletedTask;
-    }
-
-    // Snapshots + InstallSnapshot are not implemented yet. Left as an explicit gap rather than a
-    // silent no-op: a caller that invokes this before it's built will see the failure surface
-    // (logged, reply never resolves) instead of a misleadingly "successful" response.
-    Task HandleInstallSnapshotReceivedAsync(InstallSnapshotReceived message) =>
-        throw new NotImplementedException("InstallSnapshot is not implemented yet.");
-
-    Task HandleInstallSnapshotResponseReceivedAsync(InstallSnapshotResponseReceived message) =>
-        throw new NotImplementedException("InstallSnapshot is not implemented yet.");
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync() => await StopAsync();

@@ -5,6 +5,36 @@ using Remontoire.Storage.Serialization;
 namespace Remontoire.Raft;
 
 public sealed partial class RaftReplica {
+    /// <summary>
+    /// Proposes one record for replication — a message post plus an awaited reply, exactly
+    /// <c>ShardLog.AppendAsync</c>'s shape. Completes on quorum commit, never on mere local
+    /// durability. Throws <see cref="NotLeaderException"/> when this replica is not the ready
+    /// leader (see <see cref="IsLeader"/>).
+    /// </summary>
+    public ValueTask<ProposeResult> ProposeAsync(AppendRequest request, CancellationToken cancellationToken = default) {
+        var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = _channel.Writer.TryWrite(new ProposeReceived(request, completion));
+        ObjectDisposedException.ThrowIf(!accepted, this);
+
+        return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
+    }
+
+    /// <summary>
+    /// Yields every record in the exact order it became quorum-committed on this replica. Only
+    /// one consumer may enumerate this at a time.
+    /// </summary>
+    public IAsyncEnumerable<WalRecord> ReadCommittedAsync(CancellationToken cancellationToken = default) =>
+        _committed.Reader.ReadAllAsync(cancellationToken);
+
+    /// <inheritdoc cref="ReceiveVoteRequestAsync"/>
+    public ValueTask<AppendEntriesResponse> ReceiveAppendEntriesAsync(AppendEntriesRequest request, CancellationToken cancellationToken = default) {
+        var reply = new TaskCompletionSource<AppendEntriesResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = _channel.Writer.TryWrite(new AppendEntriesReceived(request, reply));
+        ObjectDisposedException.ThrowIf(!accepted, this);
+
+        return new ValueTask<AppendEntriesResponse>(reply.Task.WaitAsync(cancellationToken));
+    }
+
     async Task HandleProposeReceivedAsync(ProposeReceived message) {
         if (_role != ReplicaRole.Leader || !_isLeaderReady) {
             message.Reply.TrySetException(new NotLeaderException(GroupId, _leaderHint));
