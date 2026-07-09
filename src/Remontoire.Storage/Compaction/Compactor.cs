@@ -95,11 +95,13 @@ static class Compactor {
         if (policy.GetAckedLowWatermarkAsync is not { } getWatermark)
             return;
 
+        // Exclusive: the delegate's contract is "every offset below this is acked" — a segment
+        // is only fully covered when even its own MaxOffset falls below it, not at or below.
         var watermark = await getWatermark(cancellationToken);
 
         foreach (var path in Directory.EnumerateFiles(directory, "*.sst")) {
             using var segment = await SstSegment.OpenAsync(path, cancellationToken);
-            if (segment.MaxOffset <= watermark)
+            if (segment.MaxOffset < watermark)
                 File.Delete(path); // whole, fully-acked segment — no partial rewrite needed
         }
     }
@@ -113,10 +115,11 @@ static class Compactor {
 /// <param name="MaxMergedSegmentBytes">The target maximum size, in bytes, of a merged output segment — consecutive small segments are packed together up to this size. <c>null</c> means unlimited (pack everything into one segment).</param>
 /// <param name="GetAckedLowWatermarkAsync">
 /// Optional injection point: returns the lowest low-watermark across every registered consumer
-/// group on this shard, so <see cref="Compactor.PruneAckedSegmentsAsync"/> can drop segments no
-/// group can still read from. This project never references the ack-tracking layer directly —
-/// same one-way dependency discipline as everywhere else a lower layer needs a fact only a
-/// higher one can supply. <c>null</c> disables ack-driven pruning entirely — nothing is ever
-/// dropped on age/size grounds alone.
+/// group on this shard — exclusive (every offset below the returned value is acked by every
+/// group; zero means no group has acked anything yet) — so <see cref="Compactor.PruneAckedSegmentsAsync"/>
+/// can drop segments no group can still read from. This project never references the ack-tracking
+/// layer directly — same one-way dependency discipline as everywhere else a lower layer needs a
+/// fact only a higher one can supply. <c>null</c> disables ack-driven pruning entirely — nothing
+/// is ever dropped on age/size grounds alone.
 /// </param>
 public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null);

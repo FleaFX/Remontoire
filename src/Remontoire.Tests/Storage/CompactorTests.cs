@@ -98,7 +98,7 @@ public class CompactorTests {
             var directory = CreateTempDirectory();
             try {
                 var path = await WriteSegmentAsync(directory, SampleEntries(0, 5)); // offsets 0..4
-                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(4UL));
+                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(5UL)); // exclusive — 0..4 all acked
 
                 await Compactor.PruneAckedSegmentsAsync(directory, policy);
 
@@ -113,11 +113,11 @@ public class CompactorTests {
             var directory = CreateTempDirectory();
             try {
                 var path = await WriteSegmentAsync(directory, SampleEntries(0, 5)); // offsets 0..4
-                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(2UL));
+                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(2UL)); // exclusive — only 0, 1 acked
 
                 await Compactor.PruneAckedSegmentsAsync(directory, policy);
 
-                File.Exists(path).Should().BeTrue("offset 3 and 4 in this segment are not yet covered by the watermark");
+                File.Exists(path).Should().BeTrue("offsets 2, 3, and 4 in this segment are not yet covered by the watermark");
             } finally {
                 Directory.Delete(directory, recursive: true);
             }
@@ -129,7 +129,7 @@ public class CompactorTests {
             try {
                 var covered = await WriteSegmentAsync(directory, SampleEntries(0, 5)); // offsets 0..4
                 var straddling = await WriteSegmentAsync(directory, SampleEntries(5, 5)); // offsets 5..9
-                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(4UL));
+                var policy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(5UL)); // exclusive — 0..4 all acked
 
                 await Compactor.PruneAckedSegmentsAsync(directory, policy);
 
