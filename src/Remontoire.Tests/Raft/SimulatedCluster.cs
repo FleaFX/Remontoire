@@ -40,6 +40,13 @@ sealed class SimulatedCluster : IAsyncDisposable {
     /// <summary>The currently-running replicas, keyed by node ID. A crashed node is absent until restarted.</summary>
     public Dictionary<string, RaftReplica> Replicas { get; }
 
+    /// <summary>
+    /// Every node's simulated durable log, keyed by node ID — including crashed nodes' (a log
+    /// survives a crash; only the actor state doesn't). Read-only access for invariant-checking;
+    /// nothing outside <see cref="RaftReplica"/> itself should ever write through this.
+    /// </summary>
+    public IReadOnlyDictionary<string, IRaftLog> Logs => _logs;
+
     void CreateReplica(string nodeId) {
         if (!_logs.TryGetValue(nodeId, out var log))
             _logs[nodeId] = log = new InMemoryRaftLog();
