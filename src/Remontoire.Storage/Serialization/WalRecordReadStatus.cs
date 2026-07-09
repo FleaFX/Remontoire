@@ -3,7 +3,7 @@ namespace Remontoire.Storage.Serialization;
 /// <summary>
 /// The outcome of attempting to read one <see cref="WalRecord"/> from a byte buffer.
 /// </summary>
-enum WalRecordReadStatus {
+public enum WalRecordReadStatus {
     /// <summary>
     /// A complete, valid record was read.
     /// </summary>

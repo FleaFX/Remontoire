@@ -13,7 +13,8 @@ namespace Remontoire.Raft;
 /// <param name="ElectionTimeoutMax">Upper bound of the randomized election timeout. Starting point: 500 ms.</param>
 /// <param name="RpcTimeout">
 /// Deadline applied to every outbound Raft RPC. Defaults to five times
-/// <param name="HeartbeatInterval"/> when not set explicitly.</param>
+/// <paramref name="HeartbeatInterval"/> when not set explicitly.
+/// </param>
 /// <param name="SnapshotChunkSizeBytes">Maximum bytes per <c>InstallSnapshot</c> chunk. Default 1 MiB.</param>
 /// <param name="ElectionRandomSeed">Optional seed for the election-timeout randomization</param>
 public sealed record RaftReplicaConfig(
