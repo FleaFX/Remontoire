@@ -34,6 +34,9 @@ public class ShardAssignmentTableTests {
     }
 
     public class Apply {
+        static readonly MigrationId Migration1 = new(Guid.NewGuid());
+        static readonly MigrationId Migration2 = new(Guid.NewGuid());
+
         [Fact]
         public void CreateStream_registers_the_streams_sharding_config() {
             var table = new ShardAssignmentTable();
@@ -60,7 +63,7 @@ public class ShardAssignmentTableTests {
         public void MigrationStarted_creates_an_assignment_pointing_at_the_from_group_with_a_migration_target() {
             var table = new ShardAssignmentTable();
 
-            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
 
             table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
             assignment.GroupId.Should().Be("group-1", "routing stays on the old group until cutover");
@@ -70,9 +73,9 @@ public class ShardAssignmentTableTests {
         [Fact]
         public void MigrationAborted_clears_the_migration_target_without_changing_routing() {
             var table = new ShardAssignmentTable();
-            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
 
-            table.Apply(new MigrationAborted("migration-1", "orders", 5));
+            table.Apply(new MigrationAborted(Migration1, "orders", 5));
 
             table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
             assignment.GroupId.Should().Be("group-1");
@@ -83,7 +86,7 @@ public class ShardAssignmentTableTests {
         public void MigrationAborted_is_a_no_op_when_no_assignment_exists_yet() {
             var table = new ShardAssignmentTable();
 
-            table.Apply(new MigrationAborted("migration-1", "orders", 5));
+            table.Apply(new MigrationAborted(Migration1, "orders", 5));
 
             table.TryGetAssignment("orders", 5, out _).Should().BeFalse();
         }
@@ -91,9 +94,9 @@ public class ShardAssignmentTableTests {
         [Fact]
         public void Cutover_flips_routing_to_the_new_group_and_clears_the_migration_target() {
             var table = new ShardAssignmentTable();
-            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
 
-            table.Apply(new Cutover("migration-1", "orders", 5, "group-2"));
+            table.Apply(new Cutover(Migration1, "orders", 5, "group-2"));
 
             table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
             assignment.GroupId.Should().Be("group-2");
@@ -103,13 +106,68 @@ public class ShardAssignmentTableTests {
         [Fact]
         public void MigrationCompleted_leaves_the_assignment_untouched() {
             var table = new ShardAssignmentTable();
-            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
-            table.Apply(new Cutover("migration-1", "orders", 5, "group-2"));
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+            table.Apply(new Cutover(Migration1, "orders", 5, "group-2"));
 
-            table.Apply(new MigrationCompleted("migration-1", "orders", 5));
+            table.Apply(new MigrationCompleted(Migration1, "orders", 5));
 
             table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
             assignment.GroupId.Should().Be("group-2");
+        }
+
+        [Fact]
+        public void Duplicate_migration_started_with_same_MigrationId_is_a_no_op() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-1");
+            assignment.MigratingToGroupId.Should().Be("group-2");
+        }
+
+        [Fact]
+        public void MigrationStarted_with_a_different_MigrationId_is_rejected_while_another_migration_is_in_progress() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+
+            table.Apply(new MigrationStarted(Migration2, "orders", 5, "group-1", "group-3"));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.MigratingToGroupId.Should().Be("group-2", "the second, conflicting migration must not overwrite the one already in progress");
+        }
+
+        [Fact]
+        public void MigrationAborted_with_a_mismatched_MigrationId_is_rejected() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+
+            table.Apply(new MigrationAborted(Migration2, "orders", 5));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.MigratingToGroupId.Should().Be("group-2", "a stale/foreign abort must not cancel a different, still-in-progress migration");
+        }
+
+        [Fact]
+        public void Cutover_with_a_stale_MigrationId_is_rejected() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+
+            table.Apply(new Cutover(Migration2, "orders", 5, "group-2"));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-1", "a stale/foreign cutover must never flip routing for someone else's migration");
+            assignment.MigratingToGroupId.Should().Be("group-2");
+        }
+
+        [Fact]
+        public void Cutover_with_no_migration_in_progress_is_rejected() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new Cutover(Migration1, "orders", 5, "group-2"));
+
+            table.TryGetAssignment("orders", 5, out _).Should().BeFalse();
         }
     }
 }

@@ -39,7 +39,7 @@ public class MetaLogRecordTests {
 
         [Fact]
         public void Round_trips_a_MigrationStarted_record() {
-            var record = new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2");
+            var record = new MigrationStarted(new MigrationId(Guid.NewGuid()), "orders", 5, "group-1", "group-2");
 
             var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
 
@@ -48,7 +48,7 @@ public class MetaLogRecordTests {
 
         [Fact]
         public void Round_trips_a_MigrationAborted_record() {
-            var record = new MigrationAborted("migration-1", "orders", 5);
+            var record = new MigrationAborted(new MigrationId(Guid.NewGuid()), "orders", 5);
 
             var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
 
@@ -57,7 +57,7 @@ public class MetaLogRecordTests {
 
         [Fact]
         public void Round_trips_a_Cutover_record() {
-            var record = new Cutover("migration-1", "orders", 5, "group-2");
+            var record = new Cutover(new MigrationId(Guid.NewGuid()), "orders", 5, "group-2");
 
             var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
 
@@ -66,7 +66,7 @@ public class MetaLogRecordTests {
 
         [Fact]
         public void Round_trips_a_MigrationCompleted_record() {
-            var record = new MigrationCompleted("migration-1", "orders", 5);
+            var record = new MigrationCompleted(new MigrationId(Guid.NewGuid()), "orders", 5);
 
             var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
 

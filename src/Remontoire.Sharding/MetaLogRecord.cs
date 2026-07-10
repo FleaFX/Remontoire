@@ -50,7 +50,7 @@ public abstract record MetaLogRecord {
 
             case MigrationStarted r:
                 writer.Write((byte)MetaLogRecordType.MigrationStarted);
-                writer.Write(r.MigrationId);
+                writer.Write(r.MigrationId.Value.ToString());
                 writer.Write(r.StreamName);
                 writer.Write(r.VirtualShardIndex);
                 writer.Write(r.FromGroupId);
@@ -59,14 +59,14 @@ public abstract record MetaLogRecord {
 
             case MigrationAborted r:
                 writer.Write((byte)MetaLogRecordType.MigrationAborted);
-                writer.Write(r.MigrationId);
+                writer.Write(r.MigrationId.Value.ToString());
                 writer.Write(r.StreamName);
                 writer.Write(r.VirtualShardIndex);
                 break;
 
             case Cutover r:
                 writer.Write((byte)MetaLogRecordType.Cutover);
-                writer.Write(r.MigrationId);
+                writer.Write(r.MigrationId.Value.ToString());
                 writer.Write(r.StreamName);
                 writer.Write(r.VirtualShardIndex);
                 writer.Write(r.ToGroupId);
@@ -74,7 +74,7 @@ public abstract record MetaLogRecord {
 
             case MigrationCompleted r:
                 writer.Write((byte)MetaLogRecordType.MigrationCompleted);
-                writer.Write(r.MigrationId);
+                writer.Write(r.MigrationId.Value.ToString());
                 writer.Write(r.StreamName);
                 writer.Write(r.VirtualShardIndex);
                 break;
@@ -91,13 +91,13 @@ public abstract record MetaLogRecord {
                 new CreateStream(reader.ReadString(), reader.ReadInt32(), (RoutingAlgorithm)reader.ReadByte()),
             MetaLogRecordType.RegisterGroup => ReadRegisterGroup(reader),
             MetaLogRecordType.MigrationStarted =>
-                new MigrationStarted(reader.ReadString(), reader.ReadString(), reader.ReadInt32(), reader.ReadString(), reader.ReadString()),
+                new MigrationStarted(new MigrationId(Guid.Parse(reader.ReadString())), reader.ReadString(), reader.ReadInt32(), reader.ReadString(), reader.ReadString()),
             MetaLogRecordType.MigrationAborted =>
-                new MigrationAborted(reader.ReadString(), reader.ReadString(), reader.ReadInt32()),
+                new MigrationAborted(new MigrationId(Guid.Parse(reader.ReadString())), reader.ReadString(), reader.ReadInt32()),
             MetaLogRecordType.Cutover =>
-                new Cutover(reader.ReadString(), reader.ReadString(), reader.ReadInt32(), reader.ReadString()),
+                new Cutover(new MigrationId(Guid.Parse(reader.ReadString())), reader.ReadString(), reader.ReadInt32(), reader.ReadString()),
             MetaLogRecordType.MigrationCompleted =>
-                new MigrationCompleted(reader.ReadString(), reader.ReadString(), reader.ReadInt32()),
+                new MigrationCompleted(new MigrationId(Guid.Parse(reader.ReadString())), reader.ReadString(), reader.ReadInt32()),
             _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown MetaLogRecordType tag."),
         };
     }
@@ -126,20 +126,20 @@ public sealed record RegisterGroup(string GroupId, IReadOnlyList<ShardGroupMembe
 /// Begins migrating one virtual shard from <see cref="FromGroupId"/> to <see cref="ToGroupId"/>.
 /// Routing is unaffected until a matching <see cref="Cutover"/> commits.
 /// </summary>
-public sealed record MigrationStarted(string MigrationId, string StreamName, int VirtualShardIndex, string FromGroupId, string ToGroupId) : MetaLogRecord;
+public sealed record MigrationStarted(MigrationId MigrationId, string StreamName, int VirtualShardIndex, string FromGroupId, string ToGroupId) : MetaLogRecord;
 
 /// <summary>
 /// Abandons an in-progress migration; routing was never affected by it.
 /// </summary>
-public sealed record MigrationAborted(string MigrationId, string StreamName, int VirtualShardIndex) : MetaLogRecord;
+public sealed record MigrationAborted(MigrationId MigrationId, string StreamName, int VirtualShardIndex) : MetaLogRecord;
 
 /// <summary>
 /// The single, atomic routing flip for an in-progress migration. <see cref="MigrationId"/> is
 /// an idempotency token, guarding against a stale or duplicate cutover being applied twice.
 /// </summary>
-public sealed record Cutover(string MigrationId, string StreamName, int VirtualShardIndex, string ToGroupId) : MetaLogRecord;
+public sealed record Cutover(MigrationId MigrationId, string StreamName, int VirtualShardIndex, string ToGroupId) : MetaLogRecord;
 
 /// <summary>
 /// Marks a migration's post-cutover cleanup as done, after its grace period elapsed.
 /// </summary>
-public sealed record MigrationCompleted(string MigrationId, string StreamName, int VirtualShardIndex) : MetaLogRecord;
+public sealed record MigrationCompleted(MigrationId MigrationId, string StreamName, int VirtualShardIndex) : MetaLogRecord;

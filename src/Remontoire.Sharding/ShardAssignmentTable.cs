@@ -35,6 +35,14 @@ public sealed class ShardAssignmentTable {
     /// source can call it directly — but by convention only ever called from that one tailing
     /// loop, never scattered across arbitrary call sites.
     /// </summary>
+    /// <remarks>
+    /// <see cref="MigrationAborted"/>/<see cref="Cutover"/> are rejected outright (silently — no
+    /// table change) when their <see cref="Sharding.MigrationId"/> doesn't match whatever
+    /// migration this table currently considers in progress for that (stream, virtual shard)
+    /// pair — the same "reject a second, conflicting command instead of applying it" discipline
+    /// membership changes already apply, here guarding against a stale or duplicate command
+    /// silently corrupting an unrelated, later migration for the same shard.
+    /// </remarks>
     public void Apply(MetaLogRecord record) {
         switch (record) {
             case CreateStream r:
@@ -46,18 +54,27 @@ public sealed class ShardAssignmentTable {
                 break;
 
             case MigrationStarted r:
+                // A different migration already in progress for this exact shard is rejected —
+                // re-proposing the SAME migration (the same id) is a harmless, idempotent no-op.
+                if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeStart) &&
+                    beforeStart.MigrationId is { } inProgress && inProgress != r.MigrationId)
+                    break;
+
                 _assignments[(r.StreamName, r.VirtualShardIndex)] =
-                    new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.FromGroupId, r.ToGroupId);
+                    new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.FromGroupId, r.ToGroupId, r.MigrationId);
                 break;
 
             case MigrationAborted r:
-                if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeAbort))
-                    _assignments[(r.StreamName, r.VirtualShardIndex)] = beforeAbort with { MigratingToGroupId = null };
+                if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeAbort) &&
+                    beforeAbort.MigrationId == r.MigrationId)
+                    _assignments[(r.StreamName, r.VirtualShardIndex)] = beforeAbort with { MigratingToGroupId = null, MigrationId = null };
                 break;
 
             case Cutover r:
-                _assignments[(r.StreamName, r.VirtualShardIndex)] =
-                    new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.ToGroupId);
+                if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeCutover) &&
+                    beforeCutover.MigrationId == r.MigrationId)
+                    _assignments[(r.StreamName, r.VirtualShardIndex)] =
+                        new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.ToGroupId);
                 break;
 
             case MigrationCompleted:

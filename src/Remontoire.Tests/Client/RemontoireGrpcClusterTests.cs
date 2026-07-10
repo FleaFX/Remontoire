@@ -123,9 +123,11 @@ public class RemontoireGrpcClusterTests {
             // this whole test file uses — hosts other than 0 have no meta-group replica of their
             // own here, so seed them directly, the same end state a watcher would arrive at.
             var table = hosts[i].Services.GetRequiredService<ShardAssignmentTable>();
+            var seedMigrationId = new MigrationId(Guid.NewGuid());
             table.Apply(new CreateStream(StreamName, VirtualShardCount: 1, RoutingAlgorithm.XxHash3V1));
             table.Apply(new RegisterGroup(GroupId, members.Select(member => new ShardGroupMember(member.NodeId, member.Address)).ToArray()));
-            table.Apply(new Cutover(MigrationId: "seed", StreamName, VirtualShardIndex: 0, GroupId));
+            table.Apply(new MigrationStarted(seedMigrationId, StreamName, VirtualShardIndex: 0, FromGroupId: GroupId, ToGroupId: GroupId));
+            table.Apply(new Cutover(seedMigrationId, StreamName, VirtualShardIndex: 0, GroupId));
 
             RaftReplica? metaReplica = null;
             ShardAssignmentTableApplier? metaApplier = null;
@@ -146,12 +148,15 @@ public class RemontoireGrpcClusterTests {
                 var journal = hosts[i].Services.GetRequiredService<MetaLogJournal>();
                 metaApplier = new ShardAssignmentTableApplier(metaReplica, table, journal);
 
+                var metaSeedMigrationId = new MigrationId(Guid.NewGuid());
                 await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new CreateStream(StreamName, 1, RoutingAlgorithm.XxHash3V1))));
                 await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [],
                     MetaLogRecord.Encode(new RegisterGroup(GroupId, members.Select(member => new ShardGroupMember(member.NodeId, member.Address)).ToArray()))));
-                await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover("seed", StreamName, 0, GroupId))));
+                await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [],
+                    MetaLogRecord.Encode(new MigrationStarted(metaSeedMigrationId, StreamName, 0, GroupId, GroupId))));
+                await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover(metaSeedMigrationId, StreamName, 0, GroupId))));
 
-                await RunUntilAsync(() => journal.Snapshot().Records.Count == 3, TimeSpan.FromSeconds(2));
+                await RunUntilAsync(() => journal.Snapshot().Records.Count == 4, TimeSpan.FromSeconds(2));
             }
 
             nodes.Add(new Node {
@@ -197,9 +202,11 @@ public class RemontoireGrpcClusterTests {
         var journal = node.Host.Services.GetRequiredService<MetaLogJournal>();
         var applier = new ShardAssignmentTableApplier(replica, table, journal);
 
+        var soloMigrationId = new MigrationId(Guid.NewGuid());
         await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new CreateStream(StreamName, 1, RoutingAlgorithm.XxHash3V1))));
         await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(registerGroup)));
-        await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover("seed-solo", StreamName, 0, GroupId))));
+        await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new MigrationStarted(soloMigrationId, StreamName, 0, GroupId, GroupId))));
+        await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover(soloMigrationId, StreamName, 0, GroupId))));
 
         await RunUntilAsync(() => table.TryGetGroup(GroupId, out var group) && group.Members.Count == 1, TimeSpan.FromSeconds(2));
         return (replica, applier);

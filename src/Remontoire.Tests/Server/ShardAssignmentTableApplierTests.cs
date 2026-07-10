@@ -28,8 +28,9 @@ public class ShardAssignmentTableApplierTests {
     public async Task A_migration_lifecycle_is_replayed_into_the_table_in_commit_order() {
         var (replica, table, applier) = await ComposeAsync();
         try {
-            await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"))));
-            await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover("migration-1", "orders", 5, "group-2"))));
+            var migrationId = new MigrationId(Guid.NewGuid());
+            await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new MigrationStarted(migrationId, "orders", 5, "group-1", "group-2"))));
+            await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover(migrationId, "orders", 5, "group-2"))));
 
             (await WaitUntilAsync(() => table.TryGetAssignment("orders", 5, out var assignment) && assignment.GroupId == "group-2"))
                 .Should().BeTrue();
