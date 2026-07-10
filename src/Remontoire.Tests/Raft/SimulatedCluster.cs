@@ -37,7 +37,9 @@ sealed class SimulatedCluster : IAsyncDisposable {
             CreateReplica(nodeId);
     }
 
-    /// <summary>The currently-running replicas, keyed by node ID. A crashed node is absent until restarted.</summary>
+    /// <summary>
+    /// The currently-running replicas, keyed by node ID. A crashed node is absent until restarted.
+    /// </summary>
     public Dictionary<string, RaftReplica> Replicas { get; }
 
     /// <summary>
@@ -72,7 +74,9 @@ sealed class SimulatedCluster : IAsyncDisposable {
             prepareSnapshot: prepareSnapshot, installSnapshot: installSnapshot);
     }
 
-    /// <summary>Starts every replica. Call once, before the first <see cref="StepAsync"/>.</summary>
+    /// <summary>
+    /// Starts every replica. Call once, before the first <see cref="StepAsync"/>.
+    /// </summary>
     public Task StartAllAsync(CancellationToken cancellationToken = default) =>
         Task.WhenAll(Replicas.Values.Select(replica => replica.StartAsync(cancellationToken)));
 
@@ -82,7 +86,9 @@ sealed class SimulatedCluster : IAsyncDisposable {
     /// </summary>
     public void Partition(params string[][] islands) => _islands = islands;
 
-    /// <summary>Removes any active partition — every node can reach every other node again.</summary>
+    /// <summary>
+    /// Removes any active partition — every node can reach every other node again.
+    /// </summary>
     public void Heal() => _islands = [_members.Select(member => member.NodeId).ToArray()];
 
     /// <summary>
@@ -95,7 +101,9 @@ sealed class SimulatedCluster : IAsyncDisposable {
             await replica.DisposeAsync();
     }
 
-    /// <summary>Restarts a crashed node from its simulated durable state.</summary>
+    /// <summary>
+    /// Restarts a crashed node from its simulated durable state.
+    /// </summary>
     public Task RestartAsync(string nodeId, CancellationToken cancellationToken = default) {
         CreateReplica(nodeId);
         return Replicas[nodeId].StartAsync(cancellationToken);

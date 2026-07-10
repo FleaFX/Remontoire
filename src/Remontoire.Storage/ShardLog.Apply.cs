@@ -12,35 +12,46 @@ public sealed partial class ShardLog {
     // race with). Volatile.Write below is still required: TryGet/ReadFromAsync read these
     // fields from other threads concurrently.
     async Task HandleWalRecordCommittedAsync(WalRecordCommitted committed) {
-        if (committed.Record.RecordType != WalRecordType.Append)
-            return;
-
         // The committed-source may replay its full history from the start on every restart —
         // this layer doesn't know or care why, only that it must tolerate it. Anything at or
         // below the watermark already reached a segment or the MemTable in an earlier session;
         // re-applying it here would flush it a second time. Filtering purely by LogicalOffset
-        // keeps this a plain, idempotent skip.
-        if (committed.Record.LogicalOffset < _nextOffsetToApply)
-            return;
+        // keeps this a plain, idempotent skip — meaningless for non-Append record types, so those
+        // always fall through to the applied-republish below untouched.
+        if (committed.Record.RecordType == WalRecordType.Append && committed.Record.LogicalOffset >= _nextOffsetToApply) {
+            var before = _segments;
+            var (memTable, sstSegments) = await ApplyAndMaybeFlushAsync(_directory, new ShardState(_memTable, before), committed.Record, _flushThresholdBytes, CancellationToken.None);
+            _nextOffsetToApply = committed.Record.LogicalOffset + 1;
 
-        var before = _segments;
-        var (memTable, sstSegments) = await ApplyAndMaybeFlushAsync(_directory, new ShardState(_memTable, before), committed.Record, _flushThresholdBytes, CancellationToken.None);
-        _nextOffsetToApply = committed.Record.LogicalOffset + 1;
+            // Publish the NEW source of truth before retracting the old one — otherwise a
+            // concurrent TryGet/ReadFromAsync could observe neither the (already-emptied) old
+            // MemTable nor the (not-yet-published) new segment for an offset that legitimately
+            // exists.
+            Volatile.Write(ref _segments, sstSegments);
+            Volatile.Write(ref _memTable, memTable);
 
-        // Publish the NEW source of truth before retracting the old one — otherwise a
-        // concurrent TryGet/ReadFromAsync could observe neither the (already-emptied) old
-        // MemTable nor the (not-yet-published) new segment for an offset that legitimately
-        // exists.
-        Volatile.Write(ref _segments, sstSegments);
-        Volatile.Write(ref _memTable, memTable);
+            // A new segment can be exactly what turns an earlier "nothing to compact" answer into
+            // a valid plan — only worth checking when a flush actually grew the segment list.
+            if (sstSegments.Length != before.Length)
+                TryFulfillPendingPlanRequest();
 
-        // A new segment can be exactly what turns an earlier "nothing to compact" answer into a
-        // valid plan — only worth checking when a flush actually grew the segment list.
-        if (sstSegments.Length != before.Length)
-            TryFulfillPendingPlanRequest();
+            // A pending PrepareSnapshotAsync call may have been waiting on exactly this offset.
+            await TryFulfillPendingSnapshotRequestsAsync();
 
-        // A pending PrepareSnapshotAsync call may have been waiting on exactly this offset.
-        await TryFulfillPendingSnapshotRequestsAsync();
+            // Wake every WaitForAppendAsync waiter — swap in a fresh TaskCompletionSource BEFORE
+            // completing the old one, so a waiter that immediately re-awaits after waking can
+            // never land on an instance that's already completed and about to be discarded.
+            var previouslyAppended = _appended;
+            _appended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            previouslyAppended.TrySetResult();
+        }
+
+        // Every record this shard log ever receives, applied or not (a replayed duplicate Append
+        // included) — the single feed for anything downstream that needs the raw committed
+        // stream. Unlike the MemTable/SST apply above, this has no idempotency filter of its own;
+        // that's each consumer's own responsibility (e.g. an Ack-applier's naturally idempotent
+        // Ack semantics).
+        _applied.Writer.TryWrite(committed.Record);
     }
 
     /// <summary>

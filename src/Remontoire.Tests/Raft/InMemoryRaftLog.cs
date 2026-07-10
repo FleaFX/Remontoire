@@ -29,8 +29,21 @@ sealed class InMemoryRaftLog : IRaftLog {
         }
     }
 
+    // Copies each record's variable-length fields before storing — a real IRaftLog durably
+    // rewrites the bytes into its own storage (a WAL file, decoupled from the caller's memory
+    // the moment the write returns), so a caller is entitled to assume the same here. Without
+    // this, a record decoded from the wire via WalRecordSerializer.TryRead (whose ReadOnlyMemory
+    // fields are backed by a pooled buffer, returned to the pool as soon as the decoding method's
+    // own using/finally block ends) would leave this log holding onto memory that gets silently
+    // reused — and corrupted — by whatever the pool hands out next.
     public ValueTask AppendAsync(IReadOnlyList<WalRecord> entries, CancellationToken cancellationToken = default) {
-        _entries.AddRange(entries);
+        foreach (var entry in entries)
+            _entries.Add(entry with {
+                PartitionKey = entry.PartitionKey.ToArray(),
+                Headers = entry.Headers.Select(header => new Header(header.Key.ToArray(), header.Value.ToArray())).ToArray(),
+                Payload = entry.Payload.ToArray(),
+            });
+
         return ValueTask.CompletedTask;
     }
 

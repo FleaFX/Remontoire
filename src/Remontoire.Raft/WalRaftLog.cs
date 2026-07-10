@@ -157,11 +157,30 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
             var startPosition = i == startFile ? _positionByIndex[fromIndex].Position : 0;
             var reader = new WalReader(files[i].Path);
             await foreach (var result in reader.ReadFromAsync(startPosition, cancellationToken)) {
+                // Copy out before disposing — result.Record's PartitionKey/Headers/Payload are
+                // backed by result's pooled buffer (WalRecordSerializer.TryRead's own contract),
+                // returned to the pool the moment this using block exits. Unlike a caller that
+                // consumes a yielded record synchronously within the same iteration (e.g.
+                // SendAppendEntriesAsync's immediate encode), ReadFromAsync's IRaftLog contract
+                // is a bare, undisposable WalRecord — callers are entitled to hold onto it well
+                // past this enumeration (RaftReplica.AdvanceCommitIndexAsync forwards it to a
+                // channel for asynchronous, later consumption), so yielding pool-backed memory
+                // here is unsafe: the next iteration's dispose can silently corrupt an
+                // already-yielded record before anything downstream ever reads it.
+                WalRecord owned;
                 using (result)
-                    yield return result.Record;
+                    owned = CopyOwned(result.Record);
+
+                yield return owned;
             }
         }
     }
+
+    static WalRecord CopyOwned(WalRecord record) => record with {
+        PartitionKey = record.PartitionKey.ToArray(),
+        Headers = record.Headers.Select(header => new Header(header.Key.ToArray(), header.Value.ToArray())).ToArray(),
+        Payload = record.Payload.ToArray(),
+    };
 
     /// <inheritdoc />
     public async ValueTask AppendAsync(IReadOnlyList<WalRecord> entries, CancellationToken cancellationToken = default) {
@@ -306,7 +325,9 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
             File.Delete(path);
     }
 
-    /// <summary>Disposes the active <see cref="WalWriter"/>, draining it to durable completion first.</summary>
+    /// <summary>
+    /// Disposes the active <see cref="WalWriter"/>, draining it to durable completion first.
+    /// </summary>
     public ValueTask DisposeAsync() => _activeWriter.DisposeAsync();
 
     List<WalFileRange> AllFileRanges() {

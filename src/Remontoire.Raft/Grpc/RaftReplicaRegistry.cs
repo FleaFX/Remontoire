@@ -10,12 +10,18 @@ namespace Remontoire.Raft.Grpc;
 public sealed class RaftReplicaRegistry {
     readonly ConcurrentDictionary<string, RaftReplica> _replicas = new();
 
-    /// <summary>Registers <paramref name="replica"/> under its own <see cref="RaftReplica.GroupId"/>.</summary>
+    /// <summary>
+    /// Registers <paramref name="replica"/> under its own <see cref="RaftReplica.GroupId"/>.
+    /// </summary>
     public void Register(RaftReplica replica) => _replicas[replica.GroupId] = replica;
 
-    /// <summary>Removes whatever is registered for <paramref name="groupId"/>, if anything.</summary>
+    /// <summary>
+    /// Removes whatever is registered for <paramref name="groupId"/>, if anything.
+    /// </summary>
     public void Unregister(string groupId) => _replicas.TryRemove(groupId, out _);
 
-    /// <summary>Looks up the replica owning <paramref name="groupId"/>, if any is currently registered.</summary>
+    /// <summary>
+    /// Looks up the replica owning <paramref name="groupId"/>, if any is currently registered.
+    /// </summary>
     public bool TryGet(string groupId, out RaftReplica replica) => _replicas.TryGetValue(groupId, out replica!);
 }

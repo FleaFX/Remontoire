@@ -8,12 +8,18 @@ namespace Remontoire.Raft;
 /// the reason this interface exists at all.
 /// </summary>
 public interface IRaftTransport {
-    /// <summary>Sends a vote request to <paramref name="peerId"/> and awaits the response.</summary>
+    /// <summary>
+    /// Sends a vote request to <paramref name="peerId"/> and awaits the response.
+    /// </summary>
     ValueTask<VoteResponse> RequestVoteAsync(string peerId, VoteRequest request, CancellationToken cancellationToken = default);
 
-    /// <summary>Sends an append-entries request (or heartbeat) to <paramref name="peerId"/>.</summary>
+    /// <summary>
+    /// Sends an append-entries request (or heartbeat) to <paramref name="peerId"/>.
+    /// </summary>
     ValueTask<AppendEntriesResponse> AppendEntriesAsync(string peerId, AppendEntriesRequest request, CancellationToken cancellationToken = default);
 
-    /// <summary>Sends one snapshot chunk to <paramref name="peerId"/>.</summary>
+    /// <summary>
+    /// Sends one snapshot chunk to <paramref name="peerId"/>.
+    /// </summary>
     ValueTask<InstallSnapshotResponse> InstallSnapshotAsync(string peerId, InstallSnapshotRequest request, CancellationToken cancellationToken = default);
 }

@@ -60,4 +60,24 @@ public sealed partial class ShardLog {
         foreach (var entry in memTable.ScanFrom(logicalOffset))
             yield return new LogEntryHandle(entry);
     }
+
+    /// <summary>
+    /// Republishes every record this shard log receives from its committed-source — <see
+    /// cref="WalRecordType.Append"/> records after materializing them into MemTable/SST,
+    /// everything else (<see cref="WalRecordType.Ack"/>, <see cref="WalRecordType.ShardConfigChange"/>,
+    /// a NoOp) untouched and unmaterialized. The single feed for anything downstream of storage
+    /// that needs the raw committed stream without a second subscription to the committed-source's
+    /// own single reader slot. Only one consumer may enumerate this at a time — same discipline
+    /// as the committed-source itself.
+    /// </summary>
+    public IAsyncEnumerable<WalRecord> ReadAppliedAsync(CancellationToken cancellationToken = default) =>
+        _applied.Reader.ReadAllAsync(cancellationToken);
+
+    /// <summary>
+    /// Completes the next time this shard log applies an <see cref="WalRecordType.Append"/>
+    /// record — a signal, not a data channel, so any number of concurrent waiters may await it
+    /// independently. The caller re-reads (<see cref="TryGet"/>/<see cref="ReadFromAsync"/>) after
+    /// it completes; this never carries the record itself, only "something changed, look again."
+    /// </summary>
+    public Task WaitForAppendAsync(CancellationToken cancellationToken = default) => _appended.Task.WaitAsync(cancellationToken);
 }

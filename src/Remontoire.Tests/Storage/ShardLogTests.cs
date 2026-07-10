@@ -459,6 +459,124 @@ public class ShardLogTests {
         }
     }
 
+    public class ReadAppliedAsync {
+        [Fact]
+        public async Task Republishes_an_Append_record_after_applying_it() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                var record = SampleRecord(0);
+                log.TryPost(new WalRecordCommitted(record));
+
+                var republished = await ReadOneAsync(log);
+
+                republished.Should().Be(record);
+                log.TryGet(0, out var handle).Should().BeTrue("the same record is also materialized into the MemTable");
+                handle.Dispose();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Republishes_a_non_Append_record_without_materializing_it() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                var ack = AckRecord("group-1");
+                log.TryPost(new WalRecordCommitted(ack));
+
+                var republished = await ReadOneAsync(log);
+
+                republished.Should().Be(ack);
+                log.TryGet(0, out _).Should().BeFalse("a non-Append record is passed through, never materialized into the MemTable");
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Republishes_a_replayed_duplicate_Append_even_though_re_applying_it_is_skipped() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                var record = SampleRecord(0);
+                log.TryPost(new WalRecordCommitted(record));
+                await ReadOneAsync(log); // drain the first republish
+
+                log.TryPost(new WalRecordCommitted(record)); // a replayed duplicate — same offset again
+                var republishedAgain = await ReadOneAsync(log);
+
+                republishedAgain.Should().Be(record, "every record reaching this shard log is republished, applied or not");
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    public class WaitForAppendAsync {
+        [Fact]
+        public async Task Is_not_yet_completed_before_any_Append_arrives() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+
+                var task = log.WaitForAppendAsync();
+
+                task.IsCompleted.Should().BeFalse();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Completes_once_an_Append_is_applied() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                var task = log.WaitForAppendAsync();
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+
+                await task.WaitAsync(TimeSpan.FromSeconds(2));
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Every_concurrently_awaited_call_completes_from_the_same_Append() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                var first = log.WaitForAppendAsync();
+                var second = log.WaitForAppendAsync();
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+
+                await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(2));
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Does_not_complete_for_a_non_Append_record() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+                var task = log.WaitForAppendAsync();
+
+                log.TryPost(new WalRecordCommitted(AckRecord("group-1")));
+                await ReadOneAsync(log); // drain the republish, confirming the Ack was actually processed
+
+                task.IsCompleted.Should().BeFalse();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     static string CreateTempDirectory() {
         var directory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(directory);
@@ -490,6 +608,21 @@ public class ShardLogTests {
 
     static WalRecord SampleRecord(ulong offset, string payload = "hello world") =>
         new(WalRecordType.Append, RaftTerm: 0, RaftIndex: 0, offset, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes(payload));
+
+    // LogicalOffset is meaningless for a non-Append record — left at 0, same as RaftReplica's own
+    // ProposeRecordAsync leaves it for an Ack.
+    static WalRecord AckRecord(string consumerGroup) =>
+        new(WalRecordType.Ack, RaftTerm: 0, RaftIndex: 0, LogicalOffset: 0, TimestampMicros: 42, Encoding.UTF8.GetBytes(consumerGroup), [], "1"u8.ToArray());
+
+    static async Task<WalRecord> ReadOneAsync(ShardLog log, TimeSpan? timeout = null) {
+        using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(2));
+        try {
+            await foreach (var record in log.ReadAppliedAsync(cts.Token))
+                return record;
+        } catch (OperationCanceledException) { }
+
+        throw new TimeoutException("No record was published to ReadAppliedAsync.");
+    }
 
     // ShardLog's own tests inject committed records directly via TryPost — this stands in for a
     // real committed-source (RaftReplica.ReadCommittedAsync) whenever a test has nothing to
