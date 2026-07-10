@@ -72,14 +72,20 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
         while (!cancellationToken.IsCancellationRequested) {
             var address = _leaderCache.Get(groupId) ?? RandomMemberAddress();
             var call = ClientFor(address).Consume(new ConsumeRequest { StreamName = streamName, ConsumerGroup = consumerGroup }, cancellationToken: cancellationToken);
-            var unreachable = false;
+
+            // Set whenever a fresh connection attempt is pointless without backing off first —
+            // an unreachable node, or a NotLeader with no hint (an election is in progress and
+            // the cache can't be trusted either way). Both get the exact same invalidate-and-wait
+            // treatment CallWithRedirectAsync gives its own hintless-redirect case, so a dead or
+            // still-electing cached address is never retried in a tight, CPU-burning loop.
+            var needsBackoff = false;
             try {
                 while (true) {
                     bool hasNext;
                     try {
                         hasNext = await call.ResponseStream.MoveNext(cancellationToken);
                     } catch (RpcException) {
-                        unreachable = true; // the node is unreachable — reconnect exactly like a stream that just ended
+                        needsBackoff = true; // the node is unreachable — reconnect exactly like a stream that just ended
                         break;
                     }
 
@@ -90,6 +96,8 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
                     if (reply.NotLeader is { } notLeader) {
                         if (notLeader.HasLeaderAddress)
                             _leaderCache.Update(groupId, new Uri(notLeader.LeaderAddress));
+                        else
+                            needsBackoff = true; // no hint — an election is in progress
                         break; // reconnect to the (possibly new) leader
                     }
 
@@ -99,9 +107,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
                 call.Dispose();
             }
 
-            // A dead cached address must not be retried in a tight, CPU-burning loop — same
-            // invalidate-and-wait treatment CallWithRedirectAsync gives a hintless redirect.
-            if (unreachable) {
+            if (needsBackoff) {
                 _leaderCache.Invalidate(groupId);
                 await Task.Delay(_options.RedirectRetryDelay, cancellationToken);
             }

@@ -176,6 +176,34 @@ public class RemontoireGrpcClusterTests {
     }
 
     [Fact]
+    public async Task ConsumeAsync_against_a_follower_redirects_transparently_to_the_real_leader() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            using (var seed = Connect(nodes))
+                await seed.PublishAsync(StreamName, "key-1", "hello"u8.ToArray());
+
+            var follower = nodes.First(node => !node.Replica.IsLeader);
+            using var connection = Connect([follower]); // only knows the follower's address up front
+
+            var messages = new List<RemontoireMessage>();
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                await foreach (var message in connection.ConsumeAsync(StreamName, "group-a", cts.Token)) {
+                    messages.Add(message);
+                    break;
+                }
+
+            var expectedPayload = "hello"u8.ToArray();
+            messages.Should().ContainSingle(message => message.Payload.ToArray().SequenceEqual(expectedPayload),
+                "the stream must redirect to the real leader even though the connection only knew the follower's address");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    [Fact]
     public async Task A_restarted_consumer_receives_exactly_the_not_yet_acked_messages_again() {
         var directoryRoot = CreateTempDirectory();
         var nodes = await StartClusterAsync(directoryRoot);
