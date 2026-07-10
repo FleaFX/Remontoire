@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <Protobuf Include="Protos/remontoire_client.proto" GrpcServices="Both" />
+    <Protobuf Include="Protos/remontoire_meta.proto" GrpcServices="Both" />
   </ItemGroup>
 
 </Project>
