@@ -10,6 +10,7 @@ using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
+using Remontoire.Sharding;
 using Remontoire.Storage;
 
 namespace Remontoire.Client;
@@ -64,6 +65,7 @@ public class RemontoireGrpcClusterTests {
         builder.Services.AddSingleton<RaftReplicaRegistry>();
         builder.Services.AddSingleton<MessagingGroupRegistry>();
         builder.Services.AddSingleton<LeaderAddressDirectory>();
+        builder.Services.AddSingleton<ShardAssignmentTable>();
 
         var app = builder.Build();
         app.MapGrpcService<RaftTransportGrpcService>();
@@ -104,6 +106,14 @@ public class RemontoireGrpcClusterTests {
                     GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(ackIndex.AllGroupsLowWatermark())));
             var applier = new AckIndexApplier(shardLog, ackIndex);
             hosts[i].Services.GetRequiredService<MessagingGroupRegistry>().Register(GroupId, shardLog, ackIndex);
+
+            // No meta-group in this harness — seed each node's table directly with the one
+            // stream/group/assignment this whole test file uses, standing in for what a real
+            // meta-group commit would otherwise replicate.
+            var table = hosts[i].Services.GetRequiredService<ShardAssignmentTable>();
+            table.Apply(new CreateStream(StreamName, VirtualShardCount: 1, RoutingAlgorithm.XxHash3V1));
+            table.Apply(new RegisterGroup(GroupId, members.Select(member => new ShardGroupMember(member.NodeId, member.Address)).ToArray()));
+            table.Apply(new Cutover(MigrationId: "seed", StreamName, VirtualShardIndex: 0, GroupId));
 
             nodes.Add(new Node { Host = hosts[i], Replica = replica, Transport = transport, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier });
         }

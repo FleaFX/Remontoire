@@ -32,11 +32,22 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
 
     static async Task RunWatchLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, CancellationToken cancellationToken) {
         try {
-            var snapshot = await client.GetSnapshotAsync(new GetSnapshotRequest(), cancellationToken: cancellationToken);
-            foreach (var record in snapshot.Records)
-                table.Apply(MetaLogRecord.Decode(record.Payload.Span));
+            var fromVersion = 0UL;
+            while (true) {
+                try {
+                    var snapshot = await client.GetSnapshotAsync(new GetSnapshotRequest(), cancellationToken: cancellationToken);
+                    foreach (var record in snapshot.Records)
+                        table.Apply(MetaLogRecord.Decode(record.Payload.Span));
 
-            var fromVersion = snapshot.Version;
+                    fromVersion = snapshot.Version;
+                    break;
+                } catch (RpcException) {
+                    // The meta-group isn't reachable yet (e.g. still starting up) — keep retrying
+                    // the initial fill rather than giving up on the whole watcher.
+                    await Task.Delay(WatchReconnectDelay, cancellationToken);
+                }
+            }
+
             while (true) {
                 try {
                     using var call = client.Watch(new WatchRequest { FromVersion = fromVersion }, cancellationToken: cancellationToken);
