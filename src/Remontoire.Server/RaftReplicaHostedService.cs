@@ -15,6 +15,14 @@ namespace Remontoire.Server;
 /// maintained from it, registering both so <see cref="Grpc.RemontoireClientGrpcService"/> can
 /// serve the client-facing RPCs.
 /// </summary>
+/// <remarks>
+/// Optionally also composes and starts this node's meta-group replica, if configured. The
+/// meta-group holds zero virtual shards of its own — no <see cref="ShardLog"/>, no
+/// <see cref="AckIndex"/>, no <see cref="MessagingGroupRegistry"/> registration — but it shares
+/// the same <see cref="RaftGrpcTransport"/> instance as the data group: transport construction
+/// first merges every peer across both groups, deduplicated by node id, so the same peer node
+/// never gets more than one channel regardless of how many groups it's a peer in.
+/// </remarks>
 sealed class RaftReplicaHostedService(
     IOptions<RaftServerOptions> options, RaftReplicaRegistry registry, MessagingGroupRegistry messagingRegistry, LeaderAddressDirectory leaderAddresses)
     : IHostedService {
@@ -23,12 +31,15 @@ sealed class RaftReplicaHostedService(
     RaftReplica? _replica;
     ShardLog? _shardLog;
     AckIndexApplier? _ackIndexApplier;
+    WalRaftLog? _metaLog;
+    RaftReplica? _metaReplica;
 
     public async Task StartAsync(CancellationToken cancellationToken) {
         var raftOptions = options.Value;
         var peers = raftOptions.Peers.Select(peer => new RaftGroupMember(peer.NodeId, new Uri(peer.Address))).ToArray();
+        var metaPeers = raftOptions.MetaGroup?.Peers.Select(peer => new RaftGroupMember(peer.NodeId, new Uri(peer.Address))).ToArray() ?? [];
 
-        foreach (var peer in peers)
+        foreach (var peer in peers.Concat(metaPeers).DistinctBy(peer => peer.NodeId))
             leaderAddresses.Register(peer.NodeId, peer.Address);
 
         var config = new RaftReplicaConfig(
@@ -41,7 +52,9 @@ sealed class RaftReplicaHostedService(
 
         _log = await WalRaftLog.OpenAsync(raftOptions.DataDirectory, cancellationToken: cancellationToken);
         var stateStore = new FileRaftStateStore(raftOptions.DataDirectory);
-        _transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout);
+
+        var allPeers = peers.Concat(metaPeers).DistinctBy(peer => peer.NodeId).ToArray();
+        _transport = new RaftGrpcTransport(allPeers, config.ResolvedRpcTimeout);
 
         _replica = new RaftReplica(stateStore, _log, _transport, config);
         await _replica.StartAsync(cancellationToken);
@@ -54,9 +67,34 @@ sealed class RaftReplicaHostedService(
         _ackIndexApplier = new AckIndexApplier(_shardLog, ackIndex);
 
         messagingRegistry.Register(raftOptions.GroupId, _shardLog, ackIndex);
+
+        if (raftOptions.MetaGroup is { } metaOptions) {
+            var metaConfig = new RaftReplicaConfig(
+                GroupId: "__meta__",
+                NodeId: metaOptions.NodeId,
+                Peers: metaPeers,
+                HeartbeatInterval: TimeSpan.FromMilliseconds(50),
+                ElectionTimeoutMin: TimeSpan.FromMilliseconds(250),
+                ElectionTimeoutMax: TimeSpan.FromMilliseconds(500));
+
+            _metaLog = await WalRaftLog.OpenAsync(metaOptions.DataDirectory, cancellationToken: cancellationToken);
+            var metaStateStore = new FileRaftStateStore(metaOptions.DataDirectory);
+
+            _metaReplica = new RaftReplica(metaStateStore, _metaLog, _transport, metaConfig);
+            await _metaReplica.StartAsync(cancellationToken);
+            registry.Register(_metaReplica);
+        }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken) {
+        if (_metaReplica is not null) {
+            registry.Unregister(_metaReplica.GroupId);
+            await _metaReplica.DisposeAsync();
+        }
+
+        if (_metaLog is not null)
+            await _metaLog.DisposeAsync();
+
         if (_replica is not null)
             messagingRegistry.Unregister(_replica.GroupId);
 
