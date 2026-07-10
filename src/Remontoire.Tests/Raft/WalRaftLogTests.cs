@@ -36,6 +36,28 @@ public class WalRaftLogTests {
     }
 
     [Fact]
+    public async Task ReadFromAsync_yields_records_whose_content_survives_holding_onto_them_past_the_enumeration() {
+        // Regression test: ReadFromAsync's underlying WalReadResult owns a pooled buffer, released
+        // back to the pool as each iteration's `using` block completes — the moment the next
+        // record is read. A caller that fully materializes the enumeration before inspecting
+        // content (exactly what RaftReplica.AdvanceCommitIndexAsync effectively does, forwarding
+        // each record to a channel for asynchronous, later consumption) must still see every
+        // record's own, uncorrupted bytes — not whatever the pool handed out to a later record.
+        var directory = TempWalDirectory();
+        try {
+            await using var log = await WalRaftLog.OpenAsync(directory);
+            await log.AppendAsync([DistinctEntry(term: 1, index: 1), DistinctEntry(term: 1, index: 2), DistinctEntry(term: 1, index: 3)]);
+
+            var records = await ToListAsync(log.ReadFromAsync(1));
+
+            records.Select(r => System.Text.Encoding.UTF8.GetString(r.Payload.Span)).Should().Equal("payload-1", "payload-2", "payload-3");
+            records.Select(r => System.Text.Encoding.UTF8.GetString(r.PartitionKey.Span)).Should().Equal("key-1", "key-2", "key-3");
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task GetTermAtAsync_returns_the_term_of_the_entry_at_that_index() {
         var directory = TempWalDirectory();
         try {
@@ -328,6 +350,12 @@ public class WalRaftLogTests {
     static WalRecord Entry(ulong term, ulong index) =>
         new(WalRecordType.Append, RaftTerm: term, RaftIndex: index, LogicalOffset: index - 1, TimestampMicros: 42,
             PartitionKey: "order-42"u8.ToArray(), Headers: [], Payload: "hello world"u8.ToArray());
+
+    // Unlike Entry, gives each record its own distinct PartitionKey/Payload — needed to detect a
+    // record whose content silently became some OTHER record's bytes.
+    static WalRecord DistinctEntry(ulong term, ulong index) =>
+        new(WalRecordType.Append, RaftTerm: term, RaftIndex: index, LogicalOffset: index - 1, TimestampMicros: 42,
+            PartitionKey: System.Text.Encoding.UTF8.GetBytes($"key-{index}"), Headers: [], Payload: System.Text.Encoding.UTF8.GetBytes($"payload-{index}"));
 
     static async Task<List<WalRecord>> ToListAsync(IAsyncEnumerable<WalRecord> records) {
         var list = new List<WalRecord>();
