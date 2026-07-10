@@ -14,15 +14,23 @@ public sealed class AckIndex {
     readonly ConcurrentDictionary<string, ConsumerGroupAckState> _groups = new();
 
     /// <summary>
-    /// Applies one Ack record — a no-op for any other <see cref="WalRecordType"/>.
+    /// Applies one Ack or AckCheckpoint record — a no-op for any other <see cref="WalRecordType"/>.
     /// </summary>
     public void Apply(WalRecord record) {
-        if (record.RecordType != WalRecordType.Ack)
-            return;
-
-        var consumerGroup = Encoding.UTF8.GetString(record.PartitionKey.Span);
-        var state = _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
-        state.Ack(DecodeAckPayload(record.Payload.Span));
+        switch (record.RecordType) {
+            case WalRecordType.Ack: {
+                var consumerGroup = Encoding.UTF8.GetString(record.PartitionKey.Span);
+                var state = _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
+                state.Ack(DecodeAckPayload(record.Payload.Span));
+                break;
+            }
+            case WalRecordType.AckCheckpoint: {
+                var consumerGroup = Encoding.UTF8.GetString(record.PartitionKey.Span);
+                var state = _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
+                state.AdvanceWatermarkTo(BinaryPrimitives.ReadUInt64LittleEndian(record.Payload.Span));
+                break;
+            }
+        }
     }
 
     /// <summary>
@@ -47,7 +55,8 @@ public sealed class AckIndex {
     public ConsumerGroupAckState GetOrCreate(string consumerGroup) => _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
 
     /// <summary>
-    /// Every consumer group this ack index has ever seen an Ack record for.
+    /// Every consumer group this ack index has ever seen an Ack/AckCheckpoint record, or a local
+    /// <see cref="ApplyLocal"/> call, for.
     /// </summary>
     public IReadOnlyCollection<string> RegisteredConsumerGroups() => _groups.Keys.ToArray();
 

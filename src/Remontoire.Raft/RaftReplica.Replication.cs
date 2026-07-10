@@ -38,6 +38,22 @@ public sealed partial class RaftReplica {
         return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
     }
 
+    /// <summary>
+    /// Proposes a checkpoint-mode consumer group's periodic low-watermark for replication — same
+    /// overload family as <see cref="ProposeAsync(AppendRequest, CancellationToken)"/>. Same
+    /// non-consuming-a-<see cref="ProposeResult.LogicalOffset"/> contract as
+    /// <see cref="ProposeAsync(AckRequest, CancellationToken)"/>.
+    /// </summary>
+    public ValueTask<ProposeResult> ProposeAsync(AckCheckpointRequest request, CancellationToken cancellationToken = default) {
+        ValidateRequest(request);
+
+        var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = _channel.Writer.TryWrite(new ProposeAckCheckpointReceived(request, completion));
+        ObjectDisposedException.ThrowIf(!accepted, this);
+
+        return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
+    }
+
     // PartitionKey/header keys are encoded with a 16-bit length prefix on disk (WalRecordSerializer,
     // via VariableLengthTail) — validated here, at the public API boundary, rather than deep in the
     // serializer or on the actor loop: an exception escaping HandleProposeReceivedAsync would crash
@@ -60,6 +76,13 @@ public sealed partial class RaftReplica {
     // ConsumerGroup becomes the record's PartitionKey (UTF-8-encoded) — same 16-bit length-prefix
     // contract as ValidateRequest above, so it needs the same boundary check.
     static void ValidateRequest(AckRequest request) {
+        if (Encoding.UTF8.GetByteCount(request.ConsumerGroup) > ushort.MaxValue)
+            throw new ArgumentException($"ConsumerGroup exceeds the 16-bit length-prefix limit of {ushort.MaxValue} bytes.", nameof(request));
+    }
+
+    // Same ConsumerGroup-as-PartitionKey boundary check as AckRequest's own ValidateRequest — the
+    // watermark itself is a fixed 8 bytes, nothing to validate there.
+    static void ValidateRequest(AckCheckpointRequest request) {
         if (Encoding.UTF8.GetByteCount(request.ConsumerGroup) > ushort.MaxValue)
             throw new ArgumentException($"ConsumerGroup exceeds the 16-bit length-prefix limit of {ushort.MaxValue} bytes.", nameof(request));
     }
@@ -90,6 +113,12 @@ public sealed partial class RaftReplica {
         var request = message.Request;
         await ProposeRecordAsync(WalRecordType.Ack, Encoding.UTF8.GetBytes(request.ConsumerGroup), headers: [],
             EncodeAckPayload(request.Offsets), consumesLogicalOffset: false, message.Reply);
+    }
+
+    async Task HandleProposeAckCheckpointReceivedAsync(ProposeAckCheckpointReceived message) {
+        var request = message.Request;
+        await ProposeRecordAsync(WalRecordType.AckCheckpoint, Encoding.UTF8.GetBytes(request.ConsumerGroup), headers: [],
+            EncodeWatermarkPayload(request.Watermark), consumesLogicalOffset: false, message.Reply);
     }
 
     // Shared by both ProposeAsync overloads' handlers — the only place _nextLogicalOffset++ is
@@ -133,6 +162,14 @@ public sealed partial class RaftReplica {
         for (var i = 0; i < offsets.Count; i++)
             BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(4 + i * 8, 8), offsets[i]);
 
+        return buffer;
+    }
+
+    // [uint64 watermark], little-endian — a fixed 8 bytes, no count prefix needed (unlike
+    // EncodeAckPayload's variable-length offset list): a checkpoint carries exactly one value.
+    static byte[] EncodeWatermarkPayload(ulong watermark) {
+        var buffer = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(buffer, watermark);
         return buffer;
     }
 

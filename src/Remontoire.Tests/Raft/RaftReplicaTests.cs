@@ -340,6 +340,52 @@ public class RaftReplicaTests {
 
             await act.Should().ThrowAsync<ArgumentException>();
         }
+
+        [Fact]
+        public async Task AckCheckpointRequest_overload_throws_NotLeaderException_when_this_replica_is_not_the_ready_leader() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+
+            var act = () => replica.ProposeAsync(new AckCheckpointRequest("group-1", 42)).AsTask();
+
+            await act.Should().ThrowAsync<NotLeaderException>();
+        }
+
+        [Fact]
+        public async Task AckCheckpointRequest_overload_resolves_once_the_entry_commits_on_a_single_node_group() {
+            var (replica, _) = await StartAsync("node-1");
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader
+            await replica.DrainAsync();
+
+            var result = await replica.ProposeAsync(new AckCheckpointRequest("group-1", 42));
+
+            result.LogicalOffset.Should().Be(0, "a checkpoint is never a consumer-visible message");
+            replica.CommitIndex.Should().BeGreaterThanOrEqualTo(result.RaftIndex);
+        }
+
+        [Fact]
+        public async Task AckCheckpointRequest_overload_does_not_consume_a_LogicalOffset() {
+            var (replica, _) = await StartAsync("node-1");
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader
+            await replica.DrainAsync();
+
+            await replica.ProposeAsync(new AckCheckpointRequest("group-1", 42));
+            var appendResult = await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
+
+            // Regression guard: an AckCheckpoint proposal in between must not have advanced
+            // _nextLogicalOffset — the very first Append still gets LogicalOffset 0, exactly as
+            // if the checkpoint never happened.
+            appendResult.LogicalOffset.Should().Be(0);
+        }
+
+        [Fact]
+        public async Task AckCheckpointRequest_overload_throws_when_the_consumer_group_name_exceeds_65535_bytes() {
+            var (replica, _) = await StartAsync("node-1");
+            var request = new AckCheckpointRequest(new string('a', 65536), 42);
+
+            var act = () => replica.ProposeAsync(request).AsTask();
+
+            await act.Should().ThrowAsync<ArgumentException>();
+        }
     }
 
     public class TryTriggerSnapshotAsync {
