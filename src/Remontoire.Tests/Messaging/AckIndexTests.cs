@@ -70,6 +70,96 @@ public class AckIndexTests {
         index.AllGroupsLowWatermark().Should().Be(1, "group-2 is the furthest behind — only offset 0 acked, exclusive watermark 1");
     }
 
+    public class ApplyLocal {
+        [Fact]
+        public void Applies_a_batch_of_offsets_directly_without_a_WalRecord() {
+            var index = new AckIndex();
+
+            index.ApplyLocal("group-1", [0, 1, 2]);
+
+            index.GetOrCreate("group-1").LowWatermark.Should().Be(3, "exclusive — offsets 0, 1, and 2 are acked, 3 is not");
+        }
+
+        [Fact]
+        public void Keeps_each_consumer_group_independent() {
+            var index = new AckIndex();
+
+            index.ApplyLocal("group-1", [0]);
+
+            index.GetOrCreate("group-2").LowWatermark.Should().Be(0);
+        }
+    }
+
+    public class RegisteredConsumerGroups {
+        [Fact]
+        public void Is_empty_when_no_group_has_ever_acked_anything() {
+            var index = new AckIndex();
+
+            index.RegisteredConsumerGroups().Should().BeEmpty();
+        }
+
+        [Fact]
+        public void Returns_every_group_that_has_acked_at_least_once() {
+            var index = new AckIndex();
+            index.Apply(AckRecord("group-1", 0));
+            index.ApplyLocal("group-2", [0]);
+
+            index.RegisteredConsumerGroups().Should().BeEquivalentTo(["group-1", "group-2"]);
+        }
+    }
+
+    public class MandatoryGroupsLowWatermark {
+        [Fact]
+        public void Is_zero_when_no_mandatory_group_is_registered() {
+            var index = new AckIndex();
+
+            index.MandatoryGroupsLowWatermark(_ => true).Should().Be(0);
+        }
+
+        [Fact]
+        public void Ignores_best_effort_groups_entirely() {
+            var index = new AckIndex();
+            index.Apply(AckRecord("mandatory-group", 0, 1, 2));
+            // best-effort-group never acks anything — would otherwise drag the minimum to 0.
+
+            index.MandatoryGroupsLowWatermark(consumerGroup => consumerGroup == "mandatory-group").Should().Be(3);
+        }
+
+        [Fact]
+        public void Returns_the_minimum_across_mandatory_groups_only() {
+            var index = new AckIndex();
+            index.Apply(AckRecord("mandatory-1", 0, 1, 2));
+            index.Apply(AckRecord("mandatory-2", 0));
+            index.Apply(AckRecord("best-effort", 0, 1));
+
+            index.MandatoryGroupsLowWatermark(consumerGroup => consumerGroup != "best-effort")
+                .Should().Be(1, "mandatory-2 is the furthest-behind mandatory group");
+        }
+    }
+
+    public class SlowestMandatoryGroup {
+        [Fact]
+        public void Is_null_when_no_mandatory_group_is_registered() {
+            var index = new AckIndex();
+
+            index.SlowestMandatoryGroup(_ => false).Should().BeNull();
+        }
+
+        [Fact]
+        public void Names_the_furthest_behind_mandatory_group() {
+            var index = new AckIndex();
+            index.Apply(AckRecord("mandatory-1", 0, 1, 2));
+            index.Apply(AckRecord("mandatory-2", 0));
+            index.Apply(AckRecord("best-effort", 0, 1));
+
+            var slowest = index.SlowestMandatoryGroup(consumerGroup => consumerGroup != "best-effort");
+
+            slowest.Should().NotBeNull();
+            slowest!.Value.ConsumerGroup.Should().Be("mandatory-2");
+            slowest.Value.LowWatermark.Should().Be(1);
+        }
+    }
+
     static WalRecord AckRecord(string consumerGroup, params ulong[] offsets) =>
         new(WalRecordType.Ack, RaftTerm: 0, RaftIndex: 0, LogicalOffset: 0, TimestampMicros: 42,
             Encoding.UTF8.GetBytes(consumerGroup), [], EncodeOffsets(offsets));

@@ -22,9 +22,18 @@ public sealed class AckIndex {
 
         var consumerGroup = Encoding.UTF8.GetString(record.PartitionKey.Span);
         var state = _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
+        state.Ack(DecodeAckPayload(record.Payload.Span));
+    }
 
-        foreach (var offset in DecodeAckPayload(record.Payload.Span))
-            state.Ack(offset);
+    /// <summary>
+    /// Applies offsets directly, bypassing Raft entirely — checkpoint mode's cheap path. Funnels
+    /// into the exact same <see cref="ConsumerGroupAckState.Ack"/> strict mode's replay path
+    /// already uses — no second, divergent ack-semantics implementation. Callable only from the
+    /// group's own leader (enforced by the caller).
+    /// </summary>
+    public void ApplyLocal(string consumerGroup, IReadOnlyList<ulong> offsets) {
+        var state = _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
+        state.Ack(offsets);
     }
 
     /// <summary>
@@ -36,11 +45,44 @@ public sealed class AckIndex {
     public ConsumerGroupAckState GetOrCreate(string consumerGroup) => _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
 
     /// <summary>
+    /// Every consumer group this ack index has ever seen an Ack record for.
+    /// </summary>
+    public IReadOnlyCollection<string> RegisteredConsumerGroups() => _groups.Keys.ToArray();
+
+    /// <summary>
     /// The pruning gate for <see cref="Remontoire.Storage.CompactionPolicy.GetAckedLowWatermarkAsync"/>:
     /// the lowest watermark across every registered consumer group — "every group has acked",
     /// with every group implicitly required (no required/best-effort distinction yet).
     /// </summary>
     public ulong AllGroupsLowWatermark() => _groups.IsEmpty ? 0 : _groups.Values.Min(state => state.LowWatermark);
+
+    /// <summary>
+    /// The pruning gate for mandatory groups only — replaces <see cref="AllGroupsLowWatermark"/>'s
+    /// "every group" semantics wherever a mandatory/best-effort distinction now applies. Best-effort
+    /// groups (<paramref name="isMandatory"/> returns <see langword="false"/>) never lower this
+    /// watermark, so a stuck best-effort group can never block pruning. Takes the mandatory-ness
+    /// check as a delegate rather than a stored flag: this project carries no reference to
+    /// <c>Remontoire.Sharding</c>, where that policy lives.
+    /// </summary>
+    public ulong MandatoryGroupsLowWatermark(Func<string, bool> isMandatory) {
+        var mandatoryWatermarks = _groups.Where(pair => isMandatory(pair.Key)).Select(pair => pair.Value.LowWatermark).ToArray();
+        return mandatoryWatermarks.Length == 0 ? 0 : mandatoryWatermarks.Min();
+    }
+
+    /// <summary>
+    /// Which mandatory consumer group is currently furthest behind, and its watermark — the
+    /// group <see cref="MandatoryGroupsLowWatermark"/>'s minimum came from, surfaced by name for
+    /// the <c>remontoire_pruning_blocked_by_group</c> metric. <see langword="null"/> when no
+    /// mandatory group is registered.
+    /// </summary>
+    public (string ConsumerGroup, ulong LowWatermark)? SlowestMandatoryGroup(Func<string, bool> isMandatory) {
+        var mandatory = _groups.Where(pair => isMandatory(pair.Key)).ToArray();
+        if (mandatory.Length == 0)
+            return null;
+
+        var slowest = mandatory.MinBy(pair => pair.Value.LowWatermark);
+        return (slowest.Key, slowest.Value.LowWatermark);
+    }
 
     // The wire format an Ack record's payload always carries: [uint32 count][uint64 offsets...],
     // little-endian. Deliberately a small, independent decoder rather than a shared codec type
