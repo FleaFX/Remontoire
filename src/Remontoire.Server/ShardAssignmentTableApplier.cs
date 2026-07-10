@@ -17,19 +17,25 @@ public sealed class ShardAssignmentTableApplier : IAsyncDisposable {
 
     /// <summary>
     /// Starts forwarding immediately — every record already committed replays first, same as any
-    /// other reader of <see cref="RaftReplica.ReadCommittedAsync"/>.
+    /// other reader of <see cref="RaftReplica.ReadCommittedAsync"/>. <paramref name="journal"/>,
+    /// if given, also receives every record — the committed-record stream allows only one reader,
+    /// so a <see cref="MetaLogJournal"/> feeding network subscribers must be fed from here rather
+    /// than opening a second, independent read of its own.
     /// </summary>
-    public ShardAssignmentTableApplier(RaftReplica metaReplica, ShardAssignmentTable table) =>
-        _loop = Task.Run(() => RunAsync(metaReplica, table, _cts.Token));
+    public ShardAssignmentTableApplier(RaftReplica metaReplica, ShardAssignmentTable table, MetaLogJournal? journal = null) =>
+        _loop = Task.Run(() => RunAsync(metaReplica, table, journal, _cts.Token));
 
-    static async Task RunAsync(RaftReplica metaReplica, ShardAssignmentTable table, CancellationToken cancellationToken) {
+    static async Task RunAsync(RaftReplica metaReplica, ShardAssignmentTable table, MetaLogJournal? journal, CancellationToken cancellationToken) {
         try {
             await foreach (var record in metaReplica.ReadCommittedAsync(cancellationToken)) {
                 // Only Append carries an admin command's encoded payload — Raft's own leader-
                 // establishing NoOp entries (and any future ShardConfigChange) carry no payload
                 // this format can decode, and must never reach it.
-                if (record.RecordType == WalRecordType.Append)
-                    table.Apply(MetaLogRecord.Decode(record.Payload.Span));
+                if (record.RecordType != WalRecordType.Append)
+                    continue;
+
+                journal?.Append(record.LogicalOffset, record.Payload.ToArray());
+                table.Apply(MetaLogRecord.Decode(record.Payload.Span));
             }
         } catch (OperationCanceledException) {
             // Expected shutdown path — DisposeAsync cancels and awaits this.

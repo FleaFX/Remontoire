@@ -1,0 +1,30 @@
+syntax = "proto3";
+package remontoire.meta.v1;
+
+service ShardAssignmentMeta {
+  // Streams every meta-log record committed from now on, then keeps streaming as new ones commit.
+  // Never terminates on its own — the caller closes it on shutdown.
+  rpc Watch(WatchRequest) returns (stream MetaLogRecordProto);
+
+  // One-shot: the full, currently-materialized table content — used for initial fill and for
+  // the periodic reconciliation poll, never for the primary live-update path.
+  rpc GetSnapshot(GetSnapshotRequest) returns (ShardAssignmentSnapshot);
+}
+
+message WatchRequest {
+  // Resume after this version if already known (e.g. a watcher reconnecting after a dropped
+  // stream) — 0 means "from the beginning." A version number, not a byte offset.
+  uint64 from_version = 1;
+}
+
+message GetSnapshotRequest {}
+
+message MetaLogRecordProto {
+  uint64 version = 1; // this meta-group's own logical-offset-equivalent
+  bytes payload = 2;  // an encoded admin command — opaque here, decoded by the caller
+}
+
+message ShardAssignmentSnapshot {
+  uint64 version = 1; // the version this snapshot reflects — a subsequent Watch(from_version) picks up right after it
+  repeated MetaLogRecordProto records = 2; // replayed in order to fully rebuild a local table
+}
