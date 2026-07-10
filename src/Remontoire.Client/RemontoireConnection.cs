@@ -53,7 +53,8 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
             request.Headers.Add(headers.Select(header => new MessageHeader { Key = ByteString.CopyFromUtf8(header.Key), Value = ByteString.CopyFromUtf8(header.Value) }));
 
         var reply = await CallWithRedirectAsync(
-            groupId, memberAddresses, address => ClientFor(address).PublishAsync(request, cancellationToken: cancellationToken).ResponseAsync, reply => reply.NotLeader);
+            groupId, memberAddresses, address => ClientFor(address).PublishAsync(request, cancellationToken: cancellationToken).ResponseAsync,
+            reply => reply.NotLeader, reply => reply.ShardMigrating is not null);
 
         return new PublishResult(reply.Success.ShardId, (long)reply.Success.Offset, ToDateTimeOffset(reply.Success.IngestedAtMicros));
     }
@@ -66,7 +67,8 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
         var request = new AckRequest { StreamName = streamName, ConsumerGroup = consumerGroup, ShardId = shardId, Offsets = { (ulong)offset } };
 
         await CallWithRedirectAsync(
-            groupId, memberAddresses, address => ClientFor(address).AckAsync(request, cancellationToken: cancellationToken).ResponseAsync, reply => reply.NotLeader);
+            groupId, memberAddresses, address => ClientFor(address).AckAsync(request, cancellationToken: cancellationToken).ResponseAsync,
+            reply => reply.NotLeader, reply => reply.ShardMigrating is not null);
     }
 
     /// <inheritdoc />
@@ -90,6 +92,12 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
             // treatment CallWithRedirectAsync gives its own hintless-redirect case, so a dead or
             // still-electing cached address is never retried in a tight, CPU-burning loop.
             var needsBackoff = false;
+
+            // Set for a ShardMigrating reply — a retryable contention signal, not a redirect: the
+            // contacted node IS the leader, just briefly pausing admission for this shard during
+            // a reshard cutover. Waits, then reconnects to the SAME (now-confirmed) address —
+            // never invalidated, unlike needsBackoff's cache-can't-be-trusted case above.
+            var retrySameAddress = false;
             try {
                 while (true) {
                     bool hasNext;
@@ -104,6 +112,12 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
                         break;
 
                     var reply = call.ResponseStream.Current;
+                    if (reply.ShardMigrating is not null) {
+                        _leaderCache.Update(groupId, address); // hint-free confirmation this address is the real leader
+                        retrySameAddress = true;
+                        break;
+                    }
+
                     if (reply.NotLeader is { } notLeader) {
                         if (notLeader.HasLeaderAddress)
                             _leaderCache.Update(groupId, new Uri(notLeader.LeaderAddress));
@@ -121,13 +135,17 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
             if (needsBackoff) {
                 _leaderCache.Invalidate(groupId);
                 await Task.Delay(_options.RedirectRetryDelay, cancellationToken);
+            } else if (retrySameAddress) {
+                await Task.Delay(_options.RedirectRetryDelay, cancellationToken);
             }
         }
     }
 
     // Internal (not private): a test-only seam letting CallWithRedirectAsyncTests exercise the
     // retry/redirect logic with fake delegates, no real gRPC channel needed.
-    internal async Task<TReply> CallWithRedirectAsync<TReply>(string groupId, IReadOnlyList<Uri> memberAddresses, Func<Uri, Task<TReply>> call, Func<TReply, NotLeader?> extractNotLeader) {
+    internal async Task<TReply> CallWithRedirectAsync<TReply>(
+        string groupId, IReadOnlyList<Uri> memberAddresses, Func<Uri, Task<TReply>> call,
+        Func<TReply, NotLeader?> extractNotLeader, Func<TReply, bool> isShardMigrating) {
         var address = _leaderCache.Get(groupId) ?? RandomMemberAddress(memberAddresses);
 
         for (var attempt = 0; attempt < _options.MaxRedirectAttempts; attempt++) {
@@ -142,6 +160,16 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
                 await Task.Delay(_options.RedirectRetryDelay);
                 _leaderCache.Invalidate(groupId);
                 address = RandomMemberAddress(memberAddresses);
+                continue;
+            }
+
+            if (isShardMigrating(reply)) {
+                // A retryable contention signal, not a redirect — this exact address is the real
+                // leader, briefly pausing admission for this one shard during a reshard cutover.
+                // Worth remembering (a wrong/stale NotLeader hint self-corrects the same way
+                // below; this is the reverse — a hint-free confirmation this address is right).
+                _leaderCache.Update(groupId, address);
+                await Task.Delay(_options.RedirectRetryDelay);
                 continue;
             }
 

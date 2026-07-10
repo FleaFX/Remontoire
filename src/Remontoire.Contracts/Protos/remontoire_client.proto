@@ -25,6 +25,7 @@ message PublishReply {
   oneof result {
     PublishSuccess success = 1;
     NotLeader not_leader = 2;
+    ShardMigrating shard_migrating = 3;
   }
 }
 
@@ -42,6 +43,13 @@ message NotLeader {
   optional string leader_address = 2;
 }
 
+// Shared by every RPC below — a retryable contention signal, not a redirect: the shard's old
+// group is briefly pausing admission for it during a reshard cutover. The client retries the
+// SAME address after a short wait; there is no other address to go to.
+message ShardMigrating {
+  string stream_name = 1;
+}
+
 message ConsumeRequest {
   string stream_name = 1;
   string consumer_group = 2;
@@ -51,6 +59,7 @@ message ConsumeReply {
   oneof result {
     RemontoireMessageProto message = 1;
     NotLeader not_leader = 2; // strict-ack mode always routes every stream to the leader
+    ShardMigrating shard_migrating = 3;
   }
 }
 
@@ -76,5 +85,6 @@ message AckReply {
   oneof result {
     google.protobuf.Empty success = 1;
     NotLeader not_leader = 2;
+    ShardMigrating shard_migrating = 3;
   }
 }
