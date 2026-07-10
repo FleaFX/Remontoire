@@ -74,6 +74,60 @@ public class MetaLogRecordTests {
         }
 
         [Fact]
+        public void Round_trips_a_SetConsumerGroupAckMode_record() {
+            var record = new SetConsumerGroupAckMode("orders", "billing", AckMode.Checkpoint);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetConsumerGroupMandatory_record() {
+            var record = new SetConsumerGroupMandatory("orders", "billing", false);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetStreamRetentionPolicy_record_with_a_size_ceiling() {
+            var record = new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(3), TimeSpan.FromDays(14), MaxSizeBytesPerVirtualShard: 1_000_000_000);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetStreamRetentionPolicy_record_with_no_size_ceiling() {
+            var record = new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(3), TimeSpan.FromDays(14), MaxSizeBytesPerVirtualShard: null);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetStreamCheckpointInterval_record_with_both_triggers_set() {
+            var record = new SetStreamCheckpointInterval("orders", TimeSpan.FromSeconds(30), 500);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetStreamCheckpointInterval_record_with_both_triggers_null() {
+            var record = new SetStreamCheckpointInterval("orders", null, null);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
         public void Throws_for_an_unrecognized_tag_byte() {
             var act = () => MetaLogRecord.Decode([255]);
 

@@ -8,7 +8,7 @@ namespace Remontoire.Sharding;
 /// replaying a committed log, never itself separately persisted. Reads are lock-free
 /// dictionary lookups — no leader redirect, ever.
 /// </summary>
-public sealed class ShardAssignmentTable {
+public sealed partial class ShardAssignmentTable {
     readonly ConcurrentDictionary<string, StreamShardingConfig> _streams = new();
     readonly ConcurrentDictionary<string, PhysicalGroupDescriptor> _groups = new();
     readonly ConcurrentDictionary<(string StreamName, int VirtualShardIndex), VirtualShardAssignment> _assignments = new();
@@ -28,6 +28,12 @@ public sealed class ShardAssignmentTable {
     /// </summary>
     public bool TryGetAssignment(string streamName, int virtualShardIndex, out VirtualShardAssignment assignment) =>
         _assignments.TryGetValue((streamName, virtualShardIndex), out assignment);
+
+    /// <summary>
+    /// Every currently-known virtual-shard assignment, snapshotted. Used for reverse lookups
+    /// (which stream owns this physical group?) that no point-lookup can answer.
+    /// </summary>
+    public IReadOnlyCollection<VirtualShardAssignment> EnumerateAssignments() => _assignments.Values.ToArray();
 
     /// <summary>
     /// Applies one committed <see cref="MetaLogRecord"/>, updating exactly the dictionary its
@@ -93,6 +99,10 @@ public sealed class ShardAssignmentTable {
             case MigrationCompleted:
                 // Cleanup of the old group's copy is a disk-reclamation concern, not a routing
                 // change — this record carries no table update.
+                break;
+
+            case SetConsumerGroupAckMode or SetConsumerGroupMandatory or SetStreamRetentionPolicy or SetStreamCheckpointInterval:
+                ApplyPolicyRecord(record);
                 break;
 
             default:
