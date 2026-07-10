@@ -77,6 +77,7 @@ public class RemontoireGrpcClusterTests {
         builder.Services.AddSingleton<LeaderAddressDirectory>();
         builder.Services.AddSingleton<ShardAssignmentTable>();
         builder.Services.AddSingleton<MetaLogJournal>();
+        builder.Services.AddSingleton<MigrationAdmissionGate>();
 
         var app = builder.Build();
         app.MapGrpcService<RaftTransportGrpcService>();
@@ -280,6 +281,31 @@ public class RemontoireGrpcClusterTests {
             messages[0].Payload.ToArray().Should().Equal("hello"u8.ToArray());
 
             await connection.AckAsync(StreamName, "group-a", messages[0].ShardId, messages[0].Offset);
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    [Fact]
+    public async Task PublishAsync_receives_ShardMigrating_while_paused_and_succeeds_on_retry_once_it_lifts() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+            var leader = nodes.First(node => node.Replica.IsLeader);
+            var admissionGate = leader.Host.Services.GetRequiredService<MigrationAdmissionGate>();
+
+            using var connection = Connect(nodes);
+            await PublishOnceReadyAsync(connection, StreamName, "key-1", "seed"u8.ToArray()); // ensures the watcher has already caught up
+
+            admissionGate.Pause(GroupId);
+            var publishTask = connection.PublishAsync(StreamName, "key-2", "hello"u8.ToArray());
+            (await Task.WhenAny(publishTask, Task.Delay(TimeSpan.FromMilliseconds(200)))).Should().NotBe(publishTask, "a paused group must keep retrying, not return immediately");
+
+            admissionGate.Resume(GroupId);
+            var result = await publishTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+            result.Offset.Should().Be(1, "the retry must eventually reach the same leader and succeed, no message lost");
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }

@@ -143,7 +143,8 @@ public class CallWithRedirectAsyncTests {
             return Task.FromResult("ok");
         }, _ => null, NeverShardMigrating);
 
-        addressesCalled.Should().Equal([firstAddressContacted], "the address that answered ShardMigrating is a confirmed leader, worth remembering");
+        firstAddressContacted.Should().NotBeNull();
+        addressesCalled.Should().Equal([firstAddressContacted!], "the address that answered ShardMigrating is a confirmed leader, worth remembering");
     }
 
     [Fact]

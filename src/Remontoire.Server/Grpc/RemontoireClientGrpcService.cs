@@ -26,7 +26,8 @@ namespace Remontoire.Server.Grpc;
 /// sharding at all.
 /// </remarks>
 public sealed class RemontoireClientGrpcService(
-    RaftReplicaRegistry raftRegistry, MessagingGroupRegistry messagingRegistry, LeaderAddressDirectory leaderAddresses, ShardAssignmentTable assignmentTable)
+    RaftReplicaRegistry raftRegistry, MessagingGroupRegistry messagingRegistry, LeaderAddressDirectory leaderAddresses,
+    ShardAssignmentTable assignmentTable, MigrationAdmissionGate admissionGate)
     : RemontoireClient.RemontoireClientBase {
     /// <inheritdoc />
     public override async Task<PublishReply> Publish(PublishRequest request, ServerCallContext context) {
@@ -37,6 +38,9 @@ public sealed class RemontoireClientGrpcService(
         var redirect = TryResolveGroup(request.StreamName, virtualShardIndex, out var replica, out _, out _);
         if (redirect is not null)
             return new PublishReply { NotLeader = redirect };
+
+        if (admissionGate.IsPaused(replica.GroupId))
+            return new PublishReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } };
 
         var appendRequest = new AppendRequest(
             request.PartitionKey.Memory,
@@ -66,6 +70,9 @@ public sealed class RemontoireClientGrpcService(
         if (redirect is not null)
             return new AckReply { NotLeader = redirect };
 
+        if (admissionGate.IsPaused(replica.GroupId))
+            return new AckReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } };
+
         try {
             await replica.ProposeAsync(new Remontoire.Raft.AckRequest(request.ConsumerGroup, request.Offsets), context.CancellationToken);
             return new AckReply { Success = new Empty() };
@@ -82,6 +89,11 @@ public sealed class RemontoireClientGrpcService(
         var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out var shardLog, out var ackIndex);
         if (redirect is not null) {
             await responseStream.WriteAsync(new ConsumeReply { NotLeader = redirect });
+            return;
+        }
+
+        if (admissionGate.IsPaused(replica.GroupId)) {
+            await responseStream.WriteAsync(new ConsumeReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } });
             return;
         }
 

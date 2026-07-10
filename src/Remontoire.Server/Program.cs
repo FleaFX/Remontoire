@@ -16,6 +16,8 @@ builder.Services.AddSingleton<MessagingGroupRegistry>();
 builder.Services.AddSingleton<LeaderAddressDirectory>();
 builder.Services.AddSingleton<ShardAssignmentTable>();
 builder.Services.AddSingleton<MetaLogJournal>();
+builder.Services.AddSingleton<MigrationAdmissionGate>();
+builder.Services.AddSingleton<ReshardOrchestrator>();
 builder.Services.AddHostedService<RaftReplicaHostedService>();
 builder.Services.AddGrpc();
 
