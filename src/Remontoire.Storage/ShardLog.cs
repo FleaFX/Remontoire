@@ -19,6 +19,10 @@ public sealed partial class ShardLog : IAsyncDisposable {
     readonly Channel<WalRecord> _applied = Channel.CreateUnbounded<WalRecord>(new UnboundedChannelOptions { SingleReader = true });
     readonly CompactionPolicy? _compactionPolicy;
     readonly Task? _compactionWorkerLoop;
+    readonly RetentionPolicy? _retentionPolicy;
+    readonly CancellationTokenSource _retentionCts = new();
+    readonly Task? _retentionTickerLoop;
+    readonly Task? _sizePruneWorkerLoop;
 
     MemTable _memTable;
     SstSegment[] _segments;
@@ -34,7 +38,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
 
     internal ShardLog(
         string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource, MemTable memTable, SstSegment[] segments,
-        ulong nextOffsetToApply, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null) {
+        ulong nextOffsetToApply, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null, RetentionPolicy? retentionPolicy = null) {
         _directory = directory;
         _committedSource = committedSource;
         _memTable = memTable;
@@ -42,10 +46,14 @@ public sealed partial class ShardLog : IAsyncDisposable {
         _nextOffsetToApply = nextOffsetToApply;
         _flushThresholdBytes = flushThresholdBytes;
         _compactionPolicy = compactionPolicy;
+        _retentionPolicy = retentionPolicy;
 
         _actorLoop = Task.Run(RunActorAsync);
         _tailingLoop = Task.Run(RunTailingLoopAsync);
         _compactionWorkerLoop = compactionPolicy is null ? null : Task.Run(new CompactionWorker(_mailbox.Writer).RunAsync);
+        _retentionTickerLoop = compactionPolicy?.GetAckedLowWatermarkAsync is null ? null : Task.Run(() => RunRetentionTickerAsync(_retentionCts.Token));
+        _sizePruneWorkerLoop = retentionPolicy?.MaxTotalBytesPerVirtualShard is not { } maxTotalBytes ? null
+            : Task.Run(() => new SizePruneWorker(directory, maxTotalBytes, retentionPolicy.IsAdmissionPaused, _mailbox.Writer).RunAsync(_retentionCts.Token));
     }
 
     /// <summary>
@@ -65,6 +73,16 @@ public sealed partial class ShardLog : IAsyncDisposable {
         await _tailingCts.CancelAsync();
         await _tailingLoop;
         _tailingCts.Dispose();
+
+        // Both are Task.Delay-driven, not blocked on any actor reply, so — unlike the compaction
+        // worker below — they need their own cancellation to stop; each also still posts to the
+        // mailbox, so this must happen before it's completed, same reason as the tailing loop above.
+        await _retentionCts.CancelAsync();
+        if (_retentionTickerLoop is not null)
+            await _retentionTickerLoop;
+        if (_sizePruneWorkerLoop is not null)
+            await _sizePruneWorkerLoop;
+        _retentionCts.Dispose();
 
         _mailbox.Writer.TryComplete();
         await _actorLoop;
@@ -101,6 +119,12 @@ public sealed partial class ShardLog : IAsyncDisposable {
                     break;
                 case SnapshotInstalled snapshotInstalled:
                     await HandleSnapshotInstalledAsync(snapshotInstalled);
+                    break;
+                case RetentionPassRequested:
+                    await HandleRetentionPassRequestedAsync();
+                    break;
+                case SizePruneCompleted sizePruneCompleted:
+                    HandleSizePruneCompleted(sizePruneCompleted);
                     break;
             }
         }
