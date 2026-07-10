@@ -41,12 +41,16 @@ public class ReshardOrchestratorTests {
 
             copiedUpTo = await harness.Orchestrator.CopyRecordsAsync(FromGroupId, ToGroupId, copiedUpTo); // tail catch-up
 
-            using (harness.Orchestrator.PauseAdmission(FromGroupId))
+            // The pause must stay active until cutover has actually committed — resuming before
+            // that would let a write land on the old group with no further copy round left to
+            // pick it up, since routing is about to move away from it for good.
+            using (harness.Orchestrator.PauseAdmission(FromGroupId)) {
                 harness.AdmissionGate.IsPaused(FromGroupId).Should().BeTrue();
-            harness.AdmissionGate.IsPaused(FromGroupId).Should().BeFalse("the scope's disposal must resume admission");
 
-            await harness.Orchestrator.ProposeCutoverAsync(harness.MetaReplica, migrationId, StreamName, 0, ToGroupId);
-            (await WaitUntilAsync(() => harness.Table.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == ToGroupId)).Should().BeTrue();
+                await harness.Orchestrator.ProposeCutoverAsync(harness.MetaReplica, migrationId, StreamName, 0, ToGroupId);
+                (await WaitUntilAsync(() => harness.Table.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == ToGroupId)).Should().BeTrue();
+            }
+            harness.AdmissionGate.IsPaused(FromGroupId).Should().BeFalse("the scope's disposal must resume admission");
 
             harness.Table.TryGetAssignment(StreamName, 0, out var afterCutover).Should().BeTrue();
             afterCutover.GroupId.Should().Be(ToGroupId, "cutover is the only step that actually moves routing");

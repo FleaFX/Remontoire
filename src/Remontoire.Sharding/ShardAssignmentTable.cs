@@ -42,6 +42,13 @@ public sealed class ShardAssignmentTable {
     /// pair — the same "reject a second, conflicting command instead of applying it" discipline
     /// membership changes already apply, here guarding against a stale or duplicate command
     /// silently corrupting an unrelated, later migration for the same shard.
+    /// <see cref="Cutover"/> deliberately keeps <see cref="VirtualShardAssignment.MigrationId"/>
+    /// set (only <see cref="VirtualShardAssignment.MigratingToGroupId"/> is cleared) — a
+    /// completed migration's id must stay remembered, or a late-arriving duplicate
+    /// <see cref="MigrationStarted"/> for that same, already-finished migration would find no
+    /// conflicting id in progress and be wrongly re-applied, reverting routing back to the old
+    /// group. <see cref="MigrationAborted"/> clears it fully instead: an aborted attempt is
+    /// explicitly cancelled, not completed, so its id is free to be reused by a fresh attempt.
     /// </remarks>
     public void Apply(MetaLogRecord record) {
         switch (record) {
@@ -54,11 +61,17 @@ public sealed class ShardAssignmentTable {
                 break;
 
             case MigrationStarted r:
-                // A different migration already in progress for this exact shard is rejected —
-                // re-proposing the SAME migration (the same id) is a harmless, idempotent no-op.
-                if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeStart) &&
-                    beforeStart.MigrationId is { } inProgress && inProgress != r.MigrationId)
-                    break;
+                if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeStart)) {
+                    // This exact migration already started — whether still in progress (a
+                    // harmless, idempotent duplicate) or already cut over (must never be
+                    // resurrected) — either way, re-applying it is a no-op.
+                    if (beforeStart.MigrationId == r.MigrationId)
+                        break;
+
+                    // A different migration is currently active for this shard — reject.
+                    if (beforeStart.MigratingToGroupId is not null)
+                        break;
+                }
 
                 _assignments[(r.StreamName, r.VirtualShardIndex)] =
                     new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.FromGroupId, r.ToGroupId, r.MigrationId);
@@ -74,7 +87,7 @@ public sealed class ShardAssignmentTable {
                 if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeCutover) &&
                     beforeCutover.MigrationId == r.MigrationId)
                     _assignments[(r.StreamName, r.VirtualShardIndex)] =
-                        new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.ToGroupId);
+                        new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.ToGroupId, MigrationId: r.MigrationId);
                 break;
 
             case MigrationCompleted:

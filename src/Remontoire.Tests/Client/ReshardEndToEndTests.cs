@@ -205,15 +205,23 @@ public class ReshardEndToEndTests {
             (await RunUntilAsync(() => fromGroup.ShardLog.TryGet((ulong)published[^1].Offset, out _), TimeSpan.FromSeconds(5))).Should().BeTrue();
             copiedUpTo = await orchestrator.CopyRecordsAsync(FromGroupId, ToGroupId, copiedUpTo); // tail catch-up
 
+            // The pause must stay active until BOTH cutover has committed AND this group's own
+            // local table has learned about it — resuming any earlier reopens the exact window
+            // that would let a write land here with no further copy round left to save it, since
+            // the meta-group already considers this shard moved.
             Task<PublishResult>? duringPause;
+            var fromTable = fromGroup.Host.Services.GetRequiredService<ShardAssignmentTable>();
             using (orchestrator.PauseAdmission(FromGroupId)) {
                 // A publish attempted WHILE paused must not fail — it retries via the
                 // ShardMigrating contention path and only completes once the pause lifts below.
                 duringPause = connection.PublishAsync(StreamName, "key-paused", "during-pause"u8.ToArray());
                 (await Task.WhenAny(duringPause, Task.Delay(TimeSpan.FromMilliseconds(200)))).Should().NotBe(duringPause, "a paused group must keep retrying, not fail or return immediately");
+
+                await orchestrator.ProposeCutoverAsync(metaReplica, migrationId, StreamName, 0, ToGroupId);
+                (await RunUntilAsync(() => fromTable.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == ToGroupId, TimeSpan.FromSeconds(5)))
+                    .Should().BeTrue();
             }
 
-            await orchestrator.ProposeCutoverAsync(metaReplica, migrationId, StreamName, 0, ToGroupId);
             await orchestrator.ProposeMigrationCompletedAsync(metaReplica, migrationId, StreamName, 0);
 
             var pausedResult = await duringPause.WaitAsync(TimeSpan.FromSeconds(10));

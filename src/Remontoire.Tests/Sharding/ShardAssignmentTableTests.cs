@@ -116,6 +116,34 @@ public class ShardAssignmentTableTests {
         }
 
         [Fact]
+        public void A_late_replayed_MigrationStarted_after_its_own_cutover_already_completed_is_rejected() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+            table.Apply(new Cutover(Migration1, "orders", 5, "group-2"));
+
+            // A stale redelivery of the ORIGINAL MigrationStarted, arriving after its own
+            // migration already cut over — must not resurrect the old routing.
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-2", "a completed migration must never be reverted by a late replay of its own start command");
+            assignment.MigratingToGroupId.Should().BeNull();
+        }
+
+        [Fact]
+        public void A_new_migration_for_the_same_shard_is_allowed_after_an_earlier_one_completed() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));
+            table.Apply(new Cutover(Migration1, "orders", 5, "group-2"));
+
+            table.Apply(new MigrationStarted(Migration2, "orders", 5, "group-2", "group-3"));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-2", "routing stays on the current group until the new migration's own cutover");
+            assignment.MigratingToGroupId.Should().Be("group-3");
+        }
+
+        [Fact]
         public void Duplicate_migration_started_with_same_MigrationId_is_a_no_op() {
             var table = new ShardAssignmentTable();
             table.Apply(new MigrationStarted(Migration1, "orders", 5, "group-1", "group-2"));

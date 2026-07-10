@@ -53,6 +53,14 @@ public sealed class ReshardOrchestrator(RaftReplicaRegistry raftRegistry, Messag
     /// disposed. Local only, deliberately never itself Raft-committed — a leader crash during the
     /// pause simply loses the in-memory pause along with leadership, no cutover having committed.
     /// </summary>
+    /// <remarks>
+    /// The caller must keep this scope alive through <see cref="ProposeCutoverAsync"/> and until
+    /// this group's own locally-materialized assignment table has observed the new routing —
+    /// only then should the scope be disposed. Resuming any earlier reopens the exact window this
+    /// pause exists to close: a write could land here, quorum-committed on this group, after the
+    /// meta-group already considers the shard moved and no further copy round is coming to save
+    /// it — a real, if narrow, message-loss window, not merely a style preference.
+    /// </remarks>
     public IDisposable PauseAdmission(string groupId) {
         admissionGate.Pause(groupId);
         return new AdmissionPauseScope(admissionGate, groupId);
@@ -61,7 +69,8 @@ public sealed class ReshardOrchestrator(RaftReplicaRegistry raftRegistry, Messag
     /// <summary>
     /// Step 5 — proposes the single, atomic routing flip. The only step that actually changes
     /// routing; rejected by the applier if <paramref name="migrationId"/> doesn't match the
-    /// migration currently in progress for this shard.
+    /// migration currently in progress for this shard. Call this only while the old group's
+    /// <see cref="PauseAdmission"/> scope is still active — see that method's own remarks for why.
     /// </summary>
     public async Task ProposeCutoverAsync(RaftReplica metaReplica, MigrationId migrationId, string streamName, int virtualShardIndex, string toGroupId, CancellationToken cancellationToken = default) =>
         await metaReplica.ProposeAsync(
