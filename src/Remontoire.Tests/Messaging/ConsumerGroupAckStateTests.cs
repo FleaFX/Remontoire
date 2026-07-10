@@ -64,25 +64,48 @@ public class ConsumerGroupAckStateTests {
         state.LowWatermark.Should().Be(2, "exclusive — offsets 0 and 1 are acked, 2 is not");
     }
 
+    public class CommittedWatermark {
+        [Fact]
+        public void Ack_advances_the_committed_watermark_alongside_the_low_watermark() {
+            var state = new ConsumerGroupAckState();
+
+            state.Ack([0, 1, 2]);
+
+            state.CommittedWatermark.Should().Be(3, "every offset Ack ever sees is, by construction, already Raft-committed");
+        }
+
+        [Fact]
+        public void ApplyLocally_never_advances_the_committed_watermark() {
+            var state = new ConsumerGroupAckState();
+
+            state.ApplyLocally([0, 1, 2]);
+
+            state.LowWatermark.Should().Be(3, "the applied watermark still moves — this is checkpoint mode's whole point");
+            state.CommittedWatermark.Should().Be(0, "no quorum has agreed to this yet — only AdvanceWatermarkTo may ever advance it");
+        }
+    }
+
     public class AdvanceWatermarkTo {
         [Fact]
-        public void Advances_the_watermark_directly() {
+        public void Advances_both_watermarks_on_a_fresh_state() {
             var state = new ConsumerGroupAckState();
 
             state.AdvanceWatermarkTo(10);
 
             state.LowWatermark.Should().Be(10);
+            state.CommittedWatermark.Should().Be(10);
         }
 
         [Fact]
-        public void Is_a_no_op_for_a_watermark_that_is_not_ahead_of_the_current_one() {
+        public void Is_a_no_op_for_a_watermark_that_is_not_ahead_of_the_current_committed_one() {
             var state = new ConsumerGroupAckState();
             state.AdvanceWatermarkTo(10);
 
             state.AdvanceWatermarkTo(10);
             state.AdvanceWatermarkTo(5);
 
-            state.LowWatermark.Should().Be(10, "a replayed or stale checkpoint must never move the watermark backward");
+            state.CommittedWatermark.Should().Be(10, "a replayed or stale checkpoint must never move the committed watermark backward");
+            state.LowWatermark.Should().Be(10);
         }
 
         [Fact]
@@ -97,6 +120,17 @@ public class ConsumerGroupAckStateTests {
             // could resurrect stale bookkeeping — assert indirectly via idempotent re-application.
             state.AdvanceWatermarkTo(21);
             state.LowWatermark.Should().Be(21);
+        }
+
+        [Fact]
+        public void Also_floors_the_low_watermark_so_a_restarted_checkpoint_group_is_never_stuck_at_zero() {
+            // Simulates a restart: a checkpoint-mode group's own ApplyLocally progress never
+            // survived (never persisted), so a fresh state only ever sees the committed catch-up.
+            var state = new ConsumerGroupAckState();
+
+            state.AdvanceWatermarkTo(500);
+
+            state.LowWatermark.Should().Be(500, "a recovering node must never show a checkpoint group's progress as zero when it has a real, committed watermark far ahead");
         }
     }
 

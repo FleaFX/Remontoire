@@ -15,12 +15,33 @@ public sealed class ConsumerGroupAckState {
     // genuinely concurrent writer, which is what this lock now guards against.
     readonly Lock _gate = new();
     readonly SortedSet<ulong> _selectiveAcks = [];
-    ulong _lowWatermark;
+    ulong _lowWatermark;       // "applied" — every locally-observed ack, committed or not
+    ulong _committedWatermark; // only what a Raft quorum has actually agreed on
 
     /// <summary>
-    /// Every offset below this one is acked. Zero means nothing has been acked yet.
+    /// Every offset below this one is acked, locally — committed or not. Zero means nothing has
+    /// been acked yet. Drives client-facing decisions (redelivery avoidance) where a false
+    /// negative only costs a redundant redelivery, never data loss.
     /// </summary>
-    public ulong LowWatermark { get { lock (_gate) return _lowWatermark; } }
+    public ulong LowWatermark {
+        get { lock (_gate) return _lowWatermark; }
+    }
+
+    /// <summary>
+    /// Every offset below this one has been confirmed by an actual Raft quorum — never advanced
+    /// by <see cref="ApplyLocally"/>. The only watermark pruning/dead-lettering may ever consult:
+    /// a network-partitioned, isolated former leader has no way of discovering it lost quorum
+    /// (<c>RaftReplica</c> has no leader-lease/quorum-loss detection — it only steps down on
+    /// observing a higher term from a peer it can actually reach), so it can keep believing itself
+    /// leader, and keep accepting checkpoint acks via <see cref="ApplyLocally"/>, for as long as
+    /// the partition lasts. If pruning consulted <see cref="LowWatermark"/> instead, that isolated
+    /// node could physically delete or dead-letter data based on acks no quorum ever agreed to —
+    /// silent, and because these watermarks never move backward, unrecoverable once the partition
+    /// heals.
+    /// </summary>
+    public ulong CommittedWatermark {
+        get { lock (_gate) return _committedWatermark; }
+    }
 
     /// <summary>
     /// Whether <paramref name="offset"/> has been acked, via the watermark or selectively.
@@ -28,8 +49,11 @@ public sealed class ConsumerGroupAckState {
     public bool IsAcked(ulong offset) { lock (_gate) return offset < _lowWatermark || _selectiveAcks.Contains(offset); }
 
     /// <summary>
-    /// Records every offset in <paramref name="offsets"/>, idempotently (a replayed or duplicated
-    /// ack — at-least-once delivery — is a silent no-op, never an error and never a state change).
+    /// Strict mode's replay path only: records every offset in <paramref name="offsets"/>,
+    /// idempotently (a replayed or duplicated ack — at-least-once delivery — is a silent no-op,
+    /// never an error and never a state change). Every offset here is, by construction, already
+    /// Raft-committed — it only ever reaches this method via a committed <c>Ack</c> record — so
+    /// this advances <see cref="CommittedWatermark"/> alongside <see cref="LowWatermark"/>.
     /// Collapses the watermark forward through any now-contiguous selective acks, the same
     /// consolidation TCP SACK performs. Takes the whole batch under a single lock acquisition
     /// rather than one per offset — a real, avoidable cost on checkpoint mode's concurrent-gRPC-
@@ -46,25 +70,55 @@ public sealed class ConsumerGroupAckState {
 
             while (_selectiveAcks.Remove(_lowWatermark))
                 _lowWatermark++;
+
+            if (_lowWatermark > _committedWatermark)
+                _committedWatermark = _lowWatermark;
         }
     }
 
     /// <summary>
-    /// Advances the watermark directly to <paramref name="watermark"/> — checkpoint mode's own
-    /// apply path, distinct from <see cref="Ack"/>'s selective-offset collapsing. A no-op if
-    /// <paramref name="watermark"/> is not ahead of the current one (a replayed or stale
-    /// checkpoint — at-least-once, same idempotence discipline as <see cref="Ack"/>). Prunes any
-    /// selective acks the new watermark now subsumes — a checkpoint only ever carries the
-    /// contiguous low watermark, so any selective entry below it is now redundant bookkeeping that
-    /// would otherwise never be reclaimed.
+    /// Checkpoint mode's cheap path only: applies <paramref name="offsets"/> immediately and
+    /// locally, exactly like <see cref="Ack"/>'s watermark-collapsing, but WITHOUT ever advancing
+    /// <see cref="CommittedWatermark"/> — this offset range has not gone through Raft, and might
+    /// never (see <see cref="CommittedWatermark"/>'s own remarks on why that matters).
+    /// </summary>
+    public void ApplyLocally(IEnumerable<ulong> offsets) {
+        lock (_gate) {
+            foreach (var offset in offsets) {
+                if (offset < _lowWatermark)
+                    continue;
+
+                _selectiveAcks.Add(offset);
+            }
+
+            while (_selectiveAcks.Remove(_lowWatermark))
+                _lowWatermark++;
+        }
+    }
+
+    /// <summary>
+    /// Checkpoint mode's periodic, committed catch-up — the only way <see cref="CommittedWatermark"/>
+    /// ever advances for a checkpoint-mode group. Also floors <see cref="LowWatermark"/> up to the
+    /// same value: <see cref="ApplyLocally"/>'s own progress never survives a restart (it was
+    /// never persisted), so without this floor a recovering node would show a checkpoint group's
+    /// <see cref="LowWatermark"/> stuck at zero despite a real, committed watermark far ahead. A
+    /// no-op if <paramref name="watermark"/> is not ahead of the current committed one (a replayed
+    /// or stale checkpoint — at-least-once, same idempotence discipline as <see cref="Ack"/>).
+    /// Prunes any selective acks the new watermark now subsumes — a checkpoint only ever carries
+    /// the contiguous low watermark, so any selective entry below it is now redundant bookkeeping
+    /// that would otherwise never be reclaimed.
     /// </summary>
     public void AdvanceWatermarkTo(ulong watermark) {
         lock (_gate) {
-            if (watermark <= _lowWatermark)
+            if (watermark <= _committedWatermark)
                 return;
 
-            _selectiveAcks.RemoveWhere(offset => offset < watermark);
-            _lowWatermark = watermark;
+            _committedWatermark = watermark;
+
+            if (watermark > _lowWatermark) {
+                _selectiveAcks.RemoveWhere(offset => offset < watermark);
+                _lowWatermark = watermark;
+            }
         }
     }
 }

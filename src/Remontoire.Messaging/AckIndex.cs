@@ -27,13 +27,15 @@ public sealed class AckIndex {
 
     /// <summary>
     /// Applies offsets directly, bypassing Raft entirely — checkpoint mode's cheap path. Funnels
-    /// into the exact same <see cref="ConsumerGroupAckState.Ack"/> strict mode's replay path
-    /// already uses — no second, divergent ack-semantics implementation. Callable only from the
-    /// group's own leader (enforced by the caller).
+    /// into <see cref="ConsumerGroupAckState.ApplyLocally"/>, deliberately not
+    /// <see cref="ConsumerGroupAckState.Ack"/>: this offset range has not gone through Raft, and
+    /// might never — advancing the same committed watermark <see cref="ConsumerGroupAckState.Ack"/>
+    /// advances would let an isolated, stale leader's pruning pass act on acks no quorum ever
+    /// agreed to. Callable only from the group's own leader (enforced by the caller).
     /// </summary>
     public void ApplyLocal(string consumerGroup, IReadOnlyList<ulong> offsets) {
         var state = _groups.GetOrAdd(consumerGroup, _ => new ConsumerGroupAckState());
-        state.Ack(offsets);
+        state.ApplyLocally(offsets);
     }
 
     /// <summary>
@@ -62,26 +64,29 @@ public sealed class AckIndex {
     /// groups (<paramref name="isMandatory"/> returns <see langword="false"/>) never lower this
     /// watermark, so a stuck best-effort group can never block pruning. Takes the mandatory-ness
     /// check as a delegate rather than a stored flag: this project carries no reference to
-    /// <c>Remontoire.Sharding</c>, where that policy lives.
+    /// <c>Remontoire.Sharding</c>, where that policy lives. Deliberately reads
+    /// <see cref="ConsumerGroupAckState.CommittedWatermark"/>, never <see cref="ConsumerGroupAckState.LowWatermark"/>
+    /// — pruning may only ever act on what a quorum actually agreed to, never on a checkpoint-mode
+    /// group's locally-applied-but-unreplicated progress (see that property's own remarks).
     /// </summary>
     public ulong MandatoryGroupsLowWatermark(Func<string, bool> isMandatory) {
-        var mandatoryWatermarks = _groups.Where(pair => isMandatory(pair.Key)).Select(pair => pair.Value.LowWatermark).ToArray();
+        var mandatoryWatermarks = _groups.Where(pair => isMandatory(pair.Key)).Select(pair => pair.Value.CommittedWatermark).ToArray();
         return mandatoryWatermarks.Length == 0 ? 0 : mandatoryWatermarks.Min();
     }
 
     /// <summary>
-    /// Which mandatory consumer group is currently furthest behind, and its watermark — the
-    /// group <see cref="MandatoryGroupsLowWatermark"/>'s minimum came from, surfaced by name for
-    /// the <c>remontoire_pruning_blocked_by_group</c> metric. <see langword="null"/> when no
+    /// Which mandatory consumer group is currently furthest behind, and its committed watermark —
+    /// the group <see cref="MandatoryGroupsLowWatermark"/>'s minimum came from, surfaced by name
+    /// for the <c>remontoire_pruning_blocked_by_group</c> metric. <see langword="null"/> when no
     /// mandatory group is registered.
     /// </summary>
-    public (string ConsumerGroup, ulong LowWatermark)? SlowestMandatoryGroup(Func<string, bool> isMandatory) {
+    public (string ConsumerGroup, ulong CommittedWatermark)? SlowestMandatoryGroup(Func<string, bool> isMandatory) {
         var mandatory = _groups.Where(pair => isMandatory(pair.Key)).ToArray();
         if (mandatory.Length == 0)
             return null;
 
-        var slowest = mandatory.MinBy(pair => pair.Value.LowWatermark);
-        return (slowest.Key, slowest.Value.LowWatermark);
+        var slowest = mandatory.MinBy(pair => pair.Value.CommittedWatermark);
+        return (slowest.Key, slowest.Value.CommittedWatermark);
     }
 
     // The wire format an Ack record's payload always carries: [uint32 count][uint64 offsets...],

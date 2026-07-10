@@ -88,6 +88,17 @@ public class AckIndexTests {
 
             index.GetOrCreate("group-2").LowWatermark.Should().Be(0);
         }
+
+        [Fact]
+        public void Never_advances_CommittedWatermark_only_AdvanceWatermarkTo_does() {
+            var index = new AckIndex();
+
+            index.ApplyLocal("group-1", [0, 1, 2]);
+
+            index.GetOrCreate("group-1").CommittedWatermark.Should().Be(0,
+                "no quorum has agreed to this yet — pruning must never act on an ApplyLocal-only offset range");
+            index.MandatoryGroupsLowWatermark(_ => true).Should().Be(0, "MandatoryGroupsLowWatermark reads CommittedWatermark, not LowWatermark");
+        }
     }
 
     public class RegisteredConsumerGroups {
@@ -156,7 +167,7 @@ public class AckIndexTests {
 
             slowest.Should().NotBeNull();
             slowest!.Value.ConsumerGroup.Should().Be("mandatory-2");
-            slowest.Value.LowWatermark.Should().Be(1);
+            slowest.Value.CommittedWatermark.Should().Be(1);
         }
     }
 
