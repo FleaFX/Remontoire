@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using Google.Protobuf;
+using Grpc.Core;
 using Grpc.Net.Client;
 using Remontoire.Client.V1;
 
@@ -8,14 +10,16 @@ namespace Remontoire.Client;
 /// <summary>
 /// A connection to one Remontoire group — both producer and consumer, sharing one
 /// <see cref="LeaderAddressCache"/> so a successful call on either side benefits every later
-/// call on the same group. One gRPC channel per configured member address, built once and reused
-/// for the connection's lifetime.
+/// call on the same group. One gRPC channel per address ever needed, opened lazily and reused for
+/// the connection's lifetime: <see cref="RemontoireClientOptions.GroupMemberAddresses"/> seeds it,
+/// but a redirect hint the server sends is trusted the same way even when it points somewhere
+/// this connection wasn't originally configured with — the hint comes from the same authoritative
+/// source (the server's own peer configuration) either way.
 /// </summary>
 public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsumer, IDisposable {
     readonly RemontoireClientOptions _options;
     readonly LeaderAddressCache _leaderCache = new();
-    readonly Dictionary<Uri, GrpcChannel> _channels;
-    readonly Dictionary<Uri, RemontoireClient.RemontoireClientClient> _clients;
+    readonly ConcurrentDictionary<Uri, (GrpcChannel Channel, RemontoireClient.RemontoireClientClient Client)> _clients = new();
 
     // Without mTLS (a later phase), member addresses are plain http:// — .NET's HTTP/2 client
     // otherwise refuses cleartext HTTP/2 outright. Process-wide and idempotent, so setting it
@@ -27,8 +31,8 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     /// </summary>
     public RemontoireConnection(RemontoireClientOptions options) {
         _options = options;
-        _channels = options.GroupMemberAddresses.ToDictionary(address => address, GrpcChannel.ForAddress);
-        _clients = _channels.ToDictionary(pair => pair.Key, pair => new RemontoireClient.RemontoireClientClient(pair.Value));
+        foreach (var address in options.GroupMemberAddresses)
+            ClientFor(address);
     }
 
     /// <inheritdoc />
@@ -61,21 +65,45 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
 
         // NotLeader can only ever appear as the FIRST reply on the stream — once the server
         // starts streaming, it was, at that moment, the correct leader by definition. A later
-        // leader change simply breaks the stream, which this loop treats exactly like an initial
-        // NotLeader: reconnect via the same redirect logic, not a separate protocol case.
+        // leader change, or the node dying outright (an RpcException out of MoveNext, caught
+        // separately below since a try surrounding a yield may not have a catch clause), simply
+        // breaks the stream — this loop treats both exactly like an initial NotLeader: reconnect
+        // via the same redirect logic, not a separate protocol case.
         while (!cancellationToken.IsCancellationRequested) {
             var address = _leaderCache.Get(groupId) ?? RandomMemberAddress();
-            using var call = ClientFor(address).Consume(new ConsumeRequest { StreamName = streamName, ConsumerGroup = consumerGroup }, cancellationToken: cancellationToken);
+            var call = ClientFor(address).Consume(new ConsumeRequest { StreamName = streamName, ConsumerGroup = consumerGroup }, cancellationToken: cancellationToken);
+            var unreachable = false;
+            try {
+                while (true) {
+                    bool hasNext;
+                    try {
+                        hasNext = await call.ResponseStream.MoveNext(cancellationToken);
+                    } catch (RpcException) {
+                        unreachable = true; // the node is unreachable — reconnect exactly like a stream that just ended
+                        break;
+                    }
 
-            while (await call.ResponseStream.MoveNext(cancellationToken)) {
-                var reply = call.ResponseStream.Current;
-                if (reply.NotLeader is { } notLeader) {
-                    if (notLeader.HasLeaderAddress)
-                        _leaderCache.Update(groupId, new Uri(notLeader.LeaderAddress));
-                    break; // reconnect to the (possibly new) leader
+                    if (!hasNext)
+                        break;
+
+                    var reply = call.ResponseStream.Current;
+                    if (reply.NotLeader is { } notLeader) {
+                        if (notLeader.HasLeaderAddress)
+                            _leaderCache.Update(groupId, new Uri(notLeader.LeaderAddress));
+                        break; // reconnect to the (possibly new) leader
+                    }
+
+                    yield return ToMessage(reply.Message);
                 }
+            } finally {
+                call.Dispose();
+            }
 
-                yield return ToMessage(reply.Message);
+            // A dead cached address must not be retried in a tight, CPU-burning loop — same
+            // invalidate-and-wait treatment CallWithRedirectAsync gives a hintless redirect.
+            if (unreachable) {
+                _leaderCache.Invalidate(groupId);
+                await Task.Delay(_options.RedirectRetryDelay, cancellationToken);
             }
         }
     }
@@ -86,7 +114,20 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
         var address = _leaderCache.Get(groupId) ?? RandomMemberAddress();
 
         for (var attempt = 0; attempt < _options.MaxRedirectAttempts; attempt++) {
-            var reply = await call(address);
+            TReply reply;
+            try {
+                reply = await call(address);
+            } catch (RpcException) {
+                // The cached or just-tried address is genuinely unreachable (a crashed node, a
+                // network partition) — not merely "not currently leader". Treated the same as a
+                // redirect with no hint: the cache can no longer be trusted, wait briefly, try a
+                // random other member.
+                await Task.Delay(_options.RedirectRetryDelay);
+                _leaderCache.Invalidate(groupId);
+                address = RandomMemberAddress();
+                continue;
+            }
+
             var notLeader = extractNotLeader(reply);
             if (notLeader is null)
                 return reply; // success
@@ -112,9 +153,11 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
 
     Uri RandomMemberAddress() => _options.GroupMemberAddresses[Random.Shared.Next(_options.GroupMemberAddresses.Count)];
 
-    RemontoireClient.RemontoireClientClient ClientFor(Uri address) => _clients.TryGetValue(address, out var client)
-        ? client
-        : throw new InvalidOperationException($"'{address}' is not a configured group member address.");
+    RemontoireClient.RemontoireClientClient ClientFor(Uri address) =>
+        _clients.GetOrAdd(address, static a => {
+            var channel = GrpcChannel.ForAddress(a);
+            return (channel, new RemontoireClient.RemontoireClientClient(channel));
+        }).Client;
 
     static RemontoireMessage ToMessage(RemontoireMessageProto proto) => new(
         proto.ShardId,
@@ -131,7 +174,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     /// Disposes every underlying channel.
     /// </summary>
     public void Dispose() {
-        foreach (var channel in _channels.Values)
+        foreach (var (channel, _) in _clients.Values)
             channel.Dispose();
     }
 }

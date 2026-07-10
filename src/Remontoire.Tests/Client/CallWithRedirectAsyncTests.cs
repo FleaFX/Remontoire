@@ -1,4 +1,5 @@
 using FluentAssertions;
+using Grpc.Core;
 using Remontoire.Client.V1;
 
 namespace Remontoire.Client;
@@ -68,6 +69,25 @@ public class CallWithRedirectAsyncTests {
             attempts++;
             return Task.FromResult(attempts == 1 ? "redirect" : "ok");
         }, reply => reply == "redirect" ? new NotLeader { StreamName = "stream-1" } : null); // no LeaderAddress — an election is in progress
+
+        reply.Should().Be("ok");
+        attempts.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Retries_a_random_member_when_the_cached_address_throws_an_RpcException() {
+        // A genuinely unreachable node (a crash, a network partition) throws rather than
+        // replying — this must be treated exactly like a hintless redirect, not left unhandled.
+        using var connection = Connect();
+        var attempts = 0;
+
+        var reply = await connection.CallWithRedirectAsync<string>("group-1", _ => {
+            attempts++;
+            if (attempts == 1)
+                throw new RpcException(new Status(StatusCode.Unavailable, "simulated dead node"));
+
+            return Task.FromResult("ok");
+        }, _ => null);
 
         reply.Should().Be("ok");
         attempts.Should().Be(2);
