@@ -1,10 +1,12 @@
 using System.Net;
 using FluentAssertions;
+using Grpc.Net.Client;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Remontoire.Client.V1;
 using Remontoire.Messaging;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
@@ -448,5 +450,92 @@ public class RemontoireGrpcClusterTests {
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }
+    }
+
+    [Fact]
+    public async Task Ack_for_a_checkpoint_mode_consumer_group_applies_locally_bypassing_Raft() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+            SetCheckpointMode(nodes, "checkpoint-group");
+
+            using var connection = Connect(nodes);
+            var published = await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
+
+            await connection.AckAsync(StreamName, "checkpoint-group", published.ShardId, published.Offset);
+
+            var leader = nodes.First(node => node.Replica.IsLeader);
+            (await RunUntilAsync(() => leader.AckIndex.GetOrCreate("checkpoint-group").IsAcked((ulong)published.Offset), TimeSpan.FromSeconds(5)))
+                .Should().BeTrue();
+            leader.AckIndex.GetOrCreate("checkpoint-group").CommittedWatermark.Should().Be(0,
+                "checkpoint mode never commits through Raft on its own — only a later AckCheckpointer tick would");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Ack_for_a_checkpoint_mode_group_against_a_non_leader_returns_NotLeader() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+            SetCheckpointMode(nodes, "checkpoint-group");
+            var follower = nodes.First(node => !node.Replica.IsLeader);
+
+            using var channel = GrpcChannel.ForAddress(follower.Host.Urls.First());
+            var client = new RemontoireClient.RemontoireClientClient(channel);
+
+            var reply = await client.AckAsync(new Remontoire.Client.V1.AckRequest {
+                StreamName = StreamName, ConsumerGroup = "checkpoint-group", ShardId = 0, Offsets = { 0UL },
+            });
+
+            reply.ResultCase.Should().Be(AckReply.ResultOneofCase.NotLeader,
+                "a checkpoint-mode ack still requires the leader — only the replication mechanism is cheaper, not the destination");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Consume_for_a_checkpoint_mode_group_succeeds_against_a_follower() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+            SetCheckpointMode(nodes, "checkpoint-group");
+
+            using var connection = Connect(nodes);
+            await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
+
+            var follower = nodes.First(node => !node.Replica.IsLeader);
+            (await RunUntilAsync(() => follower.ShardLog.TryGet(0, out var handle) && Dispose(handle), TimeSpan.FromSeconds(10)))
+                .Should().BeTrue("the follower's own ShardLog replays the same committed stream — no reason to wait on the leader for this");
+
+            using var channel = GrpcChannel.ForAddress(follower.Host.Urls.First());
+            var client = new RemontoireClient.RemontoireClientClient(channel);
+            using var call = client.Consume(new ConsumeRequest { StreamName = StreamName, ConsumerGroup = "checkpoint-group" });
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+            (await call.ResponseStream.MoveNext(cts.Token)).Should().BeTrue();
+            var reply = call.ResponseStream.Current;
+
+            reply.ResultCase.Should().Be(ConsumeReply.ResultOneofCase.Message,
+                "the first time RequiresLeaderPinning ever returns false: a checkpoint-mode consumer may read directly from a follower");
+            reply.Message.Payload.ToByteArray().Should().Equal("hello"u8.ToArray());
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    static void SetCheckpointMode(IEnumerable<Node> nodes, string consumerGroup) {
+        foreach (var node in nodes)
+            node.Host.Services.GetRequiredService<ShardAssignmentTable>().Apply(new SetConsumerGroupAckMode(StreamName, consumerGroup, AckMode.Checkpoint));
+    }
+
+    static bool Dispose(LogEntryHandle handle) {
+        handle.Dispose();
+        return true;
     }
 }
