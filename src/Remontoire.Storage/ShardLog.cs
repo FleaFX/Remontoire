@@ -51,9 +51,11 @@ public sealed partial class ShardLog : IAsyncDisposable {
         _actorLoop = Task.Run(RunActorAsync);
         _tailingLoop = Task.Run(RunTailingLoopAsync);
         _compactionWorkerLoop = compactionPolicy is null ? null : Task.Run(new CompactionWorker(_mailbox.Writer).RunAsync);
-        _retentionTickerLoop = compactionPolicy?.GetAckedLowWatermarkAsync is null ? null : Task.Run(() => RunRetentionTickerAsync(_retentionCts.Token));
+        _retentionTickerLoop = compactionPolicy?.GetAckedLowWatermarkAsync is null ? null
+            : Task.Run(() => RunRetentionTickerAsync(compactionPolicy.RetentionTickInterval, _retentionCts.Token));
         _sizePruneWorkerLoop = retentionPolicy is null ? null
-            : Task.Run(() => new SizePruneWorker(directory, retentionPolicy.GetMaxTotalBytesPerVirtualShard, retentionPolicy.IsAdmissionPaused, _mailbox.Writer).RunAsync(_retentionCts.Token));
+            : Task.Run(() => new SizePruneWorker(directory, retentionPolicy.GetMaxTotalBytesPerVirtualShard, retentionPolicy.IsAdmissionPaused, _mailbox.Writer,
+                tickInterval: retentionPolicy.SizePruneTickInterval).RunAsync(_retentionCts.Token));
     }
 
     /// <summary>

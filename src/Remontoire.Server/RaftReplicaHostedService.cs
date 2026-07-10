@@ -107,24 +107,24 @@ sealed class RaftReplicaHostedService(
             messagingRegistry.Register(group.GroupId, shardLog, ackIndex);
             _ackIndexAppliers[group.GroupId] = ackIndexApplier;
 
-            _ackCheckpointers[group.GroupId] = new AckCheckpointer(
-                ackIndex,
-                proposeCheckpointAsync: (consumerGroup, watermark, ct) => replica.ProposeAsync(new AckCheckpointRequest(consumerGroup, watermark), ct).AsTask(),
-                isLeader: () => replica.IsLeader,
-                isCheckpointMode: consumerGroup => ResolveStreamNameForGroup(group.GroupId) is { } streamName
+            _ackCheckpointers[group.GroupId] = new AckCheckpointer(new AckCheckpointerOptions(
+                AckIndex: ackIndex,
+                ProposeCheckpointAsync: (consumerGroup, watermark, ct) => replica.ProposeAsync(new AckCheckpointRequest(consumerGroup, watermark), ct).AsTask(),
+                IsLeader: () => replica.IsLeader,
+                IsCheckpointMode: consumerGroup => ResolveStreamNameForGroup(group.GroupId) is { } streamName
                     && assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mode == AckMode.Checkpoint,
-                getCheckpointThresholds: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName
+                GetCheckpointThresholds: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName
                     ? (assignmentTable.GetRetentionPolicy(streamName).CheckpointInterval, assignmentTable.GetRetentionPolicy(streamName).CheckpointOffsetCount)
                     : (null, null),
-                isAdmissionPaused: () => admissionGate.IsPaused(group.GroupId));
+                IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId)));
 
-            _retentionEvaluators[group.GroupId] = new RetentionEvaluator(
-                shardLog, ackIndex,
-                isMandatory: consumerGroup => ResolveStreamNameForGroup(group.GroupId) is not { } streamName
+            _retentionEvaluators[group.GroupId] = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                ShardLog: shardLog, AckIndex: ackIndex,
+                IsMandatory: consumerGroup => ResolveStreamNameForGroup(group.GroupId) is not { } streamName
                     || assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mandatory,
-                getMaxRetention: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName ? assignmentTable.GetRetentionPolicy(streamName).MaxRetention : TimeSpan.MaxValue,
-                forwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(ResolveStreamNameForGroup(group.GroupId), request, ct),
-                isAdmissionPaused: () => admissionGate.IsPaused(group.GroupId));
+                GetMaxRetention: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName ? assignmentTable.GetRetentionPolicy(streamName).MaxRetention : TimeSpan.MaxValue,
+                ForwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(ResolveStreamNameForGroup(group.GroupId), request, ct),
+                IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId)));
         }
 
         if (raftOptions.MetaGroup is { } metaOptions) {

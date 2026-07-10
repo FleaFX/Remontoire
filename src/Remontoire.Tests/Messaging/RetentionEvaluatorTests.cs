@@ -25,9 +25,9 @@ public class RetentionEvaluatorTests {
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
             await WaitForVisibleAsync(shardLog, 0);
 
-            await using var evaluator = new RetentionEvaluator(
-                shardLog, ackIndex, isMandatory: _ => true, getMaxRetention: () => MaxRetention,
-                forwardToDeadLetterAsync: Forward(forwarded), isAdmissionPaused: () => false, timeProvider);
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -54,9 +54,9 @@ public class RetentionEvaluatorTests {
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
             await WaitForVisibleAsync(shardLog, 0);
 
-            await using var evaluator = new RetentionEvaluator(
-                shardLog, ackIndex, isMandatory: consumerGroup => consumerGroup == "mandatory", getMaxRetention: () => MaxRetention,
-                forwardToDeadLetterAsync: Forward(forwarded), isAdmissionPaused: () => false, timeProvider);
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -81,9 +81,9 @@ public class RetentionEvaluatorTests {
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, recentTimestamp, "hello world")));
             await WaitForVisibleAsync(shardLog, 0);
 
-            await using var evaluator = new RetentionEvaluator(
-                shardLog, ackIndex, isMandatory: _ => true, getMaxRetention: () => MaxRetention,
-                forwardToDeadLetterAsync: Forward(forwarded), isAdmissionPaused: () => false, timeProvider);
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -102,15 +102,15 @@ public class RetentionEvaluatorTests {
             var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - MaxRetention - TimeSpan.FromHours(1));
             await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
             var ackIndex = new AckIndex();
-            ackIndex.Apply(AckRecord("mandatory", 0)); // a genuinely committed ack — ApplyLocal alone would never advance CommittedWatermark // best-effort group never acks anything
+            ackIndex.Apply(AckRecord("mandatory", 0)); // a genuinely committed ack — best-effort group never acks anything
             var forwarded = new ConcurrentQueue<AppendRequest>();
 
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
             await WaitForVisibleAsync(shardLog, 0);
 
-            await using var evaluator = new RetentionEvaluator(
-                shardLog, ackIndex, isMandatory: consumerGroup => consumerGroup == "mandatory", getMaxRetention: () => MaxRetention,
-                forwardToDeadLetterAsync: Forward(forwarded), isAdmissionPaused: () => false, timeProvider);
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -133,9 +133,9 @@ public class RetentionEvaluatorTests {
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
             await WaitForVisibleAsync(shardLog, 0);
 
-            await using var evaluator = new RetentionEvaluator(
-                shardLog, ackIndex, isMandatory: _ => true, getMaxRetention: () => MaxRetention,
-                forwardToDeadLetterAsync: Forward(forwarded), isAdmissionPaused: () => true, timeProvider);
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => true, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 

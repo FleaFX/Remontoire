@@ -1,12 +1,12 @@
 namespace Remontoire.Storage;
 
 public sealed partial class ShardLog {
-    static readonly TimeSpan RetentionTickInterval = TimeSpan.FromHours(1);
+    static readonly TimeSpan DefaultRetentionTickInterval = TimeSpan.FromHours(1);
 
-    async Task RunRetentionTickerAsync(CancellationToken cancellationToken) {
+    async Task RunRetentionTickerAsync(TimeSpan? tickInterval, CancellationToken cancellationToken) {
         try {
             while (true) {
-                await Task.Delay(RetentionTickInterval, cancellationToken);
+                await Task.Delay(tickInterval ?? DefaultRetentionTickInterval, cancellationToken);
                 _mailbox.Writer.TryWrite(new RetentionPassRequested());
             }
         } catch (OperationCanceledException) {

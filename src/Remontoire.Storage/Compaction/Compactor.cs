@@ -167,4 +167,9 @@ static class Compactor {
 /// fact only a higher one can supply. <c>null</c> disables ack-driven pruning entirely — nothing
 /// is ever dropped on age/size grounds alone.
 /// </param>
-public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null);
+/// <param name="RetentionTickInterval">
+/// Overrides the ack-driven retention pass's default tick cadence. <see langword="null"/> keeps
+/// the production default — this exists purely so tests don't have to wait on that default to
+/// observe real, end-to-end pruning behavior.
+/// </param>
+public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null, TimeSpan? RetentionTickInterval = null);

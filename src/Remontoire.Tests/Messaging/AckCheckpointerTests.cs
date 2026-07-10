@@ -15,9 +15,9 @@ public class AckCheckpointerTests {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0, 1, 2]);
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => false, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (null, 1), isAdmissionPaused: () => false, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => false, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (null, 1), IsAdmissionPaused: () => false, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider);
 
@@ -29,9 +29,9 @@ public class AckCheckpointerTests {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0, 1, 2]);
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (null, 1), isAdmissionPaused: () => true, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (null, 1), IsAdmissionPaused: () => true, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider);
 
@@ -43,9 +43,9 @@ public class AckCheckpointerTests {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0, 1, 2]);
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => false,
-            getCheckpointThresholds: () => (null, 1), isAdmissionPaused: () => false, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => false,
+            GetCheckpointThresholds: () => (null, 1), IsAdmissionPaused: () => false, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider);
 
@@ -58,9 +58,9 @@ public class AckCheckpointerTests {
         // group-1 registered (RegisteredConsumerGroups sees it) but never acked anything — LowWatermark stays 0.
         ackIndex.GetOrCreate("group-1");
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (null, 1), isAdmissionPaused: () => false, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (null, 1), IsAdmissionPaused: () => false, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider);
 
@@ -72,9 +72,9 @@ public class AckCheckpointerTests {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0, 1, 2]); // LowWatermark -> 3
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (null, 2), isAdmissionPaused: () => false, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (null, 2), IsAdmissionPaused: () => false, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider);
 
@@ -86,9 +86,9 @@ public class AckCheckpointerTests {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0, 1, 2]); // LowWatermark -> 3, threshold needs 10
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (null, 10), isAdmissionPaused: () => false, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (null, 10), IsAdmissionPaused: () => false, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider);
 
@@ -102,9 +102,9 @@ public class AckCheckpointerTests {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0]);
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (TimeSpan.FromSeconds(10), null), isAdmissionPaused: () => false, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (TimeSpan.FromSeconds(10), null), IsAdmissionPaused: () => false, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider);
 
@@ -116,9 +116,9 @@ public class AckCheckpointerTests {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0]);
 
-        await using var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (TimeSpan.FromSeconds(10), null), isAdmissionPaused: () => false, timeProvider);
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (TimeSpan.FromSeconds(10), null), IsAdmissionPaused: () => false, timeProvider));
 
         await AdvanceAndSettleAsync(timeProvider); // first checkpoint, immediate
         proposals.Should().ContainSingle();
@@ -138,9 +138,9 @@ public class AckCheckpointerTests {
     public async Task DisposeAsync_stops_the_loop() {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0]);
-        var checkpointer = new AckCheckpointer(
-            ackIndex, Propose(proposals), isLeader: () => true, isCheckpointMode: _ => true,
-            getCheckpointThresholds: () => (null, 1), isAdmissionPaused: () => false, timeProvider);
+        var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (null, 1), IsAdmissionPaused: () => false, timeProvider));
         await AdvanceAndSettleAsync(timeProvider);
         proposals.Should().ContainSingle();
 

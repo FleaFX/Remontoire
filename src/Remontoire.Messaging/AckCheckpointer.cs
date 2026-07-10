@@ -1,6 +1,17 @@
 namespace Remontoire.Messaging;
 
 /// <summary>
+/// Everything <see cref="AckCheckpointer"/> needs, bundled into one type instead of a long,
+/// duplicated parameter list — same "Options" shape as <c>RaftServerOptions</c>/<c>RemontoireClientOptions</c>
+/// elsewhere in this codebase.
+/// </summary>
+public sealed record AckCheckpointerOptions(
+    AckIndex AckIndex, Func<string, ulong, CancellationToken, Task> ProposeCheckpointAsync,
+    Func<bool> IsLeader, Func<string, bool> IsCheckpointMode,
+    Func<(TimeSpan? Interval, int? OffsetCount)> GetCheckpointThresholds,
+    Func<bool> IsAdmissionPaused, TimeProvider? TimeProvider = null);
+
+/// <summary>
 /// Periodically proposes a cheap AckCheckpoint record replicating each checkpoint-mode consumer
 /// group's current watermark — the periodic counterpart to <see cref="AckIndex.ApplyLocal"/>'s
 /// immediate, unreplicated apply. Takes every cross-layer fact as a delegate over primitives —
@@ -15,41 +26,38 @@ public sealed class AckCheckpointer : IAsyncDisposable {
     readonly Task _loop;
 
     /// <summary>
-    /// Starts ticking immediately. A no-op tick when <paramref name="isLeader"/> returns
-    /// <see langword="false"/> (only the leader may propose), when <paramref name="isAdmissionPaused"/>
-    /// returns <see langword="true"/> (mid-reshard-pause), or when no group's watermark has
-    /// advanced past its configured interval since the last checkpoint for it.
+    /// Starts ticking immediately. A no-op tick when <see cref="AckCheckpointerOptions.IsLeader"/>
+    /// returns <see langword="false"/> (only the leader may propose), when
+    /// <see cref="AckCheckpointerOptions.IsAdmissionPaused"/> returns <see langword="true"/>
+    /// (mid-reshard-pause), or when no group's watermark has advanced past its configured
+    /// interval since the last checkpoint for it.
     /// </summary>
-    public AckCheckpointer(
-        AckIndex ackIndex, Func<string, ulong, CancellationToken, Task> proposeCheckpointAsync,
-        Func<bool> isLeader, Func<string, bool> isCheckpointMode,
-        Func<(TimeSpan? Interval, int? OffsetCount)> getCheckpointThresholds,
-        Func<bool> isAdmissionPaused, TimeProvider? timeProvider = null) =>
-        _loop = Task.Run(() => RunAsync(ackIndex, proposeCheckpointAsync, isLeader, isCheckpointMode, getCheckpointThresholds, isAdmissionPaused, timeProvider ?? TimeProvider.System, _cts.Token));
+    public AckCheckpointer(AckCheckpointerOptions options) =>
+        _loop = Task.Run(() => RunAsync(options, _cts.Token));
 
-    static async Task RunAsync(
-        AckIndex ackIndex, Func<string, ulong, CancellationToken, Task> proposeCheckpointAsync,
-        Func<bool> isLeader, Func<string, bool> isCheckpointMode,
-        Func<(TimeSpan? Interval, int? OffsetCount)> getCheckpointThresholds,
-        Func<bool> isAdmissionPaused, TimeProvider timeProvider, CancellationToken cancellationToken) {
+    // Stays static, unlike RetentionEvaluator's own RunAsync: this one touches no instance state
+    // of its own, so passing the options bundle straight through keeps every dependency explicit
+    // without an implicit `this` capture — same discipline AckIndexApplier's RunAsync already follows.
+    static async Task RunAsync(AckCheckpointerOptions options, CancellationToken cancellationToken) {
+        var timeProvider = options.TimeProvider ?? TimeProvider.System;
         var lastCheckpointed = new Dictionary<string, (ulong Watermark, DateTimeOffset At)>();
 
         try {
             while (true) {
                 await Task.Delay(TickInterval, timeProvider, cancellationToken);
 
-                if (!isLeader() || isAdmissionPaused())
+                if (!options.IsLeader() || options.IsAdmissionPaused())
                     continue;
 
-                var (interval, offsetCount) = getCheckpointThresholds();
-                foreach (var consumerGroup in ackIndex.RegisteredConsumerGroups()) {
-                    if (!isCheckpointMode(consumerGroup))
+                var (interval, offsetCount) = options.GetCheckpointThresholds();
+                foreach (var consumerGroup in options.AckIndex.RegisteredConsumerGroups()) {
+                    if (!options.IsCheckpointMode(consumerGroup))
                         continue;
 
                     // LowWatermark ("applied"), deliberately not CommittedWatermark — this is
                     // exactly the value that's still waiting to become committed; that's this
                     // component's own job to propose.
-                    var watermark = ackIndex.GetOrCreate(consumerGroup).LowWatermark;
+                    var watermark = options.AckIndex.GetOrCreate(consumerGroup).LowWatermark;
                     var (lastWatermark, lastAt) = lastCheckpointed.GetValueOrDefault(consumerGroup, (0UL, DateTimeOffset.MinValue));
                     if (watermark <= lastWatermark)
                         continue; // nothing new to checkpoint for this group
@@ -59,8 +67,14 @@ public sealed class AckCheckpointer : IAsyncDisposable {
                     if (!dueByCount && !dueByTime)
                         continue;
 
-                    await proposeCheckpointAsync(consumerGroup, watermark, cancellationToken);
-                    lastCheckpointed[consumerGroup] = (watermark, timeProvider.GetUtcNow());
+                    try {
+                        await options.ProposeCheckpointAsync(consumerGroup, watermark, cancellationToken);
+                        lastCheckpointed[consumerGroup] = (watermark, timeProvider.GetUtcNow());
+                    } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                        // A transient failure for this one group (e.g. a leadership handover mid-
+                        // propose) must never stop the others in this tick, or permanently kill
+                        // the loop — nothing else would ever restart it. Retried next tick.
+                    }
                 }
             }
         } catch (OperationCanceledException) {

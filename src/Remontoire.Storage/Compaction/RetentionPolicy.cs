@@ -24,4 +24,9 @@ namespace Remontoire.Storage;
 /// — one shared admission-pause fact for every periodic pruning path. <see langword="null"/> means
 /// never paused.
 /// </param>
-public sealed record RetentionPolicy(Func<long?> GetMaxTotalBytesPerVirtualShard, Func<bool>? IsAdmissionPaused = null);
+/// <param name="SizePruneTickInterval">
+/// Overrides the size-prune worker's default tick cadence. <see langword="null"/> keeps the
+/// production default — this exists purely so tests don't have to wait on that default to observe
+/// real, end-to-end pruning behavior.
+/// </param>
+public sealed record RetentionPolicy(Func<long?> GetMaxTotalBytesPerVirtualShard, Func<bool>? IsAdmissionPaused = null, TimeSpan? SizePruneTickInterval = null);

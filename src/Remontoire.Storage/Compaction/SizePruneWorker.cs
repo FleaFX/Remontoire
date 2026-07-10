@@ -9,37 +9,43 @@ namespace Remontoire.Storage.Compaction;
 /// answerable), so this simply ticks, runs <see cref="Compactor.PruneOldestUntilUnderSizeAsync"/>
 /// directly, and reports back via <see cref="SizePruneCompleted"/>.
 /// </summary>
-sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox, TimeProvider? timeProvider = null) {
-    static readonly TimeSpan TickInterval = TimeSpan.FromMinutes(5);
+sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox, TimeProvider? timeProvider = null, TimeSpan? tickInterval = null) {
+    static readonly TimeSpan DefaultTickInterval = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// Loops until the actor's mailbox closes (normal shutdown).
     /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken = default) {
         var timeProviderOrDefault = timeProvider ?? TimeProvider.System;
+        var interval = tickInterval ?? DefaultTickInterval;
 
         while (true) {
             try {
-                await Task.Delay(TickInterval, timeProviderOrDefault, cancellationToken);
+                await Task.Delay(interval, timeProviderOrDefault, cancellationToken);
             } catch (OperationCanceledException) {
                 return;
             }
 
-            if (isAdmissionPaused?.Invoke() ?? false)
-                continue;
+            try {
+                if (isAdmissionPaused?.Invoke() ?? false)
+                    continue;
 
-            // Re-evaluated every tick, not resolved once — the real ceiling may not be known yet
-            // at the moment this worker started (see RetentionPolicy.GetMaxTotalBytesPerVirtualShard's
-            // own remarks); a null tick here is a skip, never a permanent disable.
-            if (getMaxTotalBytes() is not { } maxTotalBytes)
-                continue;
+                // Re-evaluated every tick, not resolved once — the real ceiling may not be known
+                // yet at the moment this worker started (see RetentionPolicy.GetMaxTotalBytesPerVirtualShard's
+                // own remarks); a null tick here is a skip, never a permanent disable.
+                if (getMaxTotalBytes() is not { } maxTotalBytes)
+                    continue;
 
-            var deletedPaths = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes, cancellationToken);
-            if (deletedPaths.Count == 0)
-                continue;
+                var deletedPaths = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes, cancellationToken);
+                if (deletedPaths.Count == 0)
+                    continue;
 
-            if (!mailbox.TryWrite(new SizePruneCompleted(deletedPaths)))
-                return; // mailbox closed in the meantime — the result is simply discarded, harmless
+                if (!mailbox.TryWrite(new SizePruneCompleted(deletedPaths)))
+                    return; // mailbox closed in the meantime — the result is simply discarded, harmless
+            } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                // A transient failure mid-tick must never permanently kill this loop — nothing
+                // else would ever restart it. Best-effort: try again next tick.
+            }
         }
     }
 }

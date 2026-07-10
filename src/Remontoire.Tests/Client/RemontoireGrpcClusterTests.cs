@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using FluentAssertions;
 using Grpc.Net.Client;
 using Microsoft.AspNetCore.Builder;
@@ -22,6 +23,7 @@ namespace Remontoire.Client;
 // RaftReplicaHostedService builds), plus one single-node meta-group replica on the first host, with
 // a real RemontoireConnection on top. Nothing is mocked — only the process boundary is collapsed,
 // the same tradeoff RaftGrpcClusterTests already makes.
+[Collection("RealNetwork")]
 public class RemontoireGrpcClusterTests {
     const string GroupId = "group-1";
 
@@ -40,13 +42,18 @@ public class RemontoireGrpcClusterTests {
         return condition();
     }
 
+    static readonly TimeSpan FastTickInterval = TimeSpan.FromMilliseconds(200);
+
     sealed class Node : IAsyncDisposable {
         public required WebApplication Host { get; init; }
         public required RaftReplica Replica { get; init; }
         public required RaftGrpcTransport Transport { get; init; }
+        public required string DataDirectory { get; init; }
         public required ShardLog ShardLog { get; init; }
         public required AckIndex AckIndex { get; init; }
         public required AckIndexApplier Applier { get; init; }
+        public required AckCheckpointer AckCheckpointer { get; init; }
+        public required RetentionEvaluator RetentionEvaluator { get; init; }
 
         // Only set on the one node that also hosts the meta-group (index 0) — every
         // RemontoireConnection in this test file bootstraps from that node's address.
@@ -59,6 +66,8 @@ public class RemontoireGrpcClusterTests {
             if (MetaReplica is not null)
                 await MetaReplica.DisposeAsync();
 
+            await AckCheckpointer.DisposeAsync();
+            await RetentionEvaluator.DisposeAsync();
             await Applier.DisposeAsync();
             await ShardLog.DisposeAsync();
             await Replica.DisposeAsync();
@@ -89,7 +98,7 @@ public class RemontoireGrpcClusterTests {
         return app;
     }
 
-    static async Task<List<Node>> StartClusterAsync(string directoryRoot) {
+    static async Task<List<Node>> StartClusterAsync(string directoryRoot, long flushThresholdBytes = 64 * 1024 * 1024) {
         var hosts = await Task.WhenAll(StartHostAsync(), StartHostAsync(), StartHostAsync());
         var nodeIds = new[] { "node-1", "node-2", "node-3" };
         var members = nodeIds.Zip(hosts, (nodeId, host) => new RaftGroupMember(nodeId, new Uri(host.Urls.First()))).ToArray();
@@ -114,18 +123,49 @@ public class RemontoireGrpcClusterTests {
                 leaderAddresses.Register(peer.NodeId, peer.Address);
 
             var ackIndex = new AckIndex();
+            var admissionGate = hosts[i].Services.GetRequiredService<MigrationAdmissionGate>();
+            var table = hosts[i].Services.GetRequiredService<ShardAssignmentTable>();
+
+            // Assigned right after construction, below — RetentionEvaluator's own constructor
+            // needs an already-open ShardLog, so this can't be resolved directly the way
+            // RaftReplicaHostedService resolves it lazily through a dictionary keyed by groupId.
+            // Same reasoning, a captured local instead of a dictionary lookup since this harness
+            // only ever has the one group.
+            RetentionEvaluator? retentionEvaluatorRef = null;
+
             var directory = Path.Combine(directoryRoot, nodeId);
             Directory.CreateDirectory(directory);
-            var shardLog = await ShardLog.OpenAsync(directory, replica.ReadCommittedAsync,
+            var shardLog = await ShardLog.OpenAsync(directory, replica.ReadCommittedAsync, flushThresholdBytes: flushThresholdBytes,
                 compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null,
-                    GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(ackIndex.AllGroupsLowWatermark())));
+                    GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(retentionEvaluatorRef!.SafeToPruneWatermark),
+                    RetentionTickInterval: FastTickInterval),
+                retentionPolicy: new RetentionPolicy(
+                    GetMaxTotalBytesPerVirtualShard: () => table.GetRetentionPolicy(StreamName).MaxSizeBytesPerVirtualShard,
+                    IsAdmissionPaused: () => admissionGate.IsPaused(GroupId),
+                    SizePruneTickInterval: FastTickInterval));
             var applier = new AckIndexApplier(shardLog, ackIndex);
             hosts[i].Services.GetRequiredService<MessagingGroupRegistry>().Register(GroupId, shardLog, ackIndex);
+
+            var ackCheckpointer = new AckCheckpointer(new AckCheckpointerOptions(
+                ackIndex,
+                ProposeCheckpointAsync: (consumerGroup, watermark, ct) => replica.ProposeAsync(new AckCheckpointRequest(consumerGroup, watermark), ct).AsTask(),
+                IsLeader: () => replica.IsLeader,
+                IsCheckpointMode: consumerGroup => table.GetConsumerGroupPolicy(StreamName, consumerGroup).Mode == AckMode.Checkpoint,
+                GetCheckpointThresholds: () => (table.GetRetentionPolicy(StreamName).CheckpointInterval, table.GetRetentionPolicy(StreamName).CheckpointOffsetCount),
+                IsAdmissionPaused: () => admissionGate.IsPaused(GroupId)));
+
+            var retentionEvaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex,
+                IsMandatory: consumerGroup => table.GetConsumerGroupPolicy(StreamName, consumerGroup).Mandatory,
+                GetMaxRetention: () => table.GetRetentionPolicy(StreamName).MaxRetention,
+                ForwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(table, replica, request, ct),
+                IsAdmissionPaused: () => admissionGate.IsPaused(GroupId),
+                TickInterval: FastTickInterval));
+            retentionEvaluatorRef = retentionEvaluator;
 
             // Every node's own table needs to already agree on the one stream/group/assignment
             // this whole test file uses — hosts other than 0 have no meta-group replica of their
             // own here, so seed them directly, the same end state a watcher would arrive at.
-            var table = hosts[i].Services.GetRequiredService<ShardAssignmentTable>();
             var seedMigrationId = new MigrationId(Guid.NewGuid());
             table.Apply(new CreateStream(StreamName, VirtualShardCount: 1, RoutingAlgorithm.XxHash3V1));
             table.Apply(new RegisterGroup(GroupId, members.Select(member => new ShardGroupMember(member.NodeId, member.Address)).ToArray()));
@@ -163,12 +203,28 @@ public class RemontoireGrpcClusterTests {
             }
 
             nodes.Add(new Node {
-                Host = hosts[i], Replica = replica, Transport = transport, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier,
+                Host = hosts[i], Replica = replica, Transport = transport, DataDirectory = directory, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier,
+                AckCheckpointer = ackCheckpointer, RetentionEvaluator = retentionEvaluator,
                 MetaReplica = metaReplica, MetaApplier = metaApplier,
             });
         }
 
         return nodes;
+    }
+
+    // Mirrors RaftReplicaHostedService.ForwardToDeadLetterAsync, simplified for this harness'
+    // single-group topology (no cross-group routing needed — the dead-letter stream's own virtual
+    // shard is always assigned to the same GroupId every other stream in this file uses).
+    static async Task ForwardToDeadLetterAsync(ShardAssignmentTable table, RaftReplica replica, AppendRequest request, CancellationToken cancellationToken) {
+        var deadLetterStreamName = $"{StreamName}.__deadletter__";
+        if (!table.TryGetStreamConfig(deadLetterStreamName, out var config))
+            return;
+
+        var virtualShardIndex = ShardRouter.GetVirtualShardIndex(request.PartitionKey.Span, config.VirtualShardCount, config.RoutingAlgorithm);
+        if (!table.TryGetAssignment(deadLetterStreamName, virtualShardIndex, out var assignment) || assignment.GroupId != GroupId)
+            return;
+
+        await replica.ProposeAsync(request, cancellationToken);
     }
 
     static RemontoireConnection Connect(IEnumerable<Node> nodes) =>
@@ -537,5 +593,131 @@ public class RemontoireGrpcClusterTests {
     static bool Dispose(LogEntryHandle handle) {
         handle.Dispose();
         return true;
+    }
+
+    // Exit criterion: a stuck mandatory group forces a dead-letter forward; a best-effort
+    // group's own missing ack never blocks it.
+    [Fact]
+    public async Task A_stuck_mandatory_group_forces_a_dead_letter_forward_while_a_best_effort_group_never_blocks() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            foreach (var node in nodes) {
+                var table = node.Host.Services.GetRequiredService<ShardAssignmentTable>();
+                var dlMigrationId = new MigrationId(Guid.NewGuid());
+                table.Apply(new CreateStream($"{StreamName}.__deadletter__", 1, RoutingAlgorithm.XxHash3V1));
+                table.Apply(new MigrationStarted(dlMigrationId, $"{StreamName}.__deadletter__", 0, GroupId, GroupId));
+                table.Apply(new Cutover(dlMigrationId, $"{StreamName}.__deadletter__", 0, GroupId));
+                table.Apply(new SetStreamRetentionPolicy(StreamName, AuditRetention: TimeSpan.Zero, MaxRetention: TimeSpan.FromMilliseconds(100), MaxSizeBytesPerVirtualShard: null));
+                table.Apply(new SetConsumerGroupMandatory(StreamName, "best-effort-group", false));
+            }
+
+            using var connection = Connect(nodes);
+            await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
+
+            // Registers both groups (never acking) so this proves the mandatory/best-effort
+            // distinction itself, not just "nobody is consuming at all".
+            using var mandatoryCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await foreach (var _ in connection.ConsumeAsync(StreamName, "mandatory-group", mandatoryCts.Token)) break;
+            using var bestEffortCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await foreach (var _ in connection.ConsumeAsync(StreamName, "best-effort-group", bestEffortCts.Token)) break;
+
+            var leader = nodes.First(node => node.Replica.IsLeader);
+            (await RunUntilAsync(() => leader.RetentionEvaluator.DeadLetterMessagesTotal == 1, TimeSpan.FromSeconds(5)))
+                .Should().BeTrue("past max-retention and unacked by the mandatory group — must be force-forwarded regardless of the best-effort group's own missing ack");
+
+            // The dead-lettered copy — this harness routes the dead-letter stream onto the same
+            // physical group, so it lands as the next offset in the very same ShardLog.
+            leader.ShardLog.TryGet(1, out var handle).Should().BeTrue();
+            using (handle)
+                Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be("hello");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Size_based_emergency_pruning_deletes_the_oldest_segment_once_the_ceiling_is_exceeded() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot, flushThresholdBytes: 1); // every publish flushes into its own segment
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+            var leader = nodes.First(node => node.Replica.IsLeader);
+
+            using var connection = Connect(nodes);
+            var first = await PublishOnceReadyAsync(connection, StreamName, "key-1", "one"u8.ToArray());
+            await connection.PublishAsync(StreamName, "key-2", "two"u8.ToArray());
+            await connection.PublishAsync(StreamName, "key-3", "three"u8.ToArray());
+
+            (await RunUntilAsync(() => leader.ShardLog.TryGet(2, out var handle) && Dispose(handle), TimeSpan.FromSeconds(5)))
+                .Should().BeTrue();
+            // TryGet succeeding only proves the entry is visible (MemTable or segment) — the
+            // size-based mechanism only ever sees flushed *.sst files, so wait for at least one
+            // real flush before sizing the ceiling off it. The compaction policy above merges
+            // aggressively (MaxMergedSegmentBytes: null), so this may already be a single,
+            // combined segment rather than three separate ones — either is fine below.
+            (await RunUntilAsync(() => Directory.GetFiles(leader.DataDirectory, "*.sst").Length >= 1, TimeSpan.FromSeconds(5)))
+                .Should().BeTrue("flushThresholdBytes: 1 forces at least the first entry to flush almost immediately");
+
+            // Sized off the real, current directory size, not a guessed constant — small enough
+            // that at least the oldest offset must go.
+            var currentTotalBytes = Directory.GetFiles(leader.DataDirectory, "*.sst").Sum(path => new FileInfo(path).Length);
+            var ceiling = currentTotalBytes / 2;
+
+            foreach (var node in nodes) {
+                var table = node.Host.Services.GetRequiredService<ShardAssignmentTable>();
+                table.Apply(new SetStreamRetentionPolicy(StreamName, AuditRetention: TimeSpan.MaxValue, MaxRetention: TimeSpan.MaxValue, MaxSizeBytesPerVirtualShard: ceiling));
+            }
+
+            (await RunUntilAsync(() => !leader.ShardLog.TryGet((ulong)first.Offset, out _), TimeSpan.FromSeconds(10)))
+                .Should().BeTrue("the oldest offset must be force-pruned once the directory exceeds its size ceiling, regardless of ack status");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    [Fact]
+    public async Task A_leader_crash_never_redelivers_a_checkpoint_mode_ack_that_was_already_committed() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+            SetCheckpointMode(nodes, "checkpoint-group");
+            foreach (var node in nodes)
+                node.Host.Services.GetRequiredService<ShardAssignmentTable>().Apply(new SetStreamCheckpointInterval(StreamName, Interval: null, OffsetCount: 1));
+
+            using var connection = Connect(nodes);
+            var first = await PublishOnceReadyAsync(connection, StreamName, "key-1", "one"u8.ToArray());
+            await connection.AckAsync(StreamName, "checkpoint-group", first.ShardId, first.Offset);
+
+            var leaderNode = nodes.First(node => node.Replica.IsLeader);
+            var survivors = nodes.Where(node => node != leaderNode).ToArray();
+
+            // Wait for a real AckCheckpoint to commit and replay into every surviving node's own
+            // AckIndex — CommittedWatermark, not LowWatermark, proves it actually went through Raft.
+            (await RunUntilAsync(() => survivors.All(node => node.AckIndex.GetOrCreate("checkpoint-group").CommittedWatermark == 1), TimeSpan.FromSeconds(10)))
+                .Should().BeTrue("the checkpoint must have committed to every surviving node before the leader crash, not just a quorum majority that might not include them");
+
+            nodes.Remove(leaderNode);
+            await leaderNode.DisposeAsync();
+
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10)))
+                .Should().BeTrue("the two surviving nodes must elect a new leader");
+
+            var messages = new List<RemontoireMessage>();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            try {
+                await foreach (var message in connection.ConsumeAsync(StreamName, "checkpoint-group", cts.Token))
+                    messages.Add(message);
+            } catch (OperationCanceledException) {
+                // Expected — nothing left to redeliver, the stream just idles until the timeout.
+            }
+
+            messages.Should().BeEmpty("the ack was already committed via a real AckCheckpoint before the crash — it must never be redelivered");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
     }
 }

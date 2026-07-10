@@ -15,6 +15,7 @@ namespace Remontoire.Raft;
 // (RaftReplica itself) is exactly what a real 3-process deployment runs; only the process
 // boundary is collapsed, for automated-test practicality. Timing is real wall-clock, unlike
 // SimulatedCluster's virtual time — polling below uses real, generous timeouts.
+[Collection("RealNetwork")]
 public class RaftGrpcClusterTests {
     static AppendRequest SampleRequest(string key = "key") =>
         new(System.Text.Encoding.UTF8.GetBytes(key), [], "payload"u8.ToArray());

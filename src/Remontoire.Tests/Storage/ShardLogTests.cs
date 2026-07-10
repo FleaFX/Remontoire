@@ -221,13 +221,17 @@ public class ShardLogTests {
             try {
                 await using var log = await ShardLog.OpenAsync(
                     directory, EmptyCommittedSource, flushThresholdBytes: 1,
-                    compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(3UL)));
+                    // MaxMergedSegmentBytes: 1 keeps every segment in its own merge group (each
+                    // already exceeds 1 byte on its own) — this test needs 4 distinct, individually
+                    // deletable segments to exercise per-offset pruning; MaxMergedSegmentBytes: null
+                    // packs everything into one segment as soon as 2 exist, racing this test's own
+                    // setup and non-deterministically merging offsets 0-3 together before retention
+                    // ever runs.
+                    compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: 1, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(3UL)));
 
                 for (ulong i = 0; i < 4; i++)
                     log.TryPost(new WalRecordCommitted(SampleRecord(i)));
                 await WaitForVisibleAsync(log, 3);
-                // A generous budget: 4 real flushes under a fully-parallel test run can genuinely
-                // take longer than this suite's usual 1-2 segment setups.
                 await WaitForSegmentCountAsync(directory, 4, TimeSpan.FromSeconds(20));
 
                 log.TryPost(new RetentionPassRequested());

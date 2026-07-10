@@ -24,6 +24,7 @@ namespace Remontoire.Client;
 // RemontoireConnection. This is the direct end-to-end verification of the exit criterion: no
 // message loss, no downtime, the ShardMigrating contention path exercised over a real connection,
 // and ShardRouter.GetVirtualShardIndex genuinely deciding where a message lands.
+[Collection("RealNetwork")]
 public class ReshardEndToEndTests {
     const string StreamName = "orders";
     const string FromGroupId = "group-1";
