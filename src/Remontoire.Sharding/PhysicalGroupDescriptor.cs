@@ -5,7 +5,7 @@ namespace Remontoire.Sharding;
 /// points a virtual shard at. Deliberately carries member addresses inline rather than a bare
 /// group id: a client resolving a virtual shard needs somewhere to actually connect.
 /// </summary>
-/// <param name="GroupId">Matches <c>RaftReplica.GroupId</c>/<c>RaftReplicaConfig.GroupId</c> exactly.</param>
+/// <param name="GroupId">Matches the physical group's own identifier exactly.</param>
 /// <param name="Members">Every current member of the group: node id + gRPC address.</param>
 public readonly record struct PhysicalGroupDescriptor(string GroupId, IReadOnlyList<ShardGroupMember> Members);
 

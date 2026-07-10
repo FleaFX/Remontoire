@@ -20,6 +20,14 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
     readonly Task _watchLoop;
     readonly Task _reconciliationLoop;
 
+    // Guards against the live Watch tail and the periodic reconciliation poll racing each other:
+    // GetSnapshot always returns the entire history, not just what's new, so a reconciliation
+    // call in flight while Watch delivers a newer record could otherwise replay stale state on
+    // top of it. Applying only ever moves this forward, and only while holding the gate for the
+    // whole check-then-apply, so the two loops can never apply out of version order.
+    readonly Lock _versionGate = new();
+    ulong? _lastAppliedVersion; // null: nothing applied yet — version 0 (a real, valid first record) must still apply
+
     /// <summary>
     /// Starts filling <paramref name="table"/> immediately: an initial <c>GetSnapshot</c>, then a
     /// continuous <c>Watch</c> from the version it returned, alongside a periodic reconciliation
@@ -30,14 +38,14 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
         _reconciliationLoop = Task.Run(() => RunReconciliationLoopAsync(client, table, reconciliationInterval ?? DefaultReconciliationInterval, _cts.Token));
     }
 
-    static async Task RunWatchLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, CancellationToken cancellationToken) {
+    async Task RunWatchLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, CancellationToken cancellationToken) {
         try {
             var fromVersion = 0UL;
             while (true) {
                 try {
                     var snapshot = await client.GetSnapshotAsync(new GetSnapshotRequest(), cancellationToken: cancellationToken);
                     foreach (var record in snapshot.Records)
-                        table.Apply(MetaLogRecord.Decode(record.Payload.Span));
+                        ApplyIfNewer(table, record);
 
                     fromVersion = snapshot.Version;
                     break;
@@ -53,7 +61,7 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
                     using var call = client.Watch(new WatchRequest { FromVersion = fromVersion }, cancellationToken: cancellationToken);
                     while (await call.ResponseStream.MoveNext(cancellationToken)) {
                         var record = call.ResponseStream.Current;
-                        table.Apply(MetaLogRecord.Decode(record.Payload.Span));
+                        ApplyIfNewer(table, record);
                         fromVersion = record.Version;
                     }
                 } catch (RpcException) {
@@ -68,7 +76,7 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
         }
     }
 
-    static async Task RunReconciliationLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, TimeSpan interval, CancellationToken cancellationToken) {
+    async Task RunReconciliationLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, TimeSpan interval, CancellationToken cancellationToken) {
         try {
             while (true) {
                 await Task.Delay(interval, cancellationToken);
@@ -76,13 +84,25 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
                 try {
                     var snapshot = await client.GetSnapshotAsync(new GetSnapshotRequest(), cancellationToken: cancellationToken);
                     foreach (var record in snapshot.Records)
-                        table.Apply(MetaLogRecord.Decode(record.Payload.Span));
+                        ApplyIfNewer(table, record);
                 } catch (RpcException) {
                     // Best-effort — the next scheduled poll, or the live Watch loop, will catch up.
                 }
             }
         } catch (OperationCanceledException) {
             // Expected shutdown path — DisposeAsync cancels and awaits this.
+        }
+    }
+
+    // Applying and advancing the gate together, under the same lock, is what keeps the two loops
+    // from ever landing an older record after a newer one already won for the same key.
+    void ApplyIfNewer(ShardAssignmentTable table, MetaLogRecordProto record) {
+        lock (_versionGate) {
+            if (_lastAppliedVersion is { } lastApplied && record.Version <= lastApplied)
+                return;
+
+            table.Apply(MetaLogRecord.Decode(record.Payload.Span));
+            _lastAppliedVersion = record.Version;
         }
     }
 

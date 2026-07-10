@@ -68,23 +68,22 @@ sealed class RaftReplicaHostedService(
                 ElectionTimeoutMax: TimeSpan.FromMilliseconds(500));
 
             var log = await WalRaftLog.OpenAsync(group.DataDirectory, cancellationToken: cancellationToken);
+            _logs[group.GroupId] = log; // tracked immediately — StopAsync must be able to reach it even if a later step here throws
             var stateStore = new FileRaftStateStore(group.DataDirectory);
 
             var replica = new RaftReplica(stateStore, log, _transport, config);
             await replica.StartAsync(cancellationToken);
             registry.Register(replica);
+            _replicas[group.GroupId] = replica;
 
             var ackIndex = new AckIndex();
             var shardLog = await ShardLog.OpenAsync(group.DataDirectory, replica.ReadCommittedAsync,
                 compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(ackIndex.AllGroupsLowWatermark())),
                 cancellationToken: cancellationToken);
-            var ackIndexApplier = new AckIndexApplier(shardLog, ackIndex);
-
-            messagingRegistry.Register(group.GroupId, shardLog, ackIndex);
-
-            _logs[group.GroupId] = log;
-            _replicas[group.GroupId] = replica;
             _shardLogs[group.GroupId] = shardLog;
+
+            var ackIndexApplier = new AckIndexApplier(shardLog, ackIndex);
+            messagingRegistry.Register(group.GroupId, shardLog, ackIndex);
             _ackIndexAppliers[group.GroupId] = ackIndexApplier;
         }
 
