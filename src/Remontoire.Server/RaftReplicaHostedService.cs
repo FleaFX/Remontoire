@@ -28,12 +28,15 @@ namespace Remontoire.Server;
 /// </remarks>
 sealed class RaftReplicaHostedService(
     IOptions<RaftServerOptions> options, RaftReplicaRegistry registry, MessagingGroupRegistry messagingRegistry,
-    LeaderAddressDirectory leaderAddresses, ShardAssignmentTable assignmentTable, MetaLogJournal metaLogJournal)
+    LeaderAddressDirectory leaderAddresses, ShardAssignmentTable assignmentTable, MetaLogJournal metaLogJournal,
+    MigrationAdmissionGate admissionGate)
     : IHostedService {
     readonly Dictionary<string, WalRaftLog> _logs = new();
     readonly Dictionary<string, RaftReplica> _replicas = new();
     readonly Dictionary<string, ShardLog> _shardLogs = new();
     readonly Dictionary<string, AckIndexApplier> _ackIndexAppliers = new();
+    readonly Dictionary<string, AckCheckpointer> _ackCheckpointers = new();
+    readonly Dictionary<string, RetentionEvaluator> _retentionEvaluators = new();
     RaftGrpcTransport? _transport;
     WalRaftLog? _metaLog;
     RaftReplica? _metaReplica;
@@ -77,14 +80,51 @@ sealed class RaftReplicaHostedService(
             _replicas[group.GroupId] = replica;
 
             var ackIndex = new AckIndex();
+
+            // Looked up lazily, by groupId, at invocation time (each RetentionPassRequested tick,
+            // hours after StartAsync returns) rather than captured directly — the RetentionEvaluator
+            // this refers to isn't constructed until after ShardLog itself opens (its own
+            // constructor needs an already-open ShardLog), so a direct closure over it here would
+            // be circular. By the time this delegate is ever actually called, the dictionary entry
+            // below is long since populated.
+            var compactionPolicy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null,
+                GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(_retentionEvaluators[group.GroupId].SafeToPruneWatermark));
+
+            // Re-resolved every tick rather than fixed at construction — see ResolveStreamNameForGroup's
+            // own remarks: this group's assignment isn't known yet at this point in StartAsync (the
+            // meta-group/watcher section below hasn't even started), so a value captured here would
+            // stay null forever instead of self-healing once the table catches up.
+            var retentionPolicy = new RetentionPolicy(
+                GetMaxTotalBytesPerVirtualShard: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName
+                    ? assignmentTable.GetRetentionPolicy(streamName).MaxSizeBytesPerVirtualShard : null,
+                IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId));
+
             var shardLog = await ShardLog.OpenAsync(group.DataDirectory, replica.ReadCommittedAsync,
-                compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(ackIndex.AllGroupsLowWatermark())),
-                cancellationToken: cancellationToken);
+                compactionPolicy: compactionPolicy, retentionPolicy: retentionPolicy, cancellationToken: cancellationToken);
             _shardLogs[group.GroupId] = shardLog;
 
             var ackIndexApplier = new AckIndexApplier(shardLog, ackIndex);
             messagingRegistry.Register(group.GroupId, shardLog, ackIndex);
             _ackIndexAppliers[group.GroupId] = ackIndexApplier;
+
+            _ackCheckpointers[group.GroupId] = new AckCheckpointer(
+                ackIndex,
+                proposeCheckpointAsync: (consumerGroup, watermark, ct) => replica.ProposeAsync(new AckCheckpointRequest(consumerGroup, watermark), ct).AsTask(),
+                isLeader: () => replica.IsLeader,
+                isCheckpointMode: consumerGroup => ResolveStreamNameForGroup(group.GroupId) is { } streamName
+                    && assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mode == AckMode.Checkpoint,
+                getCheckpointThresholds: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName
+                    ? (assignmentTable.GetRetentionPolicy(streamName).CheckpointInterval, assignmentTable.GetRetentionPolicy(streamName).CheckpointOffsetCount)
+                    : (null, null),
+                isAdmissionPaused: () => admissionGate.IsPaused(group.GroupId));
+
+            _retentionEvaluators[group.GroupId] = new RetentionEvaluator(
+                shardLog, ackIndex,
+                isMandatory: consumerGroup => ResolveStreamNameForGroup(group.GroupId) is not { } streamName
+                    || assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mandatory,
+                getMaxRetention: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName ? assignmentTable.GetRetentionPolicy(streamName).MaxRetention : TimeSpan.MaxValue,
+                forwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(ResolveStreamNameForGroup(group.GroupId), request, ct),
+                isAdmissionPaused: () => admissionGate.IsPaused(group.GroupId));
         }
 
         if (raftOptions.MetaGroup is { } metaOptions) {
@@ -127,6 +167,14 @@ sealed class RaftReplicaHostedService(
         if (_metaLog is not null)
             await _metaLog.DisposeAsync();
 
+        // Both post to the Raft replica (AckCheckpointer) or read from the ShardLog (RetentionEvaluator)
+        // they were built against — stop before either underlying dependency does, same reason
+        // _ackIndexAppliers already stops before _shardLogs below.
+        foreach (var checkpointer in _ackCheckpointers.Values)
+            await checkpointer.DisposeAsync();
+        foreach (var evaluator in _retentionEvaluators.Values)
+            await evaluator.DisposeAsync();
+
         foreach (var (groupId, ackIndexApplier) in _ackIndexAppliers) {
             messagingRegistry.Unregister(groupId);
             await ackIndexApplier.DisposeAsync();
@@ -144,5 +192,36 @@ sealed class RaftReplicaHostedService(
 
         foreach (var log in _logs.Values)
             await log.DisposeAsync();
+    }
+
+    // A physical group carries no stream name of its own (neither WalRecord nor RaftGroupOptions
+    // does) — the only way to answer "which stream does this group serve" is a reverse scan of the
+    // shard-assignment table's own assignments. Deliberately re-run on every call rather than
+    // cached: this group's assignment may not be known yet at the moment a caller first asks (the
+    // meta-group/watcher hasn't necessarily caught up), so a cached answer could stay stale
+    // forever instead of self-healing once the table catches up. Cheap enough for that: an
+    // in-memory scan, called at most once per periodic tick, never per request.
+    string? ResolveStreamNameForGroup(string groupId) =>
+        assignmentTable.EnumerateAssignments().FirstOrDefault(a => a.GroupId == groupId).StreamName;
+
+    // The one place that can resolve where a dead-letter stream's own virtual shard currently
+    // lives — RetentionEvaluator (Remontoire.Messaging) has no reference to Remontoire.Sharding to
+    // do this itself. Fails silently (never forwards) when the destination isn't hosted on this
+    // node, or the dead-letter stream was never provisioned — both explicitly accepted v1 gaps
+    // (§4.4/§6.3), not a crash.
+    async Task ForwardToDeadLetterAsync(string? streamName, AppendRequest request, CancellationToken cancellationToken) {
+        if (streamName is null)
+            return;
+
+        var deadLetterStreamName = $"{streamName}.__deadletter__";
+        if (!assignmentTable.TryGetStreamConfig(deadLetterStreamName, out var config))
+            return;
+
+        var virtualShardIndex = ShardRouter.GetVirtualShardIndex(request.PartitionKey.Span, config.VirtualShardCount, config.RoutingAlgorithm);
+        if (!assignmentTable.TryGetAssignment(deadLetterStreamName, virtualShardIndex, out var assignment) ||
+            !_replicas.TryGetValue(assignment.GroupId, out var replica))
+            return;
+
+        await replica.ProposeAsync(request, cancellationToken);
     }
 }

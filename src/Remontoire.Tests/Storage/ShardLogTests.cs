@@ -280,7 +280,7 @@ public class ShardLogTests {
                 await using var log = await ShardLog.OpenAsync(
                     directory, EmptyCommittedSource, flushThresholdBytes: 1,
                     compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(1UL)),
-                    retentionPolicy: new RetentionPolicy(MaxTotalBytesPerVirtualShard: null, IsAdmissionPaused: () => true));
+                    retentionPolicy: new RetentionPolicy(GetMaxTotalBytesPerVirtualShard: () => null, IsAdmissionPaused: () => true));
 
                 log.TryPost(new WalRecordCommitted(SampleRecord(0)));
                 await WaitForVisibleAsync(log, 0);

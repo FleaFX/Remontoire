@@ -9,7 +9,7 @@ namespace Remontoire.Storage.Compaction;
 /// answerable), so this simply ticks, runs <see cref="Compactor.PruneOldestUntilUnderSizeAsync"/>
 /// directly, and reports back via <see cref="SizePruneCompleted"/>.
 /// </summary>
-sealed class SizePruneWorker(string directory, long maxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox, TimeProvider? timeProvider = null) {
+sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox, TimeProvider? timeProvider = null) {
     static readonly TimeSpan TickInterval = TimeSpan.FromMinutes(5);
 
     /// <summary>
@@ -26,6 +26,12 @@ sealed class SizePruneWorker(string directory, long maxTotalBytes, Func<bool>? i
             }
 
             if (isAdmissionPaused?.Invoke() ?? false)
+                continue;
+
+            // Re-evaluated every tick, not resolved once — the real ceiling may not be known yet
+            // at the moment this worker started (see RetentionPolicy.GetMaxTotalBytesPerVirtualShard's
+            // own remarks); a null tick here is a skip, never a permanent disable.
+            if (getMaxTotalBytes() is not { } maxTotalBytes)
                 continue;
 
             var deletedPaths = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes, cancellationToken);

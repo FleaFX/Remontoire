@@ -16,7 +16,7 @@ public class SizePruneWorkerTests {
             var path = await WriteSegmentAsync(directory, SampleEntries(0, 5));
             var (mailbox, posted, timeProvider) = Compose();
             using var cts = new CancellationTokenSource();
-            var worker = new SizePruneWorker(directory, maxTotalBytes: 0, isAdmissionPaused: null, mailbox, timeProvider);
+            var worker = new SizePruneWorker(directory, getMaxTotalBytes: () => 0, isAdmissionPaused: null, mailbox, timeProvider);
             var run = worker.RunAsync(cts.Token);
 
             await AdvanceAndSettleAsync(timeProvider);
@@ -39,7 +39,7 @@ public class SizePruneWorkerTests {
             var budget = new FileInfo(path).Length + 1;
             var (mailbox, posted, timeProvider) = Compose();
             using var cts = new CancellationTokenSource();
-            var worker = new SizePruneWorker(directory, budget, isAdmissionPaused: null, mailbox, timeProvider);
+            var worker = new SizePruneWorker(directory, getMaxTotalBytes: () => budget, isAdmissionPaused: null, mailbox, timeProvider);
             var run = worker.RunAsync(cts.Token);
 
             await AdvanceAndSettleAsync(timeProvider);
@@ -54,13 +54,40 @@ public class SizePruneWorkerTests {
     }
 
     [Fact]
+    public async Task Never_prunes_while_the_ceiling_delegate_returns_null_and_recovers_once_it_resolves() {
+        var directory = CreateTempDirectory();
+        try {
+            var path = await WriteSegmentAsync(directory, SampleEntries(0, 5));
+            var (mailbox, posted, timeProvider) = Compose();
+            using var cts = new CancellationTokenSource();
+            long? ceiling = null; // simulates a not-yet-resolved stream assignment at startup
+            var worker = new SizePruneWorker(directory, getMaxTotalBytes: () => ceiling, isAdmissionPaused: null, mailbox, timeProvider);
+            var run = worker.RunAsync(cts.Token);
+
+            await AdvanceAndSettleAsync(timeProvider);
+            posted.Should().BeEmpty("no ceiling is known yet — this tick must skip, not disable pruning forever");
+            File.Exists(path).Should().BeTrue();
+
+            ceiling = 0; // the ceiling becomes known on a later tick
+            await AdvanceAndSettleAsync(timeProvider);
+
+            posted.Should().ContainSingle("the same worker must resume pruning once the ceiling resolves, without needing to be restarted");
+            File.Exists(path).Should().BeFalse();
+
+            await StopAsync(cts, run);
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Never_ticks_while_admission_is_paused() {
         var directory = CreateTempDirectory();
         try {
             var path = await WriteSegmentAsync(directory, SampleEntries(0, 5));
             var (mailbox, posted, timeProvider) = Compose();
             using var cts = new CancellationTokenSource();
-            var worker = new SizePruneWorker(directory, maxTotalBytes: 0, isAdmissionPaused: () => true, mailbox, timeProvider);
+            var worker = new SizePruneWorker(directory, getMaxTotalBytes: () => 0, isAdmissionPaused: () => true, mailbox, timeProvider);
             var run = worker.RunAsync(cts.Token);
 
             await AdvanceAndSettleAsync(timeProvider);

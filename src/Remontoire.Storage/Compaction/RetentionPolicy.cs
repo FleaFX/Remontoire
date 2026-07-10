@@ -5,11 +5,16 @@ namespace Remontoire.Storage;
 /// this never merges, never consults the acked watermark, and its own alert is meant to read as
 /// categorically more severe than routine compaction/pruning.
 /// </summary>
-/// <param name="MaxTotalBytesPerVirtualShard">
+/// <param name="GetMaxTotalBytesPerVirtualShard">
 /// The size ceiling <see cref="Compactor.PruneOldestUntilUnderSizeAsync"/> enforces — in practice,
 /// per physical group today, not truly per virtual shard (no per-virtual-shard sub-partitioning
-/// exists yet in this project). <see langword="null"/> disables size-based emergency pruning
-/// entirely.
+/// exists yet in this project). A delegate, re-evaluated on every tick, rather than a fixed value
+/// fixed at construction time: the caller may not know the real ceiling yet at the moment a
+/// <see cref="ShardLog"/> opens (e.g. its owning stream's sharding assignment hasn't been resolved
+/// from a still-catching-up control plane) — a delegate lets that answer change once it becomes
+/// known, instead of silently and permanently disabling size-based pruning for that group's whole
+/// lifetime. Returning <see langword="null"/> on a given tick disables size-based pruning for that
+/// tick only, not forever.
 /// </param>
 /// <param name="IsAdmissionPaused">
 /// Injected the same way a group's local admission pause is consulted everywhere else it might be
@@ -19,4 +24,4 @@ namespace Remontoire.Storage;
 /// — one shared admission-pause fact for every periodic pruning path. <see langword="null"/> means
 /// never paused.
 /// </param>
-public sealed record RetentionPolicy(long? MaxTotalBytesPerVirtualShard, Func<bool>? IsAdmissionPaused = null);
+public sealed record RetentionPolicy(Func<long?> GetMaxTotalBytesPerVirtualShard, Func<bool>? IsAdmissionPaused = null);

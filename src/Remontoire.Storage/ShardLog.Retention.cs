@@ -29,7 +29,7 @@ public sealed partial class ShardLog {
     // reclaimed once nothing references it anymore and it's eventually finalized.
     async Task HandleRetentionPassRequestedAsync() {
         if (_retentionPolicy?.IsAdmissionPaused?.Invoke() ?? false)
-            return; // mid-reshard-pause — same discipline every new fase-6 periodic loop follows
+            return; // mid-reshard-pause — same discipline every new periodic loop below follows
 
         if (_compactionPolicy?.GetAckedLowWatermarkAsync is not { } getWatermark)
             return;
