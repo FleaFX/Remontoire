@@ -7,11 +7,11 @@ namespace Remontoire.Client;
 public class CallWithRedirectAsyncTests {
     static readonly Uri MemberAddress = new("http://node-1.local:5000");
     static readonly Uri OtherMemberAddress = new("http://node-2.local:5000");
+    static readonly IReadOnlyList<Uri> Members = [MemberAddress];
 
-    static RemontoireConnection Connect(int maxRedirectAttempts = 5, params Uri[] members) =>
+    static RemontoireConnection Connect(int maxRedirectAttempts = 5) =>
         new(new RemontoireClientOptions(
-            StreamGroupIds: new Dictionary<string, string> { ["stream-1"] = "group-1" },
-            GroupMemberAddresses: members.Length > 0 ? members : [MemberAddress],
+            MetaGroupSeedAddresses: [MemberAddress],
             MaxRedirectAttempts: maxRedirectAttempts,
             RedirectRetryDelay: TimeSpan.Zero));
 
@@ -20,7 +20,7 @@ public class CallWithRedirectAsyncTests {
         using var connection = Connect();
         var attempts = 0;
 
-        var reply = await connection.CallWithRedirectAsync<string>("group-1", _ => {
+        var reply = await connection.CallWithRedirectAsync<string>("group-1", Members, _ => {
             attempts++;
             return Task.FromResult("ok");
         }, _ => null);
@@ -34,7 +34,7 @@ public class CallWithRedirectAsyncTests {
         using var connection = Connect();
         var addressesCalled = new List<Uri>();
 
-        var reply = await connection.CallWithRedirectAsync<string>("group-1", address => {
+        var reply = await connection.CallWithRedirectAsync<string>("group-1", Members, address => {
             addressesCalled.Add(address);
             return Task.FromResult(addressesCalled.Count == 1 ? "redirect" : "ok");
         }, reply => reply == "redirect" ? new NotLeader { StreamName = "stream-1", LeaderAddress = OtherMemberAddress.ToString() } : null);
@@ -47,12 +47,12 @@ public class CallWithRedirectAsyncTests {
     public async Task A_redirect_hint_is_cached_for_the_next_call_on_the_same_group() {
         using var connection = Connect();
 
-        await connection.CallWithRedirectAsync<string>("group-1", address =>
+        await connection.CallWithRedirectAsync<string>("group-1", Members, address =>
             Task.FromResult(address == OtherMemberAddress ? "ok" : "redirect"),
             reply => reply == "redirect" ? new NotLeader { StreamName = "stream-1", LeaderAddress = OtherMemberAddress.ToString() } : null);
 
         var addressesCalled = new List<Uri>();
-        await connection.CallWithRedirectAsync<string>("group-1", address => {
+        await connection.CallWithRedirectAsync<string>("group-1", Members, address => {
             addressesCalled.Add(address);
             return Task.FromResult("ok");
         }, _ => null);
@@ -65,7 +65,7 @@ public class CallWithRedirectAsyncTests {
         using var connection = Connect();
         var attempts = 0;
 
-        var reply = await connection.CallWithRedirectAsync<string>("group-1", _ => {
+        var reply = await connection.CallWithRedirectAsync<string>("group-1", Members, _ => {
             attempts++;
             return Task.FromResult(attempts == 1 ? "redirect" : "ok");
         }, reply => reply == "redirect" ? new NotLeader { StreamName = "stream-1" } : null); // no LeaderAddress — an election is in progress
@@ -81,7 +81,7 @@ public class CallWithRedirectAsyncTests {
         using var connection = Connect();
         var attempts = 0;
 
-        var reply = await connection.CallWithRedirectAsync<string>("group-1", _ => {
+        var reply = await connection.CallWithRedirectAsync<string>("group-1", Members, _ => {
             attempts++;
             if (attempts == 1)
                 throw new RpcException(new Status(StatusCode.Unavailable, "simulated dead node"));
@@ -97,7 +97,7 @@ public class CallWithRedirectAsyncTests {
     public async Task Throws_RemontoireUnavailableException_after_exhausting_every_redirect_attempt() {
         using var connection = Connect(maxRedirectAttempts: 3);
 
-        var act = () => connection.CallWithRedirectAsync<string>("group-1",
+        var act = () => connection.CallWithRedirectAsync<string>("group-1", Members,
             _ => Task.FromResult("redirect"),
             reply => reply == "redirect" ? new NotLeader { StreamName = "stream-1", LeaderAddress = OtherMemberAddress.ToString() } : null);
 

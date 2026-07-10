@@ -17,15 +17,15 @@ namespace Remontoire.Client;
 
 // Real gRPC, over real loopback sockets, between real Kestrel hosts — one process, three
 // in-process "nodes", each a full RaftReplica+ShardLog+AckIndex composition (exactly what
-// RaftReplicaHostedService builds), with a real RemontoireConnection on top. Nothing is mocked —
-// only the process boundary is collapsed, the same tradeoff RaftGrpcClusterTests already makes.
+// RaftReplicaHostedService builds), plus one single-node meta-group replica on the first host, with
+// a real RemontoireConnection on top. Nothing is mocked — only the process boundary is collapsed,
+// the same tradeoff RaftGrpcClusterTests already makes.
 public class RemontoireGrpcClusterTests {
     const string GroupId = "group-1";
 
-    // Must equal GroupId: RemontoireClientGrpcService.Resolve treats stream_name as literally the
-    // group_id (the documented fase-4 simplification — no stream_name -> group_id translation
-    // exists server-side yet, only RemontoireClientOptions.StreamGroupIds does that client-side,
-    // for its own leader-cache bookkeeping; the wire request still carries the raw stream name).
+    // Must equal GroupId: RemontoireClientGrpcService.Resolve treats this stream's single virtual
+    // shard as always assigned to GroupId — set up below by seeding the meta-group with a matching
+    // CreateStream/RegisterGroup/Cutover, the same commands a real control plane would commit.
     const string StreamName = GroupId;
 
     static async Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) {
@@ -46,7 +46,17 @@ public class RemontoireGrpcClusterTests {
         public required AckIndex AckIndex { get; init; }
         public required AckIndexApplier Applier { get; init; }
 
+        // Only set on the one node that also hosts the meta-group (index 0) — every
+        // RemontoireConnection in this test file bootstraps from that node's address.
+        public RaftReplica? MetaReplica { get; init; }
+        public ShardAssignmentTableApplier? MetaApplier { get; init; }
+
         public async ValueTask DisposeAsync() {
+            if (MetaApplier is not null)
+                await MetaApplier.DisposeAsync();
+            if (MetaReplica is not null)
+                await MetaReplica.DisposeAsync();
+
             await Applier.DisposeAsync();
             await ShardLog.DisposeAsync();
             await Replica.DisposeAsync();
@@ -66,10 +76,12 @@ public class RemontoireGrpcClusterTests {
         builder.Services.AddSingleton<MessagingGroupRegistry>();
         builder.Services.AddSingleton<LeaderAddressDirectory>();
         builder.Services.AddSingleton<ShardAssignmentTable>();
+        builder.Services.AddSingleton<MetaLogJournal>();
 
         var app = builder.Build();
         app.MapGrpcService<RaftTransportGrpcService>();
         app.MapGrpcService<RemontoireClientGrpcService>();
+        app.MapGrpcService<ShardAssignmentMetaGrpcService>();
         await app.StartAsync();
         return app;
     }
@@ -107,15 +119,45 @@ public class RemontoireGrpcClusterTests {
             var applier = new AckIndexApplier(shardLog, ackIndex);
             hosts[i].Services.GetRequiredService<MessagingGroupRegistry>().Register(GroupId, shardLog, ackIndex);
 
-            // No meta-group in this harness — seed each node's table directly with the one
-            // stream/group/assignment this whole test file uses, standing in for what a real
-            // meta-group commit would otherwise replicate.
+            // Every node's own table needs to already agree on the one stream/group/assignment
+            // this whole test file uses — hosts other than 0 have no meta-group replica of their
+            // own here, so seed them directly, the same end state a watcher would arrive at.
             var table = hosts[i].Services.GetRequiredService<ShardAssignmentTable>();
             table.Apply(new CreateStream(StreamName, VirtualShardCount: 1, RoutingAlgorithm.XxHash3V1));
             table.Apply(new RegisterGroup(GroupId, members.Select(member => new ShardGroupMember(member.NodeId, member.Address)).ToArray()));
             table.Apply(new Cutover(MigrationId: "seed", StreamName, VirtualShardIndex: 0, GroupId));
 
-            nodes.Add(new Node { Host = hosts[i], Replica = replica, Transport = transport, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier });
+            RaftReplica? metaReplica = null;
+            ShardAssignmentTableApplier? metaApplier = null;
+            if (i == 0) {
+                // A real, single-node meta-group on this one host, so a real RemontoireConnection
+                // has an actual Watch/GetSnapshot endpoint to bootstrap its own table from — not
+                // just the direct table.Apply seeding above, which only ever helps this node's own
+                // server-side Resolve, never a client's.
+                var metaConfig = new RaftReplicaConfig(
+                    GroupId: "__meta__", NodeId: "meta-node", Peers: [],
+                    HeartbeatInterval: TimeSpan.FromMinutes(10), ElectionTimeoutMin: TimeSpan.FromMinutes(10), ElectionTimeoutMax: TimeSpan.FromMinutes(11));
+
+                metaReplica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), new RecordingRaftTransport(), metaConfig);
+                await metaReplica.StartAsync();
+                metaReplica.TryPost(new ElectionTimeoutElapsed(metaReplica.ElectionTimerGeneration)); // single-node -> ready leader
+                await metaReplica.DrainAsync();
+
+                var journal = hosts[i].Services.GetRequiredService<MetaLogJournal>();
+                metaApplier = new ShardAssignmentTableApplier(metaReplica, table, journal);
+
+                await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new CreateStream(StreamName, 1, RoutingAlgorithm.XxHash3V1))));
+                await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [],
+                    MetaLogRecord.Encode(new RegisterGroup(GroupId, members.Select(member => new ShardGroupMember(member.NodeId, member.Address)).ToArray()))));
+                await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover("seed", StreamName, 0, GroupId))));
+
+                await RunUntilAsync(() => journal.Snapshot().Records.Count == 3, TimeSpan.FromSeconds(2));
+            }
+
+            nodes.Add(new Node {
+                Host = hosts[i], Replica = replica, Transport = transport, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier,
+                MetaReplica = metaReplica, MetaApplier = metaApplier,
+            });
         }
 
         return nodes;
@@ -123,10 +165,79 @@ public class RemontoireGrpcClusterTests {
 
     static RemontoireConnection Connect(IEnumerable<Node> nodes) =>
         new(new RemontoireClientOptions(
-            StreamGroupIds: new Dictionary<string, string> { [StreamName] = GroupId },
-            GroupMemberAddresses: nodes.Select(node => new Uri(node.Host.Urls.First())).ToArray(),
+            MetaGroupSeedAddresses: [new Uri(nodes.First().Host.Urls.First())],
             MaxRedirectAttempts: 10,
             RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
+
+    // Overwrites GroupId's membership, as seen from node's own table, down to node's own address
+    // only — reproducing "this connection has never heard of any other member" now that a client
+    // always learns a group's full membership from the table rather than being handed an address
+    // list directly. Reuses node's own already-running meta-group replica if it has one (index 0
+    // in every StartClusterAsync-built cluster); otherwise stands up a small dedicated one, since
+    // every host maps ShardAssignmentMetaGrpcService but only index 0 starts with a fed journal.
+    static async Task<(RaftReplica? Replica, ShardAssignmentTableApplier? Applier)> SeedSoleKnownMemberAsync(Node node) {
+        var registerGroup = new RegisterGroup(GroupId, [new ShardGroupMember("solo", new Uri(node.Host.Urls.First()))]);
+        var table = node.Host.Services.GetRequiredService<ShardAssignmentTable>();
+
+        if (node.MetaReplica is { } existingMetaReplica) {
+            await existingMetaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(registerGroup)));
+            await RunUntilAsync(() => table.TryGetGroup(GroupId, out var group) && group.Members.Count == 1, TimeSpan.FromSeconds(2));
+            return (null, null);
+        }
+
+        var metaConfig = new RaftReplicaConfig(
+            GroupId: "__meta__", NodeId: "meta-node-solo", Peers: [],
+            HeartbeatInterval: TimeSpan.FromMinutes(10), ElectionTimeoutMin: TimeSpan.FromMinutes(10), ElectionTimeoutMax: TimeSpan.FromMinutes(11));
+
+        var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), new RecordingRaftTransport(), metaConfig);
+        await replica.StartAsync();
+        replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // single-node -> ready leader
+        await replica.DrainAsync();
+
+        var journal = node.Host.Services.GetRequiredService<MetaLogJournal>();
+        var applier = new ShardAssignmentTableApplier(replica, table, journal);
+
+        await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new CreateStream(StreamName, 1, RoutingAlgorithm.XxHash3V1))));
+        await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(registerGroup)));
+        await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover("seed-solo", StreamName, 0, GroupId))));
+
+        await RunUntilAsync(() => table.TryGetGroup(GroupId, out var group) && group.Members.Count == 1, TimeSpan.FromSeconds(2));
+        return (replica, applier);
+    }
+
+    // A freshly constructed RemontoireConnection's own ShardAssignmentWatcher needs a moment to
+    // catch up via its initial GetSnapshot before the stream/assignment it needs is known —
+    // exactly the race RemontoireConnection.ResolveGroup's own ArgumentException/RemontoireUnavailableException
+    // choices anticipate. Retries the first publish in each test until that catch-up has happened.
+    static async Task<PublishResult> PublishOnceReadyAsync(RemontoireConnection connection, string streamName, string partitionKey, byte[] payload) {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (true) {
+            try {
+                return await connection.PublishAsync(streamName, partitionKey, payload);
+            } catch (Exception ex) when (ex is ArgumentException or RemontoireUnavailableException && DateTime.UtcNow < deadline) {
+                await Task.Delay(20);
+            }
+        }
+    }
+
+    // Same catch-up race as PublishOnceReadyAsync, for a freshly constructed connection's very
+    // first ConsumeAsync call.
+    static async Task<List<RemontoireMessage>> ConsumeOnceReadyAsync(RemontoireConnection connection, string streamName, string consumerGroup, int count, CancellationToken cancellationToken) {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (true) {
+            try {
+                var messages = new List<RemontoireMessage>();
+                await foreach (var message in connection.ConsumeAsync(streamName, consumerGroup, cancellationToken)) {
+                    messages.Add(message);
+                    if (messages.Count == count)
+                        return messages;
+                }
+                return messages;
+            } catch (Exception ex) when (ex is ArgumentException or RemontoireUnavailableException && DateTime.UtcNow < deadline) {
+                await Task.Delay(20, cancellationToken);
+            }
+        }
+    }
 
     static async Task DisposeAllAsync(IEnumerable<Node> nodes, string directoryRoot) {
         foreach (var node in nodes)
@@ -148,7 +259,7 @@ public class RemontoireGrpcClusterTests {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
 
             using var connection = Connect(nodes);
-            var result = await connection.PublishAsync(StreamName, "key-1", "hello"u8.ToArray());
+            var result = await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
             result.Offset.Should().Be(0);
 
             var messages = new List<RemontoireMessage>();
@@ -175,11 +286,19 @@ public class RemontoireGrpcClusterTests {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
             var follower = nodes.First(node => !node.Replica.IsLeader);
 
-            using var connection = Connect([follower]); // only knows the follower's address up front
+            var (soloReplica, soloApplier) = await SeedSoleKnownMemberAsync(follower);
+            try {
+                using var connection = Connect([follower]); // its own table only ever lists the follower's address
 
-            var result = await connection.PublishAsync(StreamName, "key-1", "hello"u8.ToArray());
+                var result = await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
 
-            result.Offset.Should().Be(0, "the redirect must reach the real leader even though the connection only knew the follower's address");
+                result.Offset.Should().Be(0, "the redirect must reach the real leader even though the connection only knew the follower's address");
+            } finally {
+                if (soloApplier is not null)
+                    await soloApplier.DisposeAsync();
+                if (soloReplica is not null)
+                    await soloReplica.DisposeAsync();
+            }
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }
@@ -193,21 +312,26 @@ public class RemontoireGrpcClusterTests {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
 
             using (var seed = Connect(nodes))
-                await seed.PublishAsync(StreamName, "key-1", "hello"u8.ToArray());
+                await PublishOnceReadyAsync(seed, StreamName, "key-1", "hello"u8.ToArray());
 
             var follower = nodes.First(node => !node.Replica.IsLeader);
-            using var connection = Connect([follower]); // only knows the follower's address up front
+            var (soloReplica, soloApplier) = await SeedSoleKnownMemberAsync(follower);
+            try {
+                using var connection = Connect([follower]); // its own table only ever lists the follower's address
 
-            var messages = new List<RemontoireMessage>();
-            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
-                await foreach (var message in connection.ConsumeAsync(StreamName, "group-a", cts.Token)) {
-                    messages.Add(message);
-                    break;
-                }
+                List<RemontoireMessage> messages;
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                    messages = await ConsumeOnceReadyAsync(connection, StreamName, "group-a", count: 1, cts.Token);
 
-            var expectedPayload = "hello"u8.ToArray();
-            messages.Should().ContainSingle(message => message.Payload.ToArray().SequenceEqual(expectedPayload),
-                "the stream must redirect to the real leader even though the connection only knew the follower's address");
+                var expectedPayload = "hello"u8.ToArray();
+                messages.Should().ContainSingle(message => message.Payload.ToArray().SequenceEqual(expectedPayload),
+                    "the stream must redirect to the real leader even though the connection only knew the follower's address");
+            } finally {
+                if (soloApplier is not null)
+                    await soloApplier.DisposeAsync();
+                if (soloReplica is not null)
+                    await soloReplica.DisposeAsync();
+            }
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }
@@ -221,7 +345,7 @@ public class RemontoireGrpcClusterTests {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
 
             using var connection = Connect(nodes);
-            await connection.PublishAsync(StreamName, "key-1", "one"u8.ToArray());
+            await PublishOnceReadyAsync(connection, StreamName, "key-1", "one"u8.ToArray());
             await connection.PublishAsync(StreamName, "key-2", "two"u8.ToArray());
 
             var firstBatch = new List<RemontoireMessage>();
@@ -259,7 +383,7 @@ public class RemontoireGrpcClusterTests {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
 
             using var connection = Connect(nodes);
-            var first = await connection.PublishAsync(StreamName, "key-1", "one"u8.ToArray());
+            var first = await PublishOnceReadyAsync(connection, StreamName, "key-1", "one"u8.ToArray());
             await connection.AckAsync(StreamName, "group-a", first.ShardId, first.Offset);
 
             var leaderNode = nodes.First(node => node.Replica.IsLeader);
