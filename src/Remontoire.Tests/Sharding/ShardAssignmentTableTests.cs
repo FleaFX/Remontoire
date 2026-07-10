@@ -32,6 +32,86 @@ public class ShardAssignmentTableTests {
             assignment.Should().Be(default(VirtualShardAssignment));
         }
     }
+
+    public class Apply {
+        [Fact]
+        public void CreateStream_registers_the_streams_sharding_config() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new CreateStream("orders", 1024, RoutingAlgorithm.XxHash3V1));
+
+            table.TryGetStreamConfig("orders", out var config).Should().BeTrue();
+            config.Should().Be(new StreamShardingConfig("orders", 1024, RoutingAlgorithm.XxHash3V1));
+        }
+
+        [Fact]
+        public void RegisterGroup_registers_the_groups_membership() {
+            var table = new ShardAssignmentTable();
+            var members = new[] { new ShardGroupMember("node-1", new Uri("https://node-1:5001")) };
+
+            table.Apply(new RegisterGroup("group-1", members));
+
+            table.TryGetGroup("group-1", out var group).Should().BeTrue();
+            group.GroupId.Should().Be("group-1");
+            group.Members.Should().BeEquivalentTo(members);
+        }
+
+        [Fact]
+        public void MigrationStarted_creates_an_assignment_pointing_at_the_from_group_with_a_migration_target() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-1", "routing stays on the old group until cutover");
+            assignment.MigratingToGroupId.Should().Be("group-2");
+        }
+
+        [Fact]
+        public void MigrationAborted_clears_the_migration_target_without_changing_routing() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
+
+            table.Apply(new MigrationAborted("migration-1", "orders", 5));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-1");
+            assignment.MigratingToGroupId.Should().BeNull();
+        }
+
+        [Fact]
+        public void MigrationAborted_is_a_no_op_when_no_assignment_exists_yet() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new MigrationAborted("migration-1", "orders", 5));
+
+            table.TryGetAssignment("orders", 5, out _).Should().BeFalse();
+        }
+
+        [Fact]
+        public void Cutover_flips_routing_to_the_new_group_and_clears_the_migration_target() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
+
+            table.Apply(new Cutover("migration-1", "orders", 5, "group-2"));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-2");
+            assignment.MigratingToGroupId.Should().BeNull();
+        }
+
+        [Fact]
+        public void MigrationCompleted_leaves_the_assignment_untouched() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted("migration-1", "orders", 5, "group-1", "group-2"));
+            table.Apply(new Cutover("migration-1", "orders", 5, "group-2"));
+
+            table.Apply(new MigrationCompleted("migration-1", "orders", 5));
+
+            table.TryGetAssignment("orders", 5, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-2");
+        }
+    }
 }
 
 public class StreamShardingConfigTests {

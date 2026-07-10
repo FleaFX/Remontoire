@@ -28,4 +28,45 @@ public sealed class ShardAssignmentTable {
     /// </summary>
     public bool TryGetAssignment(string streamName, int virtualShardIndex, out VirtualShardAssignment assignment) =>
         _assignments.TryGetValue((streamName, virtualShardIndex), out assignment);
+
+    /// <summary>
+    /// Applies one committed <see cref="MetaLogRecord"/>, updating exactly the dictionary its
+    /// case concerns. Public so every package that composes its own tailing loop over a meta-log
+    /// source can call it directly — but by convention only ever called from that one tailing
+    /// loop, never scattered across arbitrary call sites.
+    /// </summary>
+    public void Apply(MetaLogRecord record) {
+        switch (record) {
+            case CreateStream r:
+                _streams[r.StreamName] = new StreamShardingConfig(r.StreamName, r.VirtualShardCount, r.RoutingAlgorithm);
+                break;
+
+            case RegisterGroup r:
+                _groups[r.GroupId] = new PhysicalGroupDescriptor(r.GroupId, r.Members);
+                break;
+
+            case MigrationStarted r:
+                _assignments[(r.StreamName, r.VirtualShardIndex)] =
+                    new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.FromGroupId, r.ToGroupId);
+                break;
+
+            case MigrationAborted r:
+                if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeAbort))
+                    _assignments[(r.StreamName, r.VirtualShardIndex)] = beforeAbort with { MigratingToGroupId = null };
+                break;
+
+            case Cutover r:
+                _assignments[(r.StreamName, r.VirtualShardIndex)] =
+                    new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.ToGroupId);
+                break;
+
+            case MigrationCompleted:
+                // Cleanup of the old group's copy is a disk-reclamation concern, not a routing
+                // change — this record carries no table update.
+                break;
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case.");
+        }
+    }
 }
