@@ -38,22 +38,27 @@ public sealed class MetaLogJournal {
     }
 
     /// <summary>
-    /// Yields every record after <paramref name="fromVersion"/> committed so far, then keeps
-    /// yielding new ones as they arrive — never terminates on its own.
+    /// Yields every record from <paramref name="fromVersionInclusive"/> onward (itself included)
+    /// committed so far, then keeps yielding new ones as they arrive — never terminates on its own.
+    /// Deliberately inclusive, not "everything after the last one I've seen": versions are Raft
+    /// LogicalOffsets, 0-based, so the very first record a group ever commits genuinely has version
+    /// 0 — an EXCLUSIVE "greater than" bound could never distinguish a caller that has already seen
+    /// version 0 from one asking "from the very beginning," both passing 0, and would silently,
+    /// permanently skip that first record for the latter.
     /// </summary>
     public async IAsyncEnumerable<(ulong Version, byte[] Payload)> WatchAsync(
-        ulong fromVersion, [EnumeratorCancellation] CancellationToken cancellationToken = default) {
+        ulong fromVersionInclusive, [EnumeratorCancellation] CancellationToken cancellationToken = default) {
         while (true) {
             TaskCompletionSource signal;
             (ulong Version, byte[] Payload)[] batch;
             lock (_gate) {
                 signal = _appended;
-                batch = _records.Where(record => record.Version > fromVersion).ToArray();
+                batch = _records.Where(record => record.Version >= fromVersionInclusive).ToArray();
             }
 
             foreach (var record in batch) {
                 yield return record;
-                fromVersion = record.Version;
+                fromVersionInclusive = record.Version + 1;
             }
 
             if (batch.Length == 0)

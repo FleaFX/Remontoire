@@ -56,14 +56,12 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
 
     async Task RunWatchLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, CancellationToken cancellationToken) {
         try {
-            var fromVersion = 0UL;
             while (true) {
                 try {
                     var snapshot = await client.GetSnapshotAsync(new GetSnapshotRequest(), cancellationToken: cancellationToken);
                     foreach (var record in snapshot.Records)
                         ApplyIfNewer(table, record);
 
-                    fromVersion = snapshot.Version;
                     break;
                 } catch (RpcException ex) {
                     // The meta-group isn't reachable yet (e.g. still starting up) — keep retrying
@@ -75,11 +73,16 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
 
             while (true) {
                 try {
-                    using var call = client.Watch(new WatchRequest { FromVersion = fromVersion }, cancellationToken: cancellationToken);
+                    // NextVersionWanted, not a locally-tracked "last seen" value carried across
+                    // reconnects — see its own remarks for why (a confirmed real bug: this used to
+                    // seed from GetSnapshot's own "highest version, 0 if empty" report, which
+                    // cannot tell "nothing seen yet" apart from "version 0 already seen" and
+                    // silently, permanently skipped version 0 whenever a watcher started up before
+                    // anything had ever been proposed).
+                    using var call = client.Watch(new WatchRequest { FromVersion = NextVersionWanted() }, cancellationToken: cancellationToken);
                     while (await call.ResponseStream.MoveNext(cancellationToken)) {
                         var record = call.ResponseStream.Current;
                         ApplyIfNewer(table, record);
-                        fromVersion = record.Version;
                     }
                 } catch (RpcException ex) {
                     // A dropped stream or an unreachable member — reconnect and resume from
@@ -92,6 +95,14 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
         } catch (OperationCanceledException) {
             // Expected shutdown path — DisposeAsync cancels and awaits this.
         }
+    }
+
+    // The wire request's FromVersion is inclusive (see MetaLogJournal.WatchAsync's own remarks) —
+    // computed fresh from what's actually been applied so far, via the same nullable-aware gate
+    // ApplyIfNewer itself maintains, never from a GetSnapshot's own ambiguous "highest version,
+    // 0 if empty" report.
+    ulong NextVersionWanted() {
+        lock (_versionGate) return _lastAppliedVersion is { } v ? v + 1 : 0UL;
     }
 
     async Task RunReconciliationLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, TimeSpan interval, CancellationToken cancellationToken) {
