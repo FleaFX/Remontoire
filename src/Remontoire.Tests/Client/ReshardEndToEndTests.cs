@@ -49,9 +49,22 @@ public class ReshardEndToEndTests {
         }
     }
 
+    // Temporary CI diagnostics: this test fails consistently on GitHub Actions
+    // ("Could not reach a leader for group 'group-1'") without reproducing locally, and every
+    // host here normally runs with logging fully stripped — leaving zero trace of the actual
+    // gRPC/Kestrel-level failure. Warning by default, Debug for Grpc/Kestrel specifically, so the
+    // next CI run's console output actually shows what's failing and why. Revert once diagnosed.
+    static void ConfigureDiagnosticLogging(ILoggingBuilder logging) {
+        logging.ClearProviders();
+        logging.AddSimpleConsole(options => options.SingleLine = true);
+        logging.SetMinimumLevel(LogLevel.Warning);
+        logging.AddFilter("Grpc", LogLevel.Debug);
+        logging.AddFilter("Microsoft.AspNetCore.Server.Kestrel", LogLevel.Debug);
+    }
+
     static async Task<WebApplication> StartDataHostAsync() {
         var builder = WebApplication.CreateBuilder();
-        builder.Logging.ClearProviders();
+        ConfigureDiagnosticLogging(builder.Logging);
         builder.WebHost.ConfigureKestrel(options =>
             options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
 
@@ -71,7 +84,7 @@ public class ReshardEndToEndTests {
 
     static async Task<WebApplication> StartMetaHostAsync() {
         var builder = WebApplication.CreateBuilder();
-        builder.Logging.ClearProviders();
+        ConfigureDiagnosticLogging(builder.Logging);
         builder.WebHost.ConfigureKestrel(options =>
             options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
 
