@@ -243,7 +243,7 @@ public class RaftReplicaHostedServiceTests {
                         .Should().BeTrue("the assignment must resolve before ResolveStreamNameForGroup can ever find it");
 
                     messagingRegistry.TryGet("group-1", out var messaging).Should().BeTrue();
-                    messaging.AckIndex.ApplyLocal("checkpoint-group", [0]);
+                    await messaging.AckIndex.ApplyLocalAsync("checkpoint-group", [0]);
 
                     // Proves the whole chain: ResolveStreamNameForGroup found "orders" for "group-1",
                     // isCheckpointMode saw AckMode.Checkpoint for "checkpoint-group", and

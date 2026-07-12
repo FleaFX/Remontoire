@@ -89,7 +89,7 @@ public sealed class RemontoireClientGrpcService(
             // validates these client-supplied offsets — unlike the strict path below, forging one
             // here costs no round-trip. Silently drop anything referring to a message that doesn't
             // exist yet rather than letting it advance this group's watermark past undelivered data.
-            ackIndex.ApplyLocal(request.ConsumerGroup, WithinLogBounds(request.Offsets, shardLog.NextOffsetToApply));
+            await ackIndex.ApplyLocalAsync(request.ConsumerGroup, WithinLogBounds(request.Offsets, shardLog.NextOffsetToApply), context.CancellationToken);
             return new AckReply { Success = new Empty() };
         }
 

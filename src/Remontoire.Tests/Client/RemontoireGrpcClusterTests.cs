@@ -69,6 +69,7 @@ public class RemontoireGrpcClusterTests {
             await AckCheckpointer.DisposeAsync();
             await RetentionEvaluator.DisposeAsync();
             await Applier.DisposeAsync();
+            await AckIndex.DisposeAsync();
             await ShardLog.DisposeAsync();
             await Replica.DisposeAsync();
             Transport.Dispose();

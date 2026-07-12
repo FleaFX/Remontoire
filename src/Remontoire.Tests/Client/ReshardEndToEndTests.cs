@@ -43,6 +43,7 @@ public class ReshardEndToEndTests {
             await Watcher.DisposeAsync();
             WatcherChannel.Dispose();
             await Applier.DisposeAsync();
+            await AckIndex.DisposeAsync();
             await ShardLog.DisposeAsync();
             await Replica.DisposeAsync();
             await Host.DisposeAsync();

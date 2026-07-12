@@ -13,7 +13,7 @@ public class AckCheckpointerTests {
     [Fact]
     public async Task Never_proposes_when_not_leader() {
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0, 1, 2]);
+        await ackIndex.ApplyLocalAsync("group-1", [0, 1, 2]);
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => false, IsCheckpointMode: _ => true,
@@ -27,7 +27,7 @@ public class AckCheckpointerTests {
     [Fact]
     public async Task Never_proposes_when_admission_is_paused() {
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0, 1, 2]);
+        await ackIndex.ApplyLocalAsync("group-1", [0, 1, 2]);
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
@@ -41,7 +41,7 @@ public class AckCheckpointerTests {
     [Fact]
     public async Task Never_proposes_for_a_consumer_group_that_is_not_in_checkpoint_mode() {
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0, 1, 2]);
+        await ackIndex.ApplyLocalAsync("group-1", [0, 1, 2]);
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => false,
@@ -70,7 +70,7 @@ public class AckCheckpointerTests {
     [Fact]
     public async Task Proposes_once_the_offset_count_threshold_is_reached() {
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0, 1, 2]); // LowWatermark -> 3
+        await ackIndex.ApplyLocalAsync("group-1", [0, 1, 2]); // LowWatermark -> 3
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
@@ -84,7 +84,7 @@ public class AckCheckpointerTests {
     [Fact]
     public async Task Does_not_propose_before_the_offset_count_threshold_is_reached() {
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0, 1, 2]); // LowWatermark -> 3, threshold needs 10
+        await ackIndex.ApplyLocalAsync("group-1", [0, 1, 2]); // LowWatermark -> 3, threshold needs 10
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
@@ -100,7 +100,7 @@ public class AckCheckpointerTests {
         // No prior checkpoint exists yet, so the "since last checkpoint" clock effectively starts
         // at the beginning of time — the first observed advance is always immediately due.
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0]);
+        await ackIndex.ApplyLocalAsync("group-1", [0]);
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
@@ -114,7 +114,7 @@ public class AckCheckpointerTests {
     [Fact]
     public async Task Waits_for_the_time_threshold_before_a_second_checkpoint() {
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0]);
+        await ackIndex.ApplyLocalAsync("group-1", [0]);
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
@@ -123,7 +123,7 @@ public class AckCheckpointerTests {
         await AdvanceAndSettleAsync(timeProvider); // first checkpoint, immediate
         proposals.Should().ContainSingle();
 
-        ackIndex.ApplyLocal("group-1", [1, 2]); // LowWatermark -> 3, but only 5s pass — not due yet
+        await ackIndex.ApplyLocalAsync("group-1", [1, 2]); // LowWatermark -> 3, but only 5s pass — not due yet
         for (var i = 0; i < 5; i++)
             await AdvanceAndSettleAsync(timeProvider);
         proposals.Should().ContainSingle("5 seconds have passed, the 10-second interval is not yet due");
@@ -141,7 +141,7 @@ public class AckCheckpointerTests {
         // stays 0 forever, permanently blocking pruning if the group is mandatory, and losing
         // ALL ack progress (not just "up to one interval's worth") on any failover.
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0]);
+        await ackIndex.ApplyLocalAsync("group-1", [0]);
 
         await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
@@ -155,7 +155,7 @@ public class AckCheckpointerTests {
     [Fact]
     public async Task DisposeAsync_stops_the_loop() {
         var (ackIndex, proposals, timeProvider) = Compose();
-        ackIndex.ApplyLocal("group-1", [0]);
+        await ackIndex.ApplyLocalAsync("group-1", [0]);
         var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
             ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
             GetCheckpointThresholds: () => (null, 1), IsAdmissionPaused: () => false, timeProvider));
@@ -163,7 +163,7 @@ public class AckCheckpointerTests {
         proposals.Should().ContainSingle();
 
         await checkpointer.DisposeAsync();
-        ackIndex.ApplyLocal("group-1", [1, 2, 3, 4, 5]);
+        await ackIndex.ApplyLocalAsync("group-1", [1, 2, 3, 4, 5]);
         timeProvider.Advance(TickInterval * 5);
         await Task.Delay(50);
 

@@ -34,6 +34,7 @@ sealed class RaftReplicaHostedService(
     readonly Dictionary<string, WalRaftLog> _logs = new();
     readonly Dictionary<string, RaftReplica> _replicas = new();
     readonly Dictionary<string, ShardLog> _shardLogs = new();
+    readonly Dictionary<string, AckIndex> _ackIndexes = new();
     readonly Dictionary<string, AckIndexApplier> _ackIndexAppliers = new();
     readonly Dictionary<string, AckCheckpointer> _ackCheckpointers = new();
     readonly Dictionary<string, RetentionEvaluator> _retentionEvaluators = new();
@@ -80,6 +81,7 @@ sealed class RaftReplicaHostedService(
             _replicas[group.GroupId] = replica;
 
             var ackIndex = new AckIndex();
+            _ackIndexes[group.GroupId] = ackIndex;
 
             // Looked up lazily, by groupId, at invocation time (each RetentionPassRequested tick,
             // hours after StartAsync returns) rather than captured directly — the RetentionEvaluator
@@ -180,6 +182,11 @@ sealed class RaftReplicaHostedService(
             messagingRegistry.Unregister(groupId);
             await ackIndexApplier.DisposeAsync();
         }
+
+        // Stops after AckIndexApplier (its only production feeder of Apply calls) and after
+        // AckCheckpointer/RetentionEvaluator above (both call into it during their own shutdown).
+        foreach (var ackIndex in _ackIndexes.Values)
+            await ackIndex.DisposeAsync();
 
         foreach (var shardLog in _shardLogs.Values)
             await shardLog.DisposeAsync();

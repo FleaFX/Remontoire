@@ -48,7 +48,7 @@ public class RetentionEvaluatorTests {
             var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - MaxRetention - TimeSpan.FromHours(1));
             await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
             var ackIndex = new AckIndex();
-            ackIndex.Apply(AckRecord("mandatory", 0)); // a genuinely committed ack — ApplyLocal alone would never advance CommittedWatermark
+            await ackIndex.ApplyAsync(AckRecord("mandatory", 0)); // a genuinely committed ack — ApplyLocal alone would never advance CommittedWatermark
             var forwarded = new ConcurrentQueue<AppendRequest>();
 
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
@@ -102,7 +102,7 @@ public class RetentionEvaluatorTests {
             var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - MaxRetention - TimeSpan.FromHours(1));
             await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
             var ackIndex = new AckIndex();
-            ackIndex.Apply(AckRecord("mandatory", 0)); // a genuinely committed ack — best-effort group never acks anything
+            await ackIndex.ApplyAsync(AckRecord("mandatory", 0)); // a genuinely committed ack — best-effort group never acks anything
             var forwarded = new ConcurrentQueue<AppendRequest>();
 
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
@@ -128,7 +128,7 @@ public class RetentionEvaluatorTests {
             var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - TimeSpan.FromDays(365));
             await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
             var ackIndex = new AckIndex();
-            ackIndex.Apply(AckRecord("mandatory", 0)); // a genuinely committed ack — already safe to prune regardless of retention
+            await ackIndex.ApplyAsync(AckRecord("mandatory", 0)); // a genuinely committed ack — already safe to prune regardless of retention
             var forwarded = new ConcurrentQueue<AppendRequest>();
 
             shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));

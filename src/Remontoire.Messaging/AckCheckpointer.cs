@@ -13,7 +13,7 @@ public sealed record AckCheckpointerOptions(
 
 /// <summary>
 /// Periodically proposes a cheap AckCheckpoint record replicating each checkpoint-mode consumer
-/// group's current watermark — the periodic counterpart to <see cref="AckIndex.ApplyLocal"/>'s
+/// group's current watermark — the periodic counterpart to <see cref="AckIndex.ApplyLocalAsync"/>'s
 /// immediate, unreplicated apply. Takes every cross-layer fact as a delegate over primitives —
 /// never a <c>Remontoire.Raft</c> or <c>Remontoire.Sharding</c> type — so this project's
 /// dependency graph (only <c>Remontoire.Storage</c>) stays unchanged. Same start/stop lifecycle
