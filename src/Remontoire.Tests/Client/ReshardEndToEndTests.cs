@@ -105,9 +105,13 @@ public class ReshardEndToEndTests {
         host.Services.GetRequiredService<MessagingGroupRegistry>().Register(groupId, shardLog, ackIndex);
 
         // A real watcher, pointed at the real meta host — this node's own routing table is kept
-        // fresh exactly the way a production node without meta-group membership would be.
+        // fresh exactly the way a production node without meta-group membership would be. A short
+        // reconciliation interval (ShardAssignmentWatcher's own documented defense-in-depth against
+        // a live Watch stream silently stalling without visibly failing) — the 2-minute production
+        // default would never kick in during this test's own, much shorter timeout budget.
         var watcherChannel = GrpcChannel.ForAddress(metaSeedAddress);
-        var watcher = new ShardAssignmentWatcher(new ShardAssignmentMeta.ShardAssignmentMetaClient(watcherChannel), host.Services.GetRequiredService<ShardAssignmentTable>());
+        var watcher = new ShardAssignmentWatcher(new ShardAssignmentMeta.ShardAssignmentMetaClient(watcherChannel), host.Services.GetRequiredService<ShardAssignmentTable>(),
+            reconciliationInterval: TimeSpan.FromMilliseconds(200));
 
         return new DataGroupNode { Host = host, Replica = replica, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier, WatcherChannel = watcherChannel, Watcher = watcher };
     }
