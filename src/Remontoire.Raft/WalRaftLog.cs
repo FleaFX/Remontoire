@@ -24,6 +24,7 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
     readonly long _rotationThresholdBytes;
     readonly List<WalFileRange> _sealedFiles;
     readonly Dictionary<ulong, (string Path, long Position)> _positionByIndex;
+    readonly Action<TimeSpan>? _onFsyncDurationMeasured;
 
     WalWriter _activeWriter;
     string _activePath;
@@ -34,7 +35,8 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
 
     WalRaftLog(
         string directory, long rotationThresholdBytes, List<WalFileRange> sealedFiles, Dictionary<ulong, (string Path, long Position)> positionByIndex,
-        WalWriter activeWriter, string activePath, ulong activeFirstIndex, long nextWritePosition, ulong lastIndex, ulong lastTerm) {
+        WalWriter activeWriter, string activePath, ulong activeFirstIndex, long nextWritePosition, ulong lastIndex, ulong lastTerm,
+        Action<TimeSpan>? onFsyncDurationMeasured) {
         _directory = directory;
         _rotationThresholdBytes = rotationThresholdBytes;
         _sealedFiles = sealedFiles;
@@ -45,6 +47,7 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
         _nextWritePosition = nextWritePosition;
         _lastIndex = lastIndex;
         _lastTerm = lastTerm;
+        _onFsyncDurationMeasured = onFsyncDurationMeasured;
     }
 
     /// <inheritdoc />
@@ -60,6 +63,13 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
     public ulong SnapshotTerm { get; private set; }
 
     /// <summary>
+    /// The active WAL file's own fsync-in-progress diagnostic — see
+    /// <see cref="WalWriter.FlushInProgressSince"/>. Always reflects whichever <see cref="WalWriter"/>
+    /// is currently active, across rotation/truncation/snapshot-install.
+    /// </summary>
+    public DateTimeOffset? FlushInProgressSince => _activeWriter.FlushInProgressSince;
+
+    /// <summary>
     /// Opens (creating if necessary) the WAL in <paramref name="directory"/>, rebuilding the
     /// position index with a single sequential scan per remaining file — the same
     /// torn-write-stops-cleanly ending as the storage layer's own recovery: whatever a scan
@@ -67,15 +77,21 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
     /// left half-done: a sealed file the snapshot marker already covers, but that never got
     /// deleted, is deleted here instead of scanned.
     /// </summary>
-    public static async Task<WalRaftLog> OpenAsync(string directory, long rotationThresholdBytes = 64 * 1024 * 1024, CancellationToken cancellationToken = default) {
+    /// <param name="onFsyncDurationMeasured">
+    /// Invoked once per batch fsync, on whichever <see cref="WalWriter"/> is active at the time —
+    /// fase 7's <c>remontoire_wal_fsync_duration_seconds</c> histogram source. <see langword="null"/>
+    /// disables it entirely; see <see cref="WalWriter.OpenAsync(string, Action{TimeSpan}?, CancellationToken)"/>.
+    /// </param>
+    public static async Task<WalRaftLog> OpenAsync(
+        string directory, long rotationThresholdBytes = 64 * 1024 * 1024, Action<TimeSpan>? onFsyncDurationMeasured = null, CancellationToken cancellationToken = default) {
         Directory.CreateDirectory(directory);
         var (snapshotIndex, snapshotTerm) = await SnapshotMarker.LoadAsync(directory, cancellationToken);
 
         var files = ListWalFilesInOrder(directory);
         if (files.Count == 0) {
             var freshPath = WalFilePath(directory, snapshotIndex + 1);
-            var freshWriter = await WalWriter.OpenAsync(freshPath, cancellationToken);
-            var fresh = new WalRaftLog(directory, rotationThresholdBytes, [], [], freshWriter, freshPath, snapshotIndex + 1, 0, snapshotIndex, snapshotTerm);
+            var freshWriter = await WalWriter.OpenAsync(freshPath, onFsyncDurationMeasured, cancellationToken);
+            var fresh = new WalRaftLog(directory, rotationThresholdBytes, [], [], freshWriter, freshPath, snapshotIndex + 1, 0, snapshotIndex, snapshotTerm, onFsyncDurationMeasured);
             fresh.SnapshotIndex = snapshotIndex;
             fresh.SnapshotTerm = snapshotTerm;
             return fresh;
@@ -115,8 +131,8 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
             }
 
             if (isLastFile) {
-                var writer = await WalWriter.OpenAsync(path, cancellationToken);
-                var log = new WalRaftLog(directory, rotationThresholdBytes, sealedFiles, positionByIndex, writer, path, firstIndexInFile, positionInFile, lastIndex, lastTerm);
+                var writer = await WalWriter.OpenAsync(path, onFsyncDurationMeasured, cancellationToken);
+                var log = new WalRaftLog(directory, rotationThresholdBytes, sealedFiles, positionByIndex, writer, path, firstIndexInFile, positionInFile, lastIndex, lastTerm, onFsyncDurationMeasured);
                 log.SnapshotIndex = snapshotIndex;
                 log.SnapshotTerm = snapshotTerm;
                 return log;
@@ -225,7 +241,7 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
 
         var newFirstIndex = _lastIndex + 1;
         var newPath = WalFilePath(_directory, newFirstIndex);
-        _activeWriter = await WalWriter.OpenAsync(newPath, cancellationToken);
+        _activeWriter = await WalWriter.OpenAsync(newPath, _onFsyncDurationMeasured, cancellationToken);
         _activePath = newPath;
         _activeFirstIndex = newFirstIndex;
         _nextWritePosition = 0;
@@ -259,7 +275,7 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
             await using (var raw = new FileStream(containingPath, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
                 raw.SetLength(truncateAt);
 
-            _activeWriter = await WalWriter.OpenAsync(containingPath, cancellationToken);
+            _activeWriter = await WalWriter.OpenAsync(containingPath, _onFsyncDurationMeasured, cancellationToken);
             _activePath = containingPath;
             _activeFirstIndex = containingFirstIndex;
             _nextWritePosition = truncateAt;
@@ -306,7 +322,7 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
 
         var newFirstIndex = lastIncludedIndex + 1;
         var newPath = WalFilePath(_directory, newFirstIndex);
-        var newWriter = await WalWriter.OpenAsync(newPath, cancellationToken);
+        var newWriter = await WalWriter.OpenAsync(newPath, _onFsyncDurationMeasured, cancellationToken);
         await SnapshotMarker.SaveAsync(_directory, lastIncludedIndex, lastIncludedTerm, cancellationToken);
 
         _sealedFiles.Clear();

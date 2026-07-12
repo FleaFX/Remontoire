@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Threading.Channels;
 using Remontoire.Storage.Serialization;
 
@@ -14,8 +15,15 @@ public sealed class WalWriter : IAsyncDisposable {
     readonly Channel<PendingAppend> _pending = Channel.CreateUnbounded<PendingAppend>(new UnboundedChannelOptions { SingleReader = true });
     readonly Channel<WalRecord> _committed = Channel.CreateUnbounded<WalRecord>(new UnboundedChannelOptions { SingleReader = true });
     readonly Task _commitLoop;
+    readonly Action<TimeSpan>? _onFlushDurationMeasured;
 
     Exception? _fault;
+
+    // Fase 7 liveness diagnostic — 0 means "no flush currently in flight", never "in flight since
+    // the Unix epoch". Stamped immediately before, and cleared immediately after, the one
+    // fsync call below — a stuck flush (not an idle writer) is the only thing this should ever
+    // report as unhealthy.
+    long _flushInProgressSinceUtcTicks;
 
     /// <summary>
     /// Wraps an already-open <paramref name="file"/>. Prefer <see cref="OpenAsync"/> for the
@@ -23,9 +31,22 @@ public sealed class WalWriter : IAsyncDisposable {
     /// to supply their own already-open <see cref="FileStream"/> (tests, or a caller that owns
     /// file lifetime differently).
     /// </summary>
-    public WalWriter(FileStream file) {
+    public WalWriter(FileStream file, Action<TimeSpan>? onFlushDurationMeasured = null) {
         _file = file;
+        _onFlushDurationMeasured = onFlushDurationMeasured;
         _commitLoop = Task.Run(RunCommitLoopAsync);
+    }
+
+    /// <summary>
+    /// Set immediately before, and cleared immediately after, the batch fsync below —
+    /// <see langword="null"/> both when no flush has ever run and when the last one already
+    /// finished; only a flush genuinely stuck mid-call reports a non-null, aging value here.
+    /// </summary>
+    public DateTimeOffset? FlushInProgressSince {
+        get {
+            var ticks = Volatile.Read(ref _flushInProgressSinceUtcTicks);
+            return ticks == 0 ? null : new DateTimeOffset(ticks, TimeSpan.Zero);
+        }
     }
 
     /// <summary>
@@ -42,7 +63,20 @@ public sealed class WalWriter : IAsyncDisposable {
     /// Opens (creating if necessary) the WAL file at <paramref name="path"/> for appending.
     /// </summary>
     public static Task<WalWriter> OpenAsync(string path, CancellationToken cancellationToken = default) =>
-        Task.FromResult(new WalWriter(new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 0, useAsync: true)));
+        OpenAsync(path, onFlushDurationMeasured: null, cancellationToken);
+
+    /// <inheritdoc cref="OpenAsync(string, CancellationToken)"/>
+    /// <param name="path">The WAL file path.</param>
+    /// <param name="onFlushDurationMeasured">
+    /// Invoked once per batch fsync with its wall-clock duration — fase 7's
+    /// <c>remontoire_wal_fsync_duration_seconds</c> histogram source. This project never
+    /// references a metrics library directly (same one-way dependency discipline as
+    /// <see cref="CompactionPolicy.GetAckedLowWatermarkAsync"/>); <see langword="null"/> disables
+    /// the callback entirely.
+    /// </param>
+    /// <param name="cancellationToken">Unused today — reserved for a future async open path.</param>
+    public static Task<WalWriter> OpenAsync(string path, Action<TimeSpan>? onFlushDurationMeasured, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new WalWriter(new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read, bufferSize: 0, useAsync: true), onFlushDurationMeasured));
 
     /// <summary>
     /// Appends <paramref name="record"/>. The returned <see cref="ValueTask"/> completes once
@@ -124,7 +158,18 @@ public sealed class WalWriter : IAsyncDisposable {
                 }
             }
 
-            _file.Flush(flushToDisk: true);
+            Volatile.Write(ref _flushInProgressSinceUtcTicks, DateTimeOffset.UtcNow.Ticks);
+            try {
+                if (_onFlushDurationMeasured is null) {
+                    _file.Flush(flushToDisk: true);
+                } else {
+                    var stopwatch = Stopwatch.StartNew();
+                    _file.Flush(flushToDisk: true);
+                    _onFlushDurationMeasured(stopwatch.Elapsed);
+                }
+            } finally {
+                Volatile.Write(ref _flushInProgressSinceUtcTicks, 0);
+            }
 
             // Publish each record — the same in-memory WalRecord just written, handed off
             // directly to ReadDurableAsync — right after resolving its caller, in the exact

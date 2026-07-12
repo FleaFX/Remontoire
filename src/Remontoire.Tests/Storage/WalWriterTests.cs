@@ -118,6 +118,56 @@ public class WalWriterTests {
         }
     }
 
+    public class Observability {
+        [Fact]
+        public async Task FlushInProgressSince_is_null_while_idle_and_non_null_only_while_a_flush_is_in_flight() {
+            var path = Path.GetTempFileName();
+            try {
+                var stream = new GatedFlushFileStream(path);
+                var writer = new WalWriter(stream);
+                try {
+                    writer.FlushInProgressSince.Should().BeNull("nothing has ever flushed yet");
+
+                    var appendTask = writer.AppendAsync(SampleRecord()).AsTask();
+                    await stream.FlushStarted.Task;
+
+                    writer.FlushInProgressSince.Should().NotBeNull("the fsync is gated open, still in flight");
+
+                    stream.FlushGate.TrySetResult();
+                    await appendTask;
+
+                    writer.FlushInProgressSince.Should().BeNull("the flush has since completed — idle is not unhealthy");
+                } finally {
+                    stream.FlushGate.TrySetResult();
+                    await writer.DisposeAsync();
+                }
+            } finally {
+                File.Delete(path);
+            }
+        }
+
+        [Fact]
+        public async Task OnFlushDurationMeasured_is_invoked_once_per_batch_with_a_nonnegative_duration() {
+            var path = Path.GetTempFileName();
+            try {
+                var durations = new List<TimeSpan>();
+                var writer = new WalWriter(new FileStream(path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, bufferSize: 0, useAsync: true),
+                    onFlushDurationMeasured: durations.Add);
+                try {
+                    await writer.AppendAsync(SampleRecord());
+                    await writer.AppendAsync(SampleRecord(logicalOffset: 1));
+                } finally {
+                    await writer.DisposeAsync();
+                }
+
+                durations.Should().HaveCountGreaterThanOrEqualTo(1, "at least one batch fsync must have been measured");
+                durations.Should().OnlyContain(duration => duration >= TimeSpan.Zero);
+            } finally {
+                File.Delete(path);
+            }
+        }
+    }
+
     public class FaultHandling {
         [Fact]
         public async Task A_batch_write_failure_faults_every_pending_append_in_that_batch() {
