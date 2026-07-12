@@ -48,6 +48,19 @@ public sealed partial class ShardLog {
         if (completed.MergedPath is not { } mergedPath)
             return; // the merge itself failed — nothing to change on _segments
 
+        // A concurrent ack-/size-driven prune may have already removed one of this plan's own
+        // source segments from _segments (and from disk) while the merge was still running
+        // against its old, still-open handles (FileShare.Delete lets that read succeed regardless).
+        // Applying the merge result in that case would resurrect the just-pruned data — both back
+        // into _segments and back onto disk (this merge's own File.Move recreates it). Discard
+        // instead: delete the now-orphaned merged file and leave _segments untouched — whatever's
+        // still actually there keeps its true, current state; the next compaction pass simply
+        // retries with whatever's still around.
+        if (completed.Plan.Sources.Any(source => Array.IndexOf(_segments, source) < 0)) {
+            File.Delete(mergedPath);
+            return;
+        }
+
         var merged = SstSegment.Open(mergedPath);
         Volatile.Write(ref _segments, completed.Plan.ReplaceIn(_segments, merged));
         // No Dispose() of completed.Plan.Sources — same tradeoff as the old MemTable after a

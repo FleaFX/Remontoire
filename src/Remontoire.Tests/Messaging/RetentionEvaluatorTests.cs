@@ -121,6 +121,37 @@ public class RetentionEvaluatorTests {
     }
 
     [Fact]
+    public async Task Still_advances_the_watermark_for_already_acked_messages_when_max_retention_is_unbounded() {
+        var directory = CreateTempDirectory();
+        try {
+            var timeProvider = new FakeTimeProvider();
+            var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - TimeSpan.FromDays(365));
+            await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+            var ackIndex = new AckIndex();
+            ackIndex.Apply(AckRecord("mandatory", 0)); // a genuinely committed ack — already safe to prune regardless of retention
+            var forwarded = new ConcurrentQueue<AppendRequest>();
+
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
+            await WaitForVisibleAsync(shardLog, 0);
+
+            // TimeSpan.MaxValue is both RaftReplicaHostedService's own fallback for an unresolved
+            // stream name and a natural operator choice for "never time-expire, only by ack/size" —
+            // computing utcNow - MaxValue must not throw and silently kill every future tick.
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => TimeSpan.MaxValue,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
+
+            await AdvanceAndSettleAsync(timeProvider);
+            await AdvanceAndSettleAsync(timeProvider);
+
+            forwarded.Should().BeEmpty("unbounded retention must never force a dead-letter forward");
+            evaluator.SafeToPruneWatermark.Should().Be(1, "already covered by the mandatory watermark — an unbounded MaxRetention must not stall this");
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Never_ticks_while_admission_is_paused() {
         var directory = CreateTempDirectory();
         try {

@@ -67,7 +67,9 @@ public sealed class RetentionEvaluator : IAsyncDisposable {
                         continue;
 
                     var mandatoryWatermark = _options.AckIndex.MandatoryGroupsLowWatermark(_options.IsMandatory);
-                    var cutoff = _timeProvider.GetUtcNow() - _options.GetMaxRetention();
+                    var maxRetention = _options.GetMaxRetention();
+                    var now = _timeProvider.GetUtcNow();
+                    var cutoff = now - TimeSpan.FromTicks(Math.Clamp(maxRetention.Ticks, TimeSpan.Zero.Ticks, (now - DateTimeOffset.MinValue).Ticks));
                     var scanFrom = SafeToPruneWatermark;
 
                     await foreach (var handle in _options.ShardLog.ReadFromAsync(scanFrom, cancellationToken)) {

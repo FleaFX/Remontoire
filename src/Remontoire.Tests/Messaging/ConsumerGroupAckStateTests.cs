@@ -83,6 +83,17 @@ public class ConsumerGroupAckStateTests {
             state.LowWatermark.Should().Be(3, "the applied watermark still moves — this is checkpoint mode's whole point");
             state.CommittedWatermark.Should().Be(0, "no quorum has agreed to this yet — only AdvanceWatermarkTo may ever advance it");
         }
+
+        [Fact]
+        public void Ack_never_promotes_uncommitted_ApplyLocally_progress_into_the_committed_watermark() {
+            var state = new ConsumerGroupAckState();
+            state.ApplyLocally([0, 1, 2]); // checkpoint-mode local progress — never replicated
+
+            state.Ack([2]); // a committed ack of a later offset only — 0 and 1 were never committed-acked
+
+            state.LowWatermark.Should().Be(3, "ApplyLocally's own progress is untouched");
+            state.CommittedWatermark.Should().Be(0, "offset 2 alone can't collapse the committed watermark while 0 and 1 were never committed — Ack must not borrow LowWatermark's head start");
+        }
     }
 
     public class AdvanceWatermarkTo {

@@ -15,6 +15,13 @@ public sealed class ConsumerGroupAckState {
     // genuinely concurrent writer, which is what this lock now guards against.
     readonly Lock _gate = new();
     readonly SortedSet<ulong> _selectiveAcks = [];
+    // A second, independent selective-ack set — fed only by Ack/AdvanceWatermarkTo, never by
+    // ApplyLocally — so _committedWatermark can only ever collapse through offsets that are
+    // themselves committed. Sharing _selectiveAcks/_lowWatermark between both writers would let a
+    // later Ack call promote _lowWatermark (however it got that far ahead, including via
+    // ApplyLocally) straight into _committedWatermark — exactly the non-deterministic-across-nodes
+    // state this split exists to rule out.
+    readonly SortedSet<ulong> _committedSelectiveAcks = [];
     ulong _lowWatermark;       // "applied" — every locally-observed ack, committed or not
     ulong _committedWatermark; // only what a Raft quorum has actually agreed on
 
@@ -62,17 +69,18 @@ public sealed class ConsumerGroupAckState {
     public void Ack(IEnumerable<ulong> offsets) {
         lock (_gate) {
             foreach (var offset in offsets) {
-                if (offset < _lowWatermark)
-                    continue;
+                if (offset >= _lowWatermark)
+                    _selectiveAcks.Add(offset);
 
-                _selectiveAcks.Add(offset);
+                if (offset >= _committedWatermark)
+                    _committedSelectiveAcks.Add(offset);
             }
 
             while (_selectiveAcks.Remove(_lowWatermark))
                 _lowWatermark++;
 
-            if (_lowWatermark > _committedWatermark)
-                _committedWatermark = _lowWatermark;
+            while (_committedSelectiveAcks.Remove(_committedWatermark))
+                _committedWatermark++;
         }
     }
 
@@ -114,6 +122,7 @@ public sealed class ConsumerGroupAckState {
                 return;
 
             _committedWatermark = watermark;
+            _committedSelectiveAcks.RemoveWhere(offset => offset < watermark);
 
             if (watermark > _lowWatermark) {
                 _selectiveAcks.RemoveWhere(offset => offset < watermark);

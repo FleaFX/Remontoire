@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using FluentAssertions;
+using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
 
@@ -343,6 +344,50 @@ public class ShardLogTests {
 
                 log.TryGet(0, out var handle).Should().BeTrue();
                 handle.Dispose();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        // Regression coverage for a confirmed review bug: a merge-compaction plan is computed
+        // against a _segments snapshot that includes both source segments; while the real,
+        // off-actor-thread merge I/O is still running, a concurrent prune can already delete one
+        // of those same sources. CompactionCompleted must not blindly apply a merge result built
+        // from a now-stale plan — doing so would resurrect the just-pruned segment's data, both
+        // back into _segments and back onto disk.
+        [Fact]
+        public async Task CompactionCompleted_discards_a_stale_merge_whose_source_was_pruned_while_it_was_running() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1);
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                log.TryPost(new WalRecordCommitted(SampleRecord(1)));
+                await WaitForVisibleAsync(log, 1);
+                await WaitForSegmentCountAsync(directory, 2);
+
+                var segmentPaths = Directory.GetFiles(directory, "*.sst").OrderBy(p => p).ToArray(); // offset 0's segment sorts first
+                var prunedSegment = await SstSegment.OpenAsync(segmentPaths[0]);
+                var survivingSegment = await SstSegment.OpenAsync(segmentPaths[1]);
+                var plan = new CompactionPlan([prunedSegment, survivingSegment]);
+
+                // A prune completes first — exactly as if RetentionPassRequested/SizePruneWorker
+                // had already dropped offset 0's segment while the merge below was still running.
+                File.Delete(segmentPaths[0]);
+                log.TryPost(new SizePruneCompleted([segmentPaths[0]]));
+                (await WaitUntilAsync(() => !log.TryGet(0, out _))).Should().BeTrue("offset 0's segment was pruned");
+
+                // The merge itself completes only now — built from the plan's own, still-open
+                // handles, oblivious to the prune that already happened.
+                var mergedPath = await plan.MergeAsync();
+                log.TryPost(new CompactionCompleted(plan, mergedPath, null));
+                log.TryPost(new WalRecordCommitted(SampleRecord(2))); // sentinel — see the no-op tests above for why
+                await WaitForVisibleAsync(log, 2);
+
+                log.TryGet(0, out _).Should().BeFalse("a stale merge must never resurrect data that was already, correctly, pruned");
+                log.TryGet(1, out var handle).Should().BeTrue("the surviving segment's own data must remain readable");
+                handle.Dispose();
+                File.Exists(mergedPath).Should().BeFalse("the orphaned merge result must be cleaned up, not silently left on disk");
             } finally {
                 Directory.Delete(directory, recursive: true);
             }
