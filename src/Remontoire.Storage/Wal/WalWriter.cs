@@ -19,7 +19,7 @@ public sealed class WalWriter : IAsyncDisposable {
 
     Exception? _fault;
 
-    // Fase 7 liveness diagnostic — 0 means "no flush currently in flight", never "in flight since
+    // Liveness diagnostic — 0 means "no flush currently in flight", never "in flight since
     // the Unix epoch". Stamped immediately before, and cleared immediately after, the one
     // fsync call below — a stuck flush (not an idle writer) is the only thing this should ever
     // report as unhealthy.

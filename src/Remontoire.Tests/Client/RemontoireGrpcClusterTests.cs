@@ -737,6 +737,31 @@ public class RemontoireGrpcClusterTests {
             leader.ShardLog.TryGet(1, out var handle).Should().BeTrue();
             using (handle)
                 Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be("hello");
+
+            // The same scenario, reconstructed purely via a metric — never by reading
+            // RetentionEvaluator.DeadLetterMessagesTotal (above) directly.
+            var raftRegistry = leader.Host.Services.GetRequiredService<RaftReplicaRegistry>();
+            var messagingRegistry = leader.Host.Services.GetRequiredService<MessagingGroupRegistry>();
+            var leaderAssignmentTable = leader.Host.Services.GetRequiredService<ShardAssignmentTable>();
+            ObservableMetricsRegistration.Register(raftRegistry, messagingRegistry, leaderAssignmentTable);
+
+            var measurements = new List<(string Name, object Value, KeyValuePair<string, object?>[] Tags)>();
+            using var listener = new MeterListener {
+                InstrumentPublished = (instrument, meterListener) => {
+                    if (instrument.Meter.Name == RemontoireMetrics.Meter.Name)
+                        meterListener.EnableMeasurementEvents(instrument);
+                },
+            };
+            listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) => measurements.Add((instrument.Name, value, tags.ToArray())));
+            listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) => measurements.Add((instrument.Name, value, tags.ToArray())));
+            listener.Start();
+            listener.RecordObservableInstruments();
+
+            measurements.Should().ContainSingle(m => m.Name == "remontoire_dead_letter_messages_total" && (long)m.Value == 1);
+            measurements.Where(m => m.Name == "remontoire_pruning_blocked_by_group" && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "mandatory-group")))
+                .Should().ContainSingle(m => (long)m.Value == 1, "the stuck mandatory group must show up as the one blocking pruning");
+            measurements.Where(m => m.Name == "remontoire_oldest_unacked_message_age_seconds" && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "mandatory-group")))
+                .Should().ContainSingle(m => (double)m.Value >= 0);
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }

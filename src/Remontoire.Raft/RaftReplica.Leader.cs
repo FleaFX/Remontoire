@@ -15,6 +15,7 @@ public sealed partial class RaftReplica {
     /// </summary>
     async Task BecomeLeaderAsync() {
         Interlocked.Increment(ref _leaderElectionsTotal);
+        logger?.LogInformation("Became leader of {ShardGroupId} in term {CurrentTerm}.", GroupId, _currentTerm);
         _role = ReplicaRole.Leader;
         Volatile.Write(ref _leaderHint, replicaConfig.NodeId);
         _electionTimerGeneration++; // a leader has no election timeout — invalidate without re-arming

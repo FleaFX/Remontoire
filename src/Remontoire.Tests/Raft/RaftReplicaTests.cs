@@ -866,7 +866,7 @@ public class RaftReplicaTests {
         }
     }
 
-    // Fase 7 — plain diagnostic counters/timestamps, never read by any protocol decision.
+    // Plain diagnostic counters/timestamps, never read by any protocol decision.
     public class Observability {
         [Fact]
         public async Task AppendEntriesSentTotal_increments_identically_for_a_heartbeat_tick_and_a_real_replication_call() {
