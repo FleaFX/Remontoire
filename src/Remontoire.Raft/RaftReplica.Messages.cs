@@ -84,6 +84,13 @@ sealed record ProposeReceived(AppendRequest Request, TaskCompletionSource<Propos
 sealed record ProposeAckReceived(AckRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
 
 /// <summary>
+/// Posted by <see cref="RaftReplica.ProposeAsync(AckCheckpointRequest, CancellationToken)"/> —
+/// same commit-then-resolve contract as <see cref="ProposeReceived"/>, minus the
+/// <see cref="ProposeResult.LogicalOffset"/> assignment.
+/// </summary>
+sealed record ProposeAckCheckpointReceived(AckCheckpointRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
+
+/// <summary>
 /// Posted by <see cref="RaftReplica.ProposeConfigChangeAsync"/>. <paramref name="Reply"/>
 /// resolves once the change is quorum-committed — it takes effect on this replica immediately on
 /// append, well before that, per the paper.

@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using FluentAssertions;
+using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
 
@@ -204,6 +205,189 @@ public class ShardLogTests {
                 log.TryPost(new WalRecordCommitted(SampleRecord(0)));
 
                 await log.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    // Regression coverage for a confirmed bug found before any of this was wired up in production:
+    // ack-driven pruning deleting a segment without ShardLog ever learning about it, leaving a
+    // dead _segments entry and an unreclaimed handle. Both new deletion paths (ack-driven,
+    // size-driven) route through the actor mailbox instead.
+    public class Retention {
+        [Fact]
+        public async Task RetentionPassRequested_deletes_a_fully_acked_segment_and_it_is_never_readable_again() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(
+                    directory, EmptyCommittedSource, flushThresholdBytes: 1,
+                    // MaxMergedSegmentBytes: 1 keeps every segment in its own merge group (each
+                    // already exceeds 1 byte on its own) — this test needs 4 distinct, individually
+                    // deletable segments to exercise per-offset pruning; MaxMergedSegmentBytes: null
+                    // packs everything into one segment as soon as 2 exist, racing this test's own
+                    // setup and non-deterministically merging offsets 0-3 together before retention
+                    // ever runs.
+                    compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: 1, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(3UL)));
+
+                for (ulong i = 0; i < 4; i++)
+                    log.TryPost(new WalRecordCommitted(SampleRecord(i)));
+                await WaitForVisibleAsync(log, 3);
+                await WaitForSegmentCountAsync(directory, 4, TimeSpan.FromSeconds(20));
+
+                log.TryPost(new RetentionPassRequested());
+                // Polls TryGet directly rather than the on-disk segment count: the retention pass
+                // deletes several files sequentially before its one, final _segments swap, so disk
+                // count can briefly read its end state slightly before _segments itself catches up
+                // — a real race in the test's own synchronization, not in the actor (nothing
+                // outside ShardLog ever observes disk state directly the way this test's setup
+                // does; TryGet is the only thing that has to be consistent).
+                (await WaitUntilAsync(() => !log.TryGet(0, out _), TimeSpan.FromSeconds(20))).Should().BeTrue("offset 0 is fully covered by watermark 3");
+
+                log.TryGet(0, out _).Should().BeFalse();
+                log.TryGet(1, out _).Should().BeFalse();
+                log.TryGet(2, out _).Should().BeFalse();
+                log.TryGet(3, out var handle).Should().BeTrue();
+                handle.Dispose();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task RetentionPassRequested_is_a_no_op_when_no_watermark_delegate_is_configured() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(
+                    directory, EmptyCommittedSource, flushThresholdBytes: 1,
+                    compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null));
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                await WaitForVisibleAsync(log, 0);
+
+                log.TryPost(new RetentionPassRequested());
+                // Sentinel: the mailbox processes strictly in order, so once offset 1 becomes
+                // visible, the RetentionPassRequested posted before it is already fully handled.
+                log.TryPost(new WalRecordCommitted(SampleRecord(1)));
+                await WaitForVisibleAsync(log, 1);
+
+                log.TryGet(0, out var handle).Should().BeTrue();
+                handle.Dispose();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task RetentionPassRequested_is_a_no_op_while_admission_is_paused() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(
+                    directory, EmptyCommittedSource, flushThresholdBytes: 1,
+                    compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => ValueTask.FromResult(1UL)),
+                    retentionPolicy: new RetentionPolicy(GetMaxTotalBytesPerVirtualShard: () => null, IsAdmissionPaused: () => true));
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                await WaitForVisibleAsync(log, 0);
+                await WaitForSegmentCountAsync(directory, 1);
+
+                log.TryPost(new RetentionPassRequested());
+                log.TryPost(new WalRecordCommitted(SampleRecord(1))); // sentinel — see the no-op test above for why
+                await WaitForVisibleAsync(log, 1);
+
+                log.TryGet(0, out var handle).Should().BeTrue("admission is paused — no pruning may run, even though offset 0 is fully acked");
+                handle.Dispose();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task SizePruneCompleted_removes_the_matching_segment_and_it_is_never_readable_again() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1);
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                log.TryPost(new WalRecordCommitted(SampleRecord(1)));
+                await WaitForVisibleAsync(log, 1);
+                await WaitForSegmentCountAsync(directory, 2);
+
+                var prunedPath = Directory.GetFiles(directory, "*.sst").OrderBy(p => p).First(); // offset 0's segment sorts first
+                File.Delete(prunedPath); // simulates SizePruneWorker's own, off-actor-thread deletion, which always happens before this message is posted
+
+                log.TryPost(new SizePruneCompleted([prunedPath]));
+                log.TryPost(new WalRecordCommitted(SampleRecord(2))); // sentinel — see the RetentionPassRequested no-op test above for why
+                await WaitForVisibleAsync(log, 2);
+
+                log.TryGet(0, out _).Should().BeFalse("the actor must dispose and drop the live segment matching a reported deletion");
+                log.TryGet(1, out var handle).Should().BeTrue();
+                handle.Dispose();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task SizePruneCompleted_with_a_path_that_no_longer_matches_any_live_segment_is_a_harmless_no_op() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1);
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                await WaitForVisibleAsync(log, 0);
+                await WaitForSegmentCountAsync(directory, 1);
+
+                log.TryPost(new SizePruneCompleted([Path.Combine(directory, "already-gone.sst")]));
+                log.TryPost(new WalRecordCommitted(SampleRecord(1))); // sentinel — see the RetentionPassRequested no-op test above for why
+                await WaitForVisibleAsync(log, 1);
+
+                log.TryGet(0, out var handle).Should().BeTrue();
+                handle.Dispose();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        // Regression coverage for a confirmed review bug: a merge-compaction plan is computed
+        // against a _segments snapshot that includes both source segments; while the real,
+        // off-actor-thread merge I/O is still running, a concurrent prune can already delete one
+        // of those same sources. CompactionCompleted must not blindly apply a merge result built
+        // from a now-stale plan — doing so would resurrect the just-pruned segment's data, both
+        // back into _segments and back onto disk.
+        [Fact]
+        public async Task CompactionCompleted_discards_a_stale_merge_whose_source_was_pruned_while_it_was_running() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1);
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                log.TryPost(new WalRecordCommitted(SampleRecord(1)));
+                await WaitForVisibleAsync(log, 1);
+                await WaitForSegmentCountAsync(directory, 2);
+
+                var segmentPaths = Directory.GetFiles(directory, "*.sst").OrderBy(p => p).ToArray(); // offset 0's segment sorts first
+                var prunedSegment = await SstSegment.OpenAsync(segmentPaths[0]);
+                var survivingSegment = await SstSegment.OpenAsync(segmentPaths[1]);
+                var plan = new CompactionPlan([prunedSegment, survivingSegment]);
+
+                // A prune completes first — exactly as if RetentionPassRequested/SizePruneWorker
+                // had already dropped offset 0's segment while the merge below was still running.
+                File.Delete(segmentPaths[0]);
+                log.TryPost(new SizePruneCompleted([segmentPaths[0]]));
+                (await WaitUntilAsync(() => !log.TryGet(0, out _))).Should().BeTrue("offset 0's segment was pruned");
+
+                // The merge itself completes only now — built from the plan's own, still-open
+                // handles, oblivious to the prune that already happened.
+                var mergedPath = await plan.MergeAsync();
+                log.TryPost(new CompactionCompleted(plan, mergedPath, null));
+                log.TryPost(new WalRecordCommitted(SampleRecord(2))); // sentinel — see the no-op tests above for why
+                await WaitForVisibleAsync(log, 2);
+
+                log.TryGet(0, out _).Should().BeFalse("a stale merge must never resurrect data that was already, correctly, pruned");
+                log.TryGet(1, out var handle).Should().BeTrue("the surviving segment's own data must remain readable");
+                handle.Dispose();
+                File.Exists(mergedPath).Should().BeFalse("the orphaned merge result must be cleaned up, not silently left on disk");
             } finally {
                 Directory.Delete(directory, recursive: true);
             }
@@ -595,8 +779,9 @@ public class ShardLogTests {
         throw new TimeoutException($"Offset {offset} never became visible.");
     }
 
-    static async Task WaitForSegmentCountAsync(string directory, int expected) {
-        for (var i = 0; i < 500; i++) {
+    static async Task WaitForSegmentCountAsync(string directory, int expected, TimeSpan? timeout = null) {
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
+        while (DateTime.UtcNow < deadline) {
             if (Directory.GetFiles(directory, "*.sst").Length == expected)
                 return;
 
@@ -604,6 +789,18 @@ public class ShardLogTests {
         }
 
         throw new TimeoutException($"Segment count never reached {expected}.");
+    }
+
+    static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) {
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
+        while (DateTime.UtcNow < deadline) {
+            if (condition())
+                return true;
+
+            await Task.Delay(10);
+        }
+
+        return condition();
     }
 
     static WalRecord SampleRecord(ulong offset, string payload = "hello world") =>

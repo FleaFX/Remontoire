@@ -156,6 +156,65 @@ public class CompactorTests {
         }
     }
 
+    public class PruneOldestUntilUnderSizeAsync {
+        [Fact]
+        public async Task Is_a_no_op_when_already_under_budget() {
+            var directory = CreateTempDirectory();
+            try {
+                var path = await WriteSegmentAsync(directory, SampleEntries(0, 5));
+                var budget = new FileInfo(path).Length + 1;
+
+                var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, budget);
+
+                deleted.Should().BeEmpty();
+                File.Exists(path).Should().BeTrue();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Deletes_oldest_first_until_back_under_budget() {
+            var directory = CreateTempDirectory();
+            try {
+                var oldest = await WriteSegmentAsync(directory, SampleEntries(0, 5));   // offsets 0..4, lowest MinOffset
+                var middle = await WriteSegmentAsync(directory, SampleEntries(5, 5));   // offsets 5..9
+                var newest = await WriteSegmentAsync(directory, SampleEntries(10, 5));  // offsets 10..14
+
+                // Segment sizes aren't identical (double-digit offsets like "10" add a byte to the
+                // payload text) — size the budget off the actual newest segment, not an assumed
+                // uniform size, so exactly that one segment is guaranteed to survive.
+                var budget = new FileInfo(newest).Length;
+
+                var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, budget);
+
+                deleted.Should().BeEquivalentTo([oldest, middle], "oldest-first: the two lowest-offset segments must go before the newest one");
+                File.Exists(oldest).Should().BeFalse();
+                File.Exists(middle).Should().BeFalse();
+                File.Exists(newest).Should().BeTrue();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Deletes_a_fully_unacked_segment_regardless_ack_status_is_never_consulted() {
+            var directory = CreateTempDirectory();
+            try {
+                // No CompactionPolicy/watermark involved anywhere in this call at all — this mode
+                // has no way to consult ack status even if it wanted to; it deletes purely by age.
+                var path = await WriteSegmentAsync(directory, SampleEntries(0, 5));
+
+                var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes: 0);
+
+                deleted.Should().Equal(path);
+                File.Exists(path).Should().BeFalse();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
     static string CreateTempDirectory() {
         var directory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(directory);

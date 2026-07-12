@@ -19,6 +19,7 @@ namespace Remontoire.Sharding;
 // meta-group-hosting server node composes — with a real ShardAssignmentWatcher on the other end
 // of a real gRPC connection. Nothing mocked but the process boundary, the same tradeoff every
 // other layer-4 test in this codebase already makes.
+[Collection("RealNetwork")]
 public class ShardAssignmentWatcherTests {
     [Fact]
     public async Task Fills_its_table_from_an_initial_GetSnapshot_and_then_a_live_Watch() {

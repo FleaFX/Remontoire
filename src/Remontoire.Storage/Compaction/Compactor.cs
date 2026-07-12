@@ -91,6 +91,18 @@ static class Compactor {
     /// age-/size-driven <see cref="RunAsync"/> pass (unchanged) is the only pruning that happens
     /// for a policy without one.
     /// </summary>
+    /// <remarks>
+    /// A standalone directory-level utility — NOT the entry point <see cref="ShardLog"/> itself
+    /// uses for ack-driven pruning. Calling this against a directory a live <see cref="ShardLog"/>
+    /// also manages would delete files out from under its in-memory <c>_segments</c> array
+    /// without ever updating it: the OS-level deletion itself is safe (<see cref="SstSegment"/>
+    /// opens with <c>FileShare.Delete</c>, so an already-open read handle keeps working), but the
+    /// underlying disk space is never actually reclaimed while that stale handle stays open, and
+    /// <c>_segments</c> keeps a dead entry forever. <see cref="ShardLog"/>'s own
+    /// <c>HandleRetentionPassRequestedAsync</c> (<c>ShardLog.Retention.cs</c>) is the actor-safe
+    /// equivalent, operating on the already-open <c>_segments</c> directly instead of rescanning
+    /// the directory.
+    /// </remarks>
     public static async Task PruneAckedSegmentsAsync(string directory, CompactionPolicy policy, CancellationToken cancellationToken = default) {
         if (policy.GetAckedLowWatermarkAsync is not { } getWatermark)
             return;
@@ -104,6 +116,38 @@ static class Compactor {
             if (segment.MaxOffset < watermark)
                 File.Delete(path); // whole, fully-acked segment — no partial rewrite needed
         }
+    }
+
+    /// <summary>
+    /// Deletes whole segments, oldest-first, until the directory's total size is back under
+    /// <paramref name="maxTotalBytes"/> — the size-based emergency floor. Deliberately NEVER
+    /// consults the acked watermark and NEVER routes through dead-letter forwarding: this is a
+    /// last-resort guarantee break against a full disk, not routine pruning. Returns the deleted
+    /// paths so a caller (<see cref="ShardLog"/>'s actor) can keep its own segment list in sync —
+    /// this method never touches any in-memory state itself.
+    /// </summary>
+    public static Task<IReadOnlyList<string>> PruneOldestUntilUnderSizeAsync(string directory, long maxTotalBytes, CancellationToken cancellationToken = default) {
+        // Oldest-first by filename alone — segment-<MinOffset:D20>.sst's zero-padded offset
+        // already sorts correctly in plain lexicographic order, so nothing here ever needs to
+        // open a segment just to answer a size check (MinOffset/MaxOffset, the only reason
+        // LoadCandidatesAsync would open one, are never used below — only each file's path and
+        // size are).
+        var paths = Directory.EnumerateFiles(directory, "*.sst").OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        var totalBytes = paths.Sum(path => new FileInfo(path).Length);
+        var deleted = new List<string>();
+
+        foreach (var path in paths) {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (totalBytes <= maxTotalBytes)
+                break;
+
+            var size = new FileInfo(path).Length;
+            File.Delete(path);
+            deleted.Add(path);
+            totalBytes -= size;
+        }
+
+        return Task.FromResult<IReadOnlyList<string>>(deleted);
     }
 }
 
@@ -122,4 +166,9 @@ static class Compactor {
 /// fact only a higher one can supply. <c>null</c> disables ack-driven pruning entirely — nothing
 /// is ever dropped on age/size grounds alone.
 /// </param>
-public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null);
+/// <param name="RetentionTickInterval">
+/// Overrides the ack-driven retention pass's default tick cadence. <see langword="null"/> keeps
+/// the production default — this exists purely so tests don't have to wait on that default to
+/// observe real, end-to-end pruning behavior.
+/// </param>
+public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null, TimeSpan? RetentionTickInterval = null);

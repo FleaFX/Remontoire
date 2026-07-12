@@ -197,6 +197,122 @@ public class ShardAssignmentTableTests {
 
             table.TryGetAssignment("orders", 5, out _).Should().BeFalse();
         }
+
+        [Fact]
+        public void SetConsumerGroupAckMode_changes_only_the_mode_not_the_mandatory_flag() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new SetConsumerGroupMandatory("orders", "billing", false));
+
+            table.Apply(new SetConsumerGroupAckMode("orders", "billing", AckMode.Checkpoint));
+
+            var policy = table.GetConsumerGroupPolicy("orders", "billing");
+            policy.Mode.Should().Be(AckMode.Checkpoint);
+            policy.Mandatory.Should().BeFalse("SetConsumerGroupAckMode must not revert an earlier, independent SetConsumerGroupMandatory");
+        }
+
+        [Fact]
+        public void SetConsumerGroupMandatory_changes_only_the_mandatory_flag_not_the_mode() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new SetConsumerGroupAckMode("orders", "billing", AckMode.Checkpoint));
+
+            table.Apply(new SetConsumerGroupMandatory("orders", "billing", false));
+
+            var policy = table.GetConsumerGroupPolicy("orders", "billing");
+            policy.Mode.Should().Be(AckMode.Checkpoint, "SetConsumerGroupMandatory must not revert an earlier, independent SetConsumerGroupAckMode");
+            policy.Mandatory.Should().BeFalse();
+        }
+
+        [Fact]
+        public void SetStreamRetentionPolicy_changes_retention_without_touching_the_checkpoint_interval() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new SetStreamCheckpointInterval("orders", TimeSpan.FromSeconds(30), 500));
+
+            table.Apply(new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(3), TimeSpan.FromDays(14), MaxSizeBytesPerVirtualShard: 1024));
+
+            var policy = table.GetRetentionPolicy("orders");
+            policy.AuditRetention.Should().Be(TimeSpan.FromDays(3));
+            policy.MaxRetention.Should().Be(TimeSpan.FromDays(14));
+            policy.MaxSizeBytesPerVirtualShard.Should().Be(1024);
+            policy.CheckpointInterval.Should().Be(TimeSpan.FromSeconds(30), "SetStreamRetentionPolicy must not revert an earlier, independent SetStreamCheckpointInterval");
+            policy.CheckpointOffsetCount.Should().Be(500);
+        }
+
+        [Fact]
+        public void SetStreamRetentionPolicy_clamps_negative_durations_and_a_negative_size_ceiling_to_safe_values() {
+            // A negative MaxRetention would make RetentionEvaluator's own cutoff resolve into the
+            // future, dead-lettering/pruning everything not yet mandatory-acked immediately; a
+            // negative MaxSizeBytesPerVirtualShard would make the size-based ceiling check always
+            // true, pruning every segment. An operator typo (or a corrupted replayed record) must
+            // not be able to produce either — clamp to the safe, "expire immediately"/"no ceiling"
+            // equivalents instead of storing the raw, destructive value verbatim.
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(-1), TimeSpan.FromDays(-1), MaxSizeBytesPerVirtualShard: -1024));
+
+            var policy = table.GetRetentionPolicy("orders");
+            policy.AuditRetention.Should().Be(TimeSpan.Zero);
+            policy.MaxRetention.Should().Be(TimeSpan.Zero);
+            policy.MaxSizeBytesPerVirtualShard.Should().BeNull();
+        }
+
+        [Fact]
+        public void SetStreamCheckpointInterval_changes_the_checkpoint_interval_without_touching_retention() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(3), TimeSpan.FromDays(14), MaxSizeBytesPerVirtualShard: 1024));
+
+            table.Apply(new SetStreamCheckpointInterval("orders", TimeSpan.FromSeconds(30), 500));
+
+            var policy = table.GetRetentionPolicy("orders");
+            policy.CheckpointInterval.Should().Be(TimeSpan.FromSeconds(30));
+            policy.CheckpointOffsetCount.Should().Be(500);
+            policy.AuditRetention.Should().Be(TimeSpan.FromDays(3), "SetStreamCheckpointInterval must not revert an earlier, independent SetStreamRetentionPolicy");
+            policy.MaxRetention.Should().Be(TimeSpan.FromDays(14));
+            policy.MaxSizeBytesPerVirtualShard.Should().Be(1024);
+        }
+    }
+
+    public class GetConsumerGroupPolicy {
+        [Fact]
+        public void Defaults_to_strict_and_mandatory_for_a_never_touched_group() {
+            var table = new ShardAssignmentTable();
+
+            var policy = table.GetConsumerGroupPolicy("orders", "billing");
+
+            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Strict, Mandatory: true));
+        }
+    }
+
+    public class GetRetentionPolicy {
+        [Fact]
+        public void Defaults_to_a_seven_and_thirty_day_window_with_no_size_ceiling_for_a_never_touched_stream() {
+            var table = new ShardAssignmentTable();
+
+            var policy = table.GetRetentionPolicy("orders");
+
+            policy.Should().Be(new StreamRetentionPolicy(TimeSpan.FromDays(7), TimeSpan.FromDays(30), null, null, null));
+        }
+    }
+
+    public class EnumerateAssignments {
+        [Fact]
+        public void Returns_an_empty_collection_when_nothing_is_assigned_yet() {
+            var table = new ShardAssignmentTable();
+
+            table.EnumerateAssignments().Should().BeEmpty();
+        }
+
+        [Fact]
+        public void Returns_every_currently_known_assignment() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(new MigrationId(Guid.NewGuid()), "orders", 5, "group-1", "group-2"));
+            table.Apply(new MigrationStarted(new MigrationId(Guid.NewGuid()), "shipments", 0, "group-3", "group-4"));
+
+            var assignments = table.EnumerateAssignments();
+
+            assignments.Should().HaveCount(2);
+            assignments.Should().Contain(a => a.StreamName == "orders" && a.GroupId == "group-1");
+            assignments.Should().Contain(a => a.StreamName == "shipments" && a.GroupId == "group-3");
+        }
     }
 }
 
@@ -247,5 +363,41 @@ public class VirtualShardAssignmentTests {
 
         assignment.GroupId.Should().Be("group-1", "routing keeps following the current group until cutover flips it");
         assignment.MigratingToGroupId.Should().Be("group-2");
+    }
+}
+
+public class ConsumerGroupPolicyTests {
+    [Fact]
+    public void Two_policies_with_the_same_field_values_are_equal() {
+        var first = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false);
+        var second = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false);
+
+        first.Should().Be(second);
+    }
+
+    [Fact]
+    public void Policies_with_a_different_mode_are_not_equal() {
+        var first = new ConsumerGroupPolicy(AckMode.Strict, Mandatory: true);
+        var second = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: true);
+
+        first.Should().NotBe(second);
+    }
+}
+
+public class StreamRetentionPolicyTests {
+    [Fact]
+    public void Two_policies_with_the_same_field_values_are_equal() {
+        var first = new StreamRetentionPolicy(TimeSpan.FromDays(7), TimeSpan.FromDays(30), 1024, TimeSpan.FromSeconds(30), 500);
+        var second = new StreamRetentionPolicy(TimeSpan.FromDays(7), TimeSpan.FromDays(30), 1024, TimeSpan.FromSeconds(30), 500);
+
+        first.Should().Be(second);
+    }
+
+    [Fact]
+    public void Policies_with_a_different_size_ceiling_are_not_equal() {
+        var first = new StreamRetentionPolicy(TimeSpan.FromDays(7), TimeSpan.FromDays(30), 1024, null, null);
+        var second = new StreamRetentionPolicy(TimeSpan.FromDays(7), TimeSpan.FromDays(30), null, null, null);
+
+        first.Should().NotBe(second);
     }
 }

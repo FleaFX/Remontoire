@@ -21,7 +21,7 @@ public sealed class AckIndexApplier : IAsyncDisposable {
     static async Task RunAsync(ShardLog shardLog, AckIndex ackIndex, CancellationToken cancellationToken) {
         try {
             await foreach (var record in shardLog.ReadAppliedAsync(cancellationToken))
-                ackIndex.Apply(record);
+                await ackIndex.ApplyAsync(record, cancellationToken);
         } catch (OperationCanceledException) {
             // Expected shutdown path — DisposeAsync cancels and awaits this.
         }

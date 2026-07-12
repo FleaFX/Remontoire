@@ -5,8 +5,8 @@ namespace Remontoire.Client;
 /// outage (no quorum, or a network partition cutting this client off from the whole group), never
 /// an unbounded wait.
 /// </summary>
-public sealed class RemontoireUnavailableException(string groupId, int attempts)
-    : Exception($"Could not reach a leader for group '{groupId}' after {attempts} attempt(s).") {
+public sealed class RemontoireUnavailableException(string groupId, int attempts, Exception? lastFailure = null)
+    : Exception($"Could not reach a leader for group '{groupId}' after {attempts} attempt(s).", lastFailure) {
     /// <summary>
     /// The group this call was trying to reach.
     /// </summary>

@@ -24,6 +24,7 @@ namespace Remontoire.Client;
 // RemontoireConnection. This is the direct end-to-end verification of the exit criterion: no
 // message loss, no downtime, the ShardMigrating contention path exercised over a real connection,
 // and ShardRouter.GetVirtualShardIndex genuinely deciding where a message lands.
+[Collection("RealNetwork")]
 public class ReshardEndToEndTests {
     const string StreamName = "orders";
     const string FromGroupId = "group-1";
@@ -42,6 +43,7 @@ public class ReshardEndToEndTests {
             await Watcher.DisposeAsync();
             WatcherChannel.Dispose();
             await Applier.DisposeAsync();
+            await AckIndex.DisposeAsync();
             await ShardLog.DisposeAsync();
             await Replica.DisposeAsync();
             await Host.DisposeAsync();
@@ -104,9 +106,13 @@ public class ReshardEndToEndTests {
         host.Services.GetRequiredService<MessagingGroupRegistry>().Register(groupId, shardLog, ackIndex);
 
         // A real watcher, pointed at the real meta host — this node's own routing table is kept
-        // fresh exactly the way a production node without meta-group membership would be.
+        // fresh exactly the way a production node without meta-group membership would be. A short
+        // reconciliation interval (ShardAssignmentWatcher's own documented defense-in-depth against
+        // a live Watch stream silently stalling without visibly failing) — the 2-minute production
+        // default would never kick in during this test's own, much shorter timeout budget.
         var watcherChannel = GrpcChannel.ForAddress(metaSeedAddress);
-        var watcher = new ShardAssignmentWatcher(new ShardAssignmentMeta.ShardAssignmentMetaClient(watcherChannel), host.Services.GetRequiredService<ShardAssignmentTable>());
+        var watcher = new ShardAssignmentWatcher(new ShardAssignmentMeta.ShardAssignmentMetaClient(watcherChannel), host.Services.GetRequiredService<ShardAssignmentTable>(),
+            reconciliationInterval: TimeSpan.FromMilliseconds(200));
 
         return new DataGroupNode { Host = host, Replica = replica, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier, WatcherChannel = watcherChannel, Watcher = watcher };
     }
@@ -163,6 +169,25 @@ public class ReshardEndToEndTests {
             await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new RegisterGroup(ToGroupId, [new ShardGroupMember("to", toAddress)]))));
             await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new MigrationStarted(seedMigrationId, StreamName, 0, FromGroupId, FromGroupId))));
             await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover(seedMigrationId, StreamName, 0, FromGroupId))));
+
+            // Explicit precondition, not folded into PublishOnceReadyAsync's own retry loop:
+            // proves fromGroup's OWN watcher (a separate instance from the connection's) actually
+            // caught up on its server-side table before any publish is attempted. If this ever
+            // times out, it isolates the failure to the watcher/journal path specifically, rather
+            // than leaving it indistinguishable from any other publish-retry exhaustion.
+            // Checks BOTH TryGetStreamConfig (fed by CreateStream) and TryGetAssignment (fed by
+            // MigrationStarted/Cutover) — two independent dictionaries inside ShardAssignmentTable
+            // with no cross-validation, so one becoming visible never guarantees the other already
+            // is (confirmed via a real CI failure: Publish's own NotFound check, which reads
+            // TryGetStreamConfig first, fired even though an assignment-only precondition here had
+            // already passed).
+            var fromGroupTable = fromGroup.Host.Services.GetRequiredService<ShardAssignmentTable>();
+            (await RunUntilAsync(() => fromGroupTable.TryGetStreamConfig(StreamName, out _) && fromGroupTable.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == FromGroupId, TimeSpan.FromSeconds(30)))
+                .Should().BeTrue($"fromGroup's own watcher must see the stream config and the group assignment before any publish can ever succeed — " +
+                    $"last applied version: {fromGroup.Watcher.LastAppliedVersion}, last watcher failure: {fromGroup.Watcher.LastFailure}, " +
+                    $"streamConfig: {fromGroupTable.TryGetStreamConfig(StreamName, out _)}, " +
+                    $"fromGroupRegistered: {fromGroupTable.TryGetGroup(FromGroupId, out _)}, toGroupRegistered: {fromGroupTable.TryGetGroup(ToGroupId, out _)}, " +
+                    $"assignment: {(fromGroupTable.TryGetAssignment(StreamName, 0, out var finalAssignment) ? finalAssignment.ToString() : "none")}");
 
             using var connection = new RemontoireConnection(new RemontoireClientOptions(
                 MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
@@ -259,7 +284,10 @@ public class ReshardEndToEndTests {
     }
 
     static async Task<PublishResult> PublishOnceReadyAsync(RemontoireConnection connection, string payload) {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        // A generous budget: real Kestrel-host startup and the meta-group watcher's own catch-up
+        // can genuinely take longer than 5s under CI's more constrained CPU (confirmed — this
+        // exact call failed consistently in CI at the 5s mark, never locally).
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (true) {
             try {
                 return await connection.PublishAsync(StreamName, "key", Encoding.UTF8.GetBytes(payload));

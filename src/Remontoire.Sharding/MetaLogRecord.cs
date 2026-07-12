@@ -79,6 +79,35 @@ public abstract record MetaLogRecord {
                 writer.Write(r.VirtualShardIndex);
                 break;
 
+            case SetConsumerGroupAckMode r:
+                writer.Write((byte)MetaLogRecordType.SetConsumerGroupAckMode);
+                writer.Write(r.StreamName);
+                writer.Write(r.ConsumerGroup);
+                writer.Write((byte)r.Mode);
+                break;
+
+            case SetConsumerGroupMandatory r:
+                writer.Write((byte)MetaLogRecordType.SetConsumerGroupMandatory);
+                writer.Write(r.StreamName);
+                writer.Write(r.ConsumerGroup);
+                writer.Write(r.Mandatory);
+                break;
+
+            case SetStreamRetentionPolicy r:
+                writer.Write((byte)MetaLogRecordType.SetStreamRetentionPolicy);
+                writer.Write(r.StreamName);
+                writer.Write(r.AuditRetention.Ticks);
+                writer.Write(r.MaxRetention.Ticks);
+                WriteNullableInt64(writer, r.MaxSizeBytesPerVirtualShard);
+                break;
+
+            case SetStreamCheckpointInterval r:
+                writer.Write((byte)MetaLogRecordType.SetStreamCheckpointInterval);
+                writer.Write(r.StreamName);
+                WriteNullableInt64(writer, r.Interval?.Ticks);
+                WriteNullableInt32(writer, r.OffsetCount);
+                break;
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case.");
         }
@@ -98,8 +127,24 @@ public abstract record MetaLogRecord {
                 new Cutover(new MigrationId(Guid.Parse(reader.ReadString())), reader.ReadString(), reader.ReadInt32(), reader.ReadString()),
             MetaLogRecordType.MigrationCompleted =>
                 new MigrationCompleted(new MigrationId(Guid.Parse(reader.ReadString())), reader.ReadString(), reader.ReadInt32()),
+            MetaLogRecordType.SetConsumerGroupAckMode =>
+                new SetConsumerGroupAckMode(reader.ReadString(), reader.ReadString(), ReadAckMode(reader)),
+            MetaLogRecordType.SetConsumerGroupMandatory =>
+                new SetConsumerGroupMandatory(reader.ReadString(), reader.ReadString(), reader.ReadBoolean()),
+            MetaLogRecordType.SetStreamRetentionPolicy =>
+                new SetStreamRetentionPolicy(reader.ReadString(), TimeSpan.FromTicks(reader.ReadInt64()), TimeSpan.FromTicks(reader.ReadInt64()), ReadNullableInt64(reader)),
+            MetaLogRecordType.SetStreamCheckpointInterval =>
+                ReadSetStreamCheckpointInterval(reader),
             _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown MetaLogRecordType tag."),
         };
+    }
+
+    // A corrupted record, or a byte written by a future version with a third mode, must not
+    // silently decode into an undefined AckMode — downstream, neither Mode == Strict nor
+    // Mode == Checkpoint would match, an inconsistent combination neither mode intends.
+    static AckMode ReadAckMode(BinaryReader reader) {
+        var mode = (AckMode)reader.ReadByte();
+        return Enum.IsDefined(mode) ? mode : throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown AckMode value.");
     }
 
     static RegisterGroup ReadRegisterGroup(BinaryReader reader) {
@@ -110,6 +155,29 @@ public abstract record MetaLogRecord {
             members[i] = new ShardGroupMember(reader.ReadString(), new Uri(reader.ReadString()));
         return new RegisterGroup(groupId, members);
     }
+
+    static SetStreamCheckpointInterval ReadSetStreamCheckpointInterval(BinaryReader reader) {
+        var streamName = reader.ReadString();
+        var intervalTicks = ReadNullableInt64(reader);
+        var offsetCount = ReadNullableInt32(reader);
+        return new SetStreamCheckpointInterval(streamName, intervalTicks is { } ticks ? TimeSpan.FromTicks(ticks) : null, offsetCount);
+    }
+
+    static void WriteNullableInt64(BinaryWriter writer, long? value) {
+        writer.Write(value.HasValue);
+        if (value.HasValue)
+            writer.Write(value.Value);
+    }
+
+    static void WriteNullableInt32(BinaryWriter writer, int? value) {
+        writer.Write(value.HasValue);
+        if (value.HasValue)
+            writer.Write(value.Value);
+    }
+
+    static long? ReadNullableInt64(BinaryReader reader) => reader.ReadBoolean() ? reader.ReadInt64() : null;
+
+    static int? ReadNullableInt32(BinaryReader reader) => reader.ReadBoolean() ? reader.ReadInt32() : null;
 }
 
 /// <summary>
@@ -143,3 +211,39 @@ public sealed record Cutover(MigrationId MigrationId, string StreamName, int Vir
 /// Marks a migration's post-cutover cleanup as done, after its grace period elapsed.
 /// </summary>
 public sealed record MigrationCompleted(MigrationId MigrationId, string StreamName, int VirtualShardIndex) : MetaLogRecord;
+
+/// <summary>
+/// Sets one consumer group's ack-replication mode for one stream — strict (every ack is its own
+/// Raft-committed record) or checkpoint (acks apply locally on the leader; only a periodic
+/// low-watermark is replicated). A separate command from <see cref="SetConsumerGroupMandatory"/>
+/// rather than one combined command: the two have different authorization actors (ack-mode is an
+/// application-owner choice; mandatory/best-effort is reserved to a cluster-wide operator) — a
+/// future authorization interceptor must be able to gate one without the other.
+/// </summary>
+public sealed record SetConsumerGroupAckMode(string StreamName, string ConsumerGroup, AckMode Mode) : MetaLogRecord;
+
+/// <summary>
+/// Marks one consumer group as mandatory (blocks pruning until it acks, the default) or
+/// best-effort (never blocks pruning) for one stream. Committed ungated for now — no
+/// authorization mechanism exists yet; this command's own, separate <see cref="MetaLogRecordType"/>
+/// tag is precisely what lets a later interceptor gate it independently of
+/// <see cref="SetConsumerGroupAckMode"/> without touching this wire format again.
+/// </summary>
+public sealed record SetConsumerGroupMandatory(string StreamName, string ConsumerGroup, bool Mandatory) : MetaLogRecord;
+
+/// <summary>
+/// Sets one stream's audit-retention window (kept this long after every mandatory group has
+/// acked, purely for troubleshooting), hard max-retention window (an absolute ceiling from
+/// ingest, regardless of ack status), and per-virtual-shard emergency size ceiling
+/// (<see langword="null"/>: no size-based emergency pruning for this stream).
+/// </summary>
+public sealed record SetStreamRetentionPolicy(string StreamName, TimeSpan AuditRetention, TimeSpan MaxRetention, long? MaxSizeBytesPerVirtualShard) : MetaLogRecord;
+
+/// <summary>
+/// Sets one stream's checkpoint-replication cadence for every consumer group on it using
+/// <see cref="AckMode.Checkpoint"/> — whichever of <paramref name="Interval"/>/<paramref name="OffsetCount"/>
+/// is reached first triggers the next checkpoint. Either may be <see langword="null"/> (that
+/// trigger disabled); both <see langword="null"/> falls back to <see cref="StreamRetentionPolicy"/>'s
+/// own default.
+/// </summary>
+public sealed record SetStreamCheckpointInterval(string StreamName, TimeSpan? Interval, int? OffsetCount) : MetaLogRecord;

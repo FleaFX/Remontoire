@@ -147,16 +147,22 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
         string groupId, IReadOnlyList<Uri> memberAddresses, Func<Uri, Task<TReply>> call,
         Func<TReply, NotLeader?> extractNotLeader, Func<TReply, bool> isShardMigrating) {
         var address = _leaderCache.Get(groupId) ?? RandomMemberAddress(memberAddresses);
+        // Surfaced as RemontoireUnavailableException's own InnerException if every attempt is
+        // exhausted — otherwise a caller only ever sees "could not reach a leader," with no way
+        // to tell a transport failure (this address is genuinely down/unreachable) apart from a
+        // real, sustained "no leader elected" outage.
+        Exception? lastFailure = null;
 
         for (var attempt = 0; attempt < _options.MaxRedirectAttempts; attempt++) {
             TReply reply;
             try {
                 reply = await call(address);
-            } catch (RpcException) {
+            } catch (RpcException ex) {
                 // The cached or just-tried address is genuinely unreachable (a crashed node, a
                 // network partition) — not merely "not currently leader". Treated the same as a
                 // redirect with no hint: the cache can no longer be trusted, wait briefly, try a
                 // random other member.
+                lastFailure = ex;
                 await Task.Delay(_options.RedirectRetryDelay);
                 _leaderCache.Invalidate(groupId);
                 address = RandomMemberAddress(memberAddresses);
@@ -188,7 +194,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
             }
         }
 
-        throw new RemontoireUnavailableException(groupId, _options.MaxRedirectAttempts);
+        throw new RemontoireUnavailableException(groupId, _options.MaxRedirectAttempts, lastFailure);
     }
 
     int ResolveVirtualShardIndex(string streamName, ReadOnlySpan<byte> partitionKey) {

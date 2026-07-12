@@ -44,3 +44,21 @@ sealed record PrepareSnapshotRequested(ulong UpToLogicalOffsetExclusive, TaskCom
 /// replica had fallen too far behind to catch up to via ordinary replication).
 /// </summary>
 sealed record SnapshotInstalled(IReadOnlyList<string> SegmentPaths, ulong NextOffsetToApply, TaskCompletionSource Completion) : ShardLogMessage;
+
+/// <summary>
+/// Posted periodically by a small ticker while a <see cref="CompactionPolicy.GetAckedLowWatermarkAsync"/>
+/// delegate is configured — asks the actor to drop any of its own, already-open segments now
+/// fully covered by the current ack watermark. Handled entirely in-actor, directly against
+/// <c>_segments</c> — no separate off-thread worker, unlike compaction/size-pruning: the watermark
+/// lookup and the resulting <c>File.Delete</c> calls are both cheap enough to run inline.
+/// </summary>
+sealed record RetentionPassRequested : ShardLogMessage;
+
+/// <summary>
+/// Posted by <see cref="Compaction.SizePruneWorker"/> once it has deleted whichever oldest
+/// segments were needed to bring the directory back under its configured size ceiling — never
+/// consulting the ack watermark. The actor removes each path from <c>_segments</c>; a path that no
+/// longer matches (already replaced by a concurrent compaction) is simply not there to remove,
+/// a harmless no-op.
+/// </summary>
+sealed record SizePruneCompleted(IReadOnlyList<string> DeletedPaths) : ShardLogMessage;

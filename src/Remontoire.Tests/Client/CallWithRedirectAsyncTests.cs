@@ -109,6 +109,20 @@ public class CallWithRedirectAsyncTests {
     }
 
     [Fact]
+    public async Task Carries_the_last_transport_failure_as_its_own_InnerException() {
+        // Without this, a caller only ever sees "could not reach a leader" — no way to tell a
+        // real transport failure (this address is genuinely down) apart from a sustained "no
+        // leader elected" outage.
+        using var connection = Connect(maxRedirectAttempts: 3);
+        var lastThrown = new RpcException(new Status(StatusCode.Unavailable, "simulated dead node"));
+
+        var act = () => connection.CallWithRedirectAsync<string>("group-1", Members, _ => throw lastThrown, _ => null, NeverShardMigrating);
+
+        var exception = await act.Should().ThrowAsync<RemontoireUnavailableException>();
+        exception.Which.InnerException.Should().BeSameAs(lastThrown);
+    }
+
+    [Fact]
     public async Task Retries_the_same_address_after_a_ShardMigrating_reply() {
         using var connection = Connect();
         var addressesCalled = new List<Uri>();

@@ -15,12 +15,18 @@ public enum WalRecordType : byte {
     Ack = 1,
 
     /// <summary>
+    /// A consumer-group's periodic, checkpoint-mode low-watermark — a cheaper alternative to
+    /// <see cref="Ack"/> for groups that don't need every individual ack replicated.
+    /// </summary>
+    AckCheckpoint = 2,
+
+    /// <summary>
     /// A change to the shard's Raft group membership.
     /// </summary>
-    ShardConfigChange = 2,
+    ShardConfigChange = 3,
 
     /// <summary>
     /// An empty entry used by Raft to establish leader authority in a new term.
     /// </summary>
-    NoOp = 3,
+    NoOp = 4
 }

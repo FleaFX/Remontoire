@@ -91,6 +91,7 @@ public sealed partial class RaftReplica(
                     InstallSnapshotReceived installSnapshotReceived => HandleInstallSnapshotReceivedAsync(installSnapshotReceived),
                     InstallSnapshotResponseReceived installSnapshotResponseReceived => HandleInstallSnapshotResponseReceivedAsync(installSnapshotResponseReceived),
                     InstallSnapshotTransferFailed installSnapshotTransferFailed => HandleInstallSnapshotTransferFailedAsync(installSnapshotTransferFailed),
+                    ProposeAckCheckpointReceived proposeAckCheckpointReceived => HandleProposeAckCheckpointReceivedAsync(proposeAckCheckpointReceived),
                     ProposeAckReceived proposeAckReceived => HandleProposeAckReceivedAsync(proposeAckReceived),
                     ProposeConfigChangeReceived proposeConfigChangeReceived => HandleProposeConfigChangeReceivedAsync(proposeConfigChangeReceived),
                     ProposeReceived proposeReceived => HandleProposeReceivedAsync(proposeReceived),

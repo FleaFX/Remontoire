@@ -66,12 +66,32 @@ public sealed class RemontoireClientGrpcService(
         if (!assignmentTable.TryGetStreamConfig(request.StreamName, out _))
             throw new RpcException(new Status(StatusCode.NotFound, $"No stream '{request.StreamName}' is hosted here."));
 
-        var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out _, out _);
+        var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out var shardLog, out var ackIndex);
         if (redirect is not null)
             return new AckReply { NotLeader = redirect };
 
         if (admissionGate.IsPaused(replica.GroupId))
             return new AckReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } };
+
+        var mode = assignmentTable.GetConsumerGroupPolicy(request.StreamName, request.ConsumerGroup).Mode;
+
+        if (mode == AckMode.Checkpoint) {
+            // Today's leader-pinning for Ack is an accidental side effect of always calling
+            // ProposeAsync (which throws NotLeaderException off a non-ready-leader replica). That
+            // side effect disappears the moment this path skips ProposeAsync entirely — this check
+            // is now load-bearing, not incidental: a checkpoint-mode ack applied on a follower would
+            // silently vanish at that follower's own next crash, before the leader's own periodic
+            // checkpoint (AckCheckpointer) ever captures it.
+            if (!replica.IsLeader)
+                return new AckReply { NotLeader = BuildNotLeader(request.StreamName, new NotLeaderException(replica.GroupId, replica.LeaderHint)) };
+
+            // Checkpoint mode skips Raft entirely (that's the whole point), so nothing else ever
+            // validates these client-supplied offsets — unlike the strict path below, forging one
+            // here costs no round-trip. Silently drop anything referring to a message that doesn't
+            // exist yet rather than letting it advance this group's watermark past undelivered data.
+            await ackIndex.ApplyLocalAsync(request.ConsumerGroup, WithinLogBounds(request.Offsets, shardLog.NextOffsetToApply), context.CancellationToken);
+            return new AckReply { Success = new Empty() };
+        }
 
         try {
             await replica.ProposeAsync(new Remontoire.Raft.AckRequest(request.ConsumerGroup, request.Offsets), context.CancellationToken);
@@ -97,9 +117,7 @@ public sealed class RemontoireClientGrpcService(
             return;
         }
 
-        // Every consumer group is pinned to the leader for now — strict-ack mode always is, and
-        // no other mode exists yet, so the policy question is trivially answered until it does.
-        if (RequiresLeaderPinning(request.ConsumerGroup) && !replica.IsLeader) {
+        if (RequiresLeaderPinning(request.StreamName, request.ConsumerGroup) && !replica.IsLeader) {
             await responseStream.WriteAsync(
                 new ConsumeReply { NotLeader = BuildNotLeader(request.StreamName, new NotLeaderException(replica.GroupId, replica.LeaderHint)) });
             return;
@@ -111,7 +129,14 @@ public sealed class RemontoireClientGrpcService(
                 await responseStream.WriteAsync(new ConsumeReply { Message = ToProto(handle.Entry) });
     }
 
-    static bool RequiresLeaderPinning(string consumerGroup) => true;
+    // Follower reads are safe by construction (State Machine Safety: whatever a follower has
+    // already applied is identical to what the leader applied), just possibly a fraction behind
+    // the leader. Strict mode's own guarantee is deliberately not to let any such lag stack on top
+    // of what it already promises, so it stays pinned; checkpoint mode already accepts a looser
+    // guarantee elsewhere (an unreplicated ack window), so this same follower-lag is consistent
+    // with it, not a new relaxation.
+    bool RequiresLeaderPinning(string streamName, string consumerGroup) =>
+        assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mode == AckMode.Strict;
 
     // Streaming's own long-lived "keep reading as new data arrives" loop — ShardLog's own reads
     // are point-in-time snapshots, so this alternates draining what's currently available with
@@ -147,6 +172,13 @@ public sealed class RemontoireClientGrpcService(
     // itself, not a network address). Null stays null: "no hint, an election is in progress."
     NotLeader BuildNotLeader(string streamName, NotLeaderException ex) =>
         new() { StreamName = streamName, LeaderAddress = ex.LeaderHint is { } nodeId ? leaderAddresses.TryGet(nodeId)?.ToString() : null };
+
+    // Checkpoint-mode Ack's only defense against a client forging offsets far ahead of what was
+    // actually delivered — extracted as its own static method so the filtering rule is directly
+    // testable, independent of ServerCallContext (which every RPC method on this class needs, and
+    // which has no fake precedent in this codebase).
+    internal static IReadOnlyList<ulong> WithinLogBounds(IReadOnlyList<ulong> offsets, ulong nextOffsetToApply) =>
+        offsets.Where(offset => offset < nextOffsetToApply).ToArray();
 
     // Resolves a known stream's virtual shard to its current physical group, then either
     // dispatches locally (the common case: this group is hosted right here) or builds a redirect

@@ -33,4 +33,24 @@ public enum MetaLogRecordType : byte {
     /// Tag for <see cref="MigrationCompleted"/>.
     /// </summary>
     MigrationCompleted = 5,
+
+    /// <summary>
+    /// Tag for <see cref="SetConsumerGroupAckMode"/>.
+    /// </summary>
+    SetConsumerGroupAckMode = 6,
+
+    /// <summary>
+    /// Tag for <see cref="SetConsumerGroupMandatory"/>.
+    /// </summary>
+    SetConsumerGroupMandatory = 7,
+
+    /// <summary>
+    /// Tag for <see cref="SetStreamRetentionPolicy"/>.
+    /// </summary>
+    SetStreamRetentionPolicy = 8,
+
+    /// <summary>
+    /// Tag for <see cref="SetStreamCheckpointInterval"/>.
+    /// </summary>
+    SetStreamCheckpointInterval = 9,
 }
