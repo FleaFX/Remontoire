@@ -238,6 +238,24 @@ public class ShardAssignmentTableTests {
         }
 
         [Fact]
+        public void SetStreamRetentionPolicy_clamps_negative_durations_and_a_negative_size_ceiling_to_safe_values() {
+            // A negative MaxRetention would make RetentionEvaluator's own cutoff resolve into the
+            // future, dead-lettering/pruning everything not yet mandatory-acked immediately; a
+            // negative MaxSizeBytesPerVirtualShard would make the size-based ceiling check always
+            // true, pruning every segment. An operator typo (or a corrupted replayed record) must
+            // not be able to produce either — clamp to the safe, "expire immediately"/"no ceiling"
+            // equivalents instead of storing the raw, destructive value verbatim.
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(-1), TimeSpan.FromDays(-1), MaxSizeBytesPerVirtualShard: -1024));
+
+            var policy = table.GetRetentionPolicy("orders");
+            policy.AuditRetention.Should().Be(TimeSpan.Zero);
+            policy.MaxRetention.Should().Be(TimeSpan.Zero);
+            policy.MaxSizeBytesPerVirtualShard.Should().BeNull();
+        }
+
+        [Fact]
         public void SetStreamCheckpointInterval_changes_the_checkpoint_interval_without_touching_retention() {
             var table = new ShardAssignmentTable();
             table.Apply(new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(3), TimeSpan.FromDays(14), MaxSizeBytesPerVirtualShard: 1024));

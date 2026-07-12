@@ -66,7 +66,7 @@ public sealed class RemontoireClientGrpcService(
         if (!assignmentTable.TryGetStreamConfig(request.StreamName, out _))
             throw new RpcException(new Status(StatusCode.NotFound, $"No stream '{request.StreamName}' is hosted here."));
 
-        var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out _, out var ackIndex);
+        var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out var shardLog, out var ackIndex);
         if (redirect is not null)
             return new AckReply { NotLeader = redirect };
 
@@ -85,7 +85,11 @@ public sealed class RemontoireClientGrpcService(
             if (!replica.IsLeader)
                 return new AckReply { NotLeader = BuildNotLeader(request.StreamName, new NotLeaderException(replica.GroupId, replica.LeaderHint)) };
 
-            ackIndex.ApplyLocal(request.ConsumerGroup, request.Offsets);
+            // Checkpoint mode skips Raft entirely (that's the whole point), so nothing else ever
+            // validates these client-supplied offsets — unlike the strict path below, forging one
+            // here costs no round-trip. Silently drop anything referring to a message that doesn't
+            // exist yet rather than letting it advance this group's watermark past undelivered data.
+            ackIndex.ApplyLocal(request.ConsumerGroup, WithinLogBounds(request.Offsets, shardLog.NextOffsetToApply));
             return new AckReply { Success = new Empty() };
         }
 
@@ -168,6 +172,13 @@ public sealed class RemontoireClientGrpcService(
     // itself, not a network address). Null stays null: "no hint, an election is in progress."
     NotLeader BuildNotLeader(string streamName, NotLeaderException ex) =>
         new() { StreamName = streamName, LeaderAddress = ex.LeaderHint is { } nodeId ? leaderAddresses.TryGet(nodeId)?.ToString() : null };
+
+    // Checkpoint-mode Ack's only defense against a client forging offsets far ahead of what was
+    // actually delivered — extracted as its own static method so the filtering rule is directly
+    // testable, independent of ServerCallContext (which every RPC method on this class needs, and
+    // which has no fake precedent in this codebase).
+    internal static IReadOnlyList<ulong> WithinLogBounds(IReadOnlyList<ulong> offsets, ulong nextOffsetToApply) =>
+        offsets.Where(offset => offset < nextOffsetToApply).ToArray();
 
     // Resolves a known stream's virtual shard to its current physical group, then either
     // dispatches locally (the common case: this group is hosted right here) or builds a redirect

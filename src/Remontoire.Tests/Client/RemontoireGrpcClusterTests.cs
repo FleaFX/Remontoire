@@ -160,6 +160,7 @@ public class RemontoireGrpcClusterTests {
                 GetMaxRetention: () => table.GetRetentionPolicy(StreamName).MaxRetention,
                 ForwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(table, replica, request, ct),
                 IsAdmissionPaused: () => admissionGate.IsPaused(GroupId),
+                IsLeader: () => replica.IsLeader,
                 TickInterval: FastTickInterval));
             retentionEvaluatorRef = retentionEvaluator;
 
@@ -215,16 +216,17 @@ public class RemontoireGrpcClusterTests {
     // Mirrors RaftReplicaHostedService.ForwardToDeadLetterAsync, simplified for this harness'
     // single-group topology (no cross-group routing needed — the dead-letter stream's own virtual
     // shard is always assigned to the same GroupId every other stream in this file uses).
-    static async Task ForwardToDeadLetterAsync(ShardAssignmentTable table, RaftReplica replica, AppendRequest request, CancellationToken cancellationToken) {
+    static async Task<bool> ForwardToDeadLetterAsync(ShardAssignmentTable table, RaftReplica replica, AppendRequest request, CancellationToken cancellationToken) {
         var deadLetterStreamName = $"{StreamName}.__deadletter__";
         if (!table.TryGetStreamConfig(deadLetterStreamName, out var config))
-            return;
+            return false;
 
         var virtualShardIndex = ShardRouter.GetVirtualShardIndex(request.PartitionKey.Span, config.VirtualShardCount, config.RoutingAlgorithm);
         if (!table.TryGetAssignment(deadLetterStreamName, virtualShardIndex, out var assignment) || assignment.GroupId != GroupId)
-            return;
+            return false;
 
         await replica.ProposeAsync(request, cancellationToken);
+        return true;
     }
 
     static RemontoireConnection Connect(IEnumerable<Node> nodes) =>
@@ -595,10 +597,14 @@ public class RemontoireGrpcClusterTests {
         return true;
     }
 
-    // Exit criterion: a stuck mandatory group forces a dead-letter forward; a best-effort
-    // group's own missing ack never blocks it.
+    // Exit criterion, first half: a stuck mandatory group forces a dead-letter forward. The
+    // second half — a best-effort group's own missing ack never blocks pruning — needs a
+    // separate test below: MandatoryGroupsLowWatermark is a minimum across mandatory groups, so
+    // with the mandatory group ALSO stuck here (as it must be, to force this test's own forward),
+    // that minimum is 0 regardless of whether best-effort correctly participates or not — this
+    // setup alone cannot tell a correct exclusion apart from a broken one.
     [Fact]
-    public async Task A_stuck_mandatory_group_forces_a_dead_letter_forward_while_a_best_effort_group_never_blocks() {
+    public async Task A_stuck_mandatory_group_forces_a_dead_letter_forward() {
         var directoryRoot = CreateTempDirectory();
         var nodes = await StartClusterAsync(directoryRoot);
         try {
@@ -633,6 +639,48 @@ public class RemontoireGrpcClusterTests {
             leader.ShardLog.TryGet(1, out var handle).Should().BeTrue();
             using (handle)
                 Encoding.UTF8.GetString(handle.Entry.Payload.Span).Should().Be("hello");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    // Exit criterion, second half: isolates it from the mandatory group's own state entirely —
+    // the mandatory group here HAS acked, so if best-effort's missing ack were (incorrectly) also
+    // pulled into MandatoryGroupsLowWatermark's minimum, the message would stay stuck at 0 and
+    // never become safe to prune. MaxRetention is deliberately long enough that forced
+    // dead-lettering could never kick in during this test's real-time window, so SafeToPruneWatermark
+    // reaching 1 can only mean it went through the real-ack path — best-effort truly never blocked.
+    [Fact]
+    public async Task A_stuck_best_effort_group_never_blocks_pruning_once_the_mandatory_group_has_acked() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            foreach (var node in nodes) {
+                var table = node.Host.Services.GetRequiredService<ShardAssignmentTable>();
+                table.Apply(new SetStreamRetentionPolicy(StreamName, AuditRetention: TimeSpan.Zero, MaxRetention: TimeSpan.FromHours(1), MaxSizeBytesPerVirtualShard: null));
+                table.Apply(new SetConsumerGroupMandatory(StreamName, "best-effort-group", false));
+            }
+
+            using var connection = Connect(nodes);
+            var published = await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
+
+            using var mandatoryCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await foreach (var message in connection.ConsumeAsync(StreamName, "mandatory-group", mandatoryCts.Token)) {
+                await connection.AckAsync(StreamName, "mandatory-group", message.ShardId, message.Offset);
+                break;
+            }
+
+            // Registered, never acked — must have zero gating effect on the mandatory group's own,
+            // already-fully-acked watermark.
+            using var bestEffortCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await foreach (var _ in connection.ConsumeAsync(StreamName, "best-effort-group", bestEffortCts.Token)) break;
+
+            var leader = nodes.First(node => node.Replica.IsLeader);
+            (await RunUntilAsync(() => leader.RetentionEvaluator.SafeToPruneWatermark == (ulong)published.Offset + 1, TimeSpan.FromSeconds(5)))
+                .Should().BeTrue("the mandatory group's own real ack alone must be enough — a stuck best-effort group must never hold this back");
+            leader.RetentionEvaluator.DeadLetterMessagesTotal.Should().Be(0, "this became safe via a real ack, never needed forcing");
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }

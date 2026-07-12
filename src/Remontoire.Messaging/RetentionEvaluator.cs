@@ -4,19 +4,19 @@ namespace Remontoire.Messaging;
 
 /// <summary>
 /// Everything <see cref="RetentionEvaluator"/> needs, bundled into one type instead of a long,
-/// duplicated parameter list — same "Options" shape as <c>RaftServerOptions</c>/<c>RemontoireClientOptions</c>
+/// duplicated parameter list — same "Options" shape used by several other composition roots
 /// elsewhere in this codebase.
 /// </summary>
 public sealed record RetentionEvaluatorOptions(
     ShardLog ShardLog, AckIndex AckIndex, Func<string, bool> IsMandatory,
-    Func<TimeSpan> GetMaxRetention, Func<AppendRequest, CancellationToken, Task> ForwardToDeadLetterAsync,
-    Func<bool> IsAdmissionPaused, TimeProvider? TimeProvider = null, TimeSpan? TickInterval = null);
+    Func<TimeSpan> GetMaxRetention, Func<AppendRequest, CancellationToken, Task<bool>> ForwardToDeadLetterAsync,
+    Func<bool> IsAdmissionPaused, Func<bool> IsLeader, TimeProvider? TimeProvider = null, TimeSpan? TickInterval = null);
 
 /// <summary>
 /// Periodically scans for messages past their stream's max-retention window that no mandatory
 /// consumer group has yet acked, forwards each to the dead-letter stream, then folds the result
 /// into <see cref="SafeToPruneWatermark"/> — the single number a caller wires into
-/// <see cref="CompactionPolicy.GetAckedLowWatermarkAsync"/>, so <see cref="Remontoire.Storage"/>
+/// <see cref="CompactionPolicy.GetAckedLowWatermarkAsync"/>, so <c>Remontoire.Storage</c>
 /// never needs to know whether a given offset became prunable via a real ack or via forced
 /// dead-lettering — both simply advance the same watermark. Reuses <see cref="ShardLog.ReadFromAsync"/>
 /// (already public, already used by consume paths) to walk candidate entries — never re-derives or
@@ -84,9 +84,19 @@ public sealed class RetentionEvaluator : IAsyncDisposable {
                             if (DateTimeOffset.FromUnixTimeMilliseconds((long)(entry.TimestampMicros / 1000)) > cutoff)
                                 break; // this entry, and everything after it, is still within the max-retention window
 
+                            if (!_options.IsLeader())
+                                break; // only the leader may propose the forward — wait for it to replicate through instead of retrying a doomed propose every tick
+
                             // Past max-retention, still not fully acked by a mandatory group — force it
-                            // through the dead-letter stream before letting the watermark cover it.
-                            await _options.ForwardToDeadLetterAsync(new AppendRequest(entry.PartitionKey, entry.Headers, entry.Payload), cancellationToken);
+                            // through the dead-letter stream before letting the watermark cover it. A
+                            // false return means no copy was actually made (an unprovisioned dead-letter
+                            // stream, an unresolvable stream name, or a non-locally-hosted target group —
+                            // all documented, silent v1 gaps) — this entry must not be treated as safe to
+                            // prune in that case, so stop here and retry next tick instead of advancing
+                            // past data that exists nowhere else.
+                            if (!await _options.ForwardToDeadLetterAsync(new AppendRequest(entry.PartitionKey, entry.Headers, entry.Payload), cancellationToken))
+                                break;
+
                             Interlocked.Increment(ref _deadLetterMessagesTotal);
                             Volatile.Write(ref _safeToPruneWatermark, entry.LogicalOffset + 1);
                         }

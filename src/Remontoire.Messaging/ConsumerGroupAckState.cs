@@ -38,8 +38,8 @@ public sealed class ConsumerGroupAckState {
     /// Every offset below this one has been confirmed by an actual Raft quorum — never advanced
     /// by <see cref="ApplyLocally"/>. The only watermark pruning/dead-lettering may ever consult:
     /// a network-partitioned, isolated former leader has no way of discovering it lost quorum
-    /// (<c>RaftReplica</c> has no leader-lease/quorum-loss detection — it only steps down on
-    /// observing a higher term from a peer it can actually reach), so it can keep believing itself
+    /// (the underlying consensus layer has no leader-lease/quorum-loss detection — it only steps
+    /// down on observing a higher term from a peer it can actually reach), so it can keep believing itself
     /// leader, and keep accepting checkpoint acks via <see cref="ApplyLocally"/>, for as long as
     /// the partition lasts. If pruning consulted <see cref="LowWatermark"/> instead, that isolated
     /// node could physically delete or dead-letter data based on acks no quorum ever agreed to —

@@ -41,8 +41,15 @@ public sealed partial class ShardAssignmentTable {
                 break;
 
             case SetStreamRetentionPolicy r:
+                // Clamped, not trusted verbatim: a negative duration would make RetentionEvaluator's
+                // own cutoff resolve into the future (dead-lettering/pruning everything immediately);
+                // a negative size ceiling would make the size-based check always true (pruning every
+                // segment). Neither is a value an operator (or a corrupted replayed record) should be
+                // able to produce — clamp to the safe "expire immediately"/"no ceiling" equivalents.
                 _retentionPolicies[r.StreamName] = GetRetentionPolicy(r.StreamName) with {
-                    AuditRetention = r.AuditRetention, MaxRetention = r.MaxRetention, MaxSizeBytesPerVirtualShard = r.MaxSizeBytesPerVirtualShard,
+                    AuditRetention = r.AuditRetention < TimeSpan.Zero ? TimeSpan.Zero : r.AuditRetention,
+                    MaxRetention = r.MaxRetention < TimeSpan.Zero ? TimeSpan.Zero : r.MaxRetention,
+                    MaxSizeBytesPerVirtualShard = r.MaxSizeBytesPerVirtualShard is < 0 ? null : r.MaxSizeBytesPerVirtualShard,
                 };
                 break;
 
@@ -51,6 +58,9 @@ public sealed partial class ShardAssignmentTable {
                     CheckpointInterval = r.Interval, CheckpointOffsetCount = r.OffsetCount,
                 };
                 break;
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown policy MetaLogRecord case.");
         }
     }
 }

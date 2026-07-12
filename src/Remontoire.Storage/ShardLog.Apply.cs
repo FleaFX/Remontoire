@@ -21,7 +21,7 @@ public sealed partial class ShardLog {
         if (committed.Record.RecordType == WalRecordType.Append && committed.Record.LogicalOffset >= _nextOffsetToApply) {
             var before = _segments;
             var (memTable, sstSegments) = await ApplyAndMaybeFlushAsync(_directory, new ShardState(_memTable, before), committed.Record, _flushThresholdBytes, CancellationToken.None);
-            _nextOffsetToApply = committed.Record.LogicalOffset + 1;
+            Volatile.Write(ref _nextOffsetToApply, committed.Record.LogicalOffset + 1);
 
             // Publish the NEW source of truth before retracting the old one — otherwise a
             // concurrent TryGet/ReadFromAsync could observe neither the (already-emptied) old

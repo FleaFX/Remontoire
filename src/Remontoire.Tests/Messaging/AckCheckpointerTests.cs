@@ -135,6 +135,24 @@ public class AckCheckpointerTests {
     }
 
     [Fact]
+    public async Task Eventually_checkpoints_even_when_no_threshold_is_configured_at_all() {
+        // (null, null) must not mean "never" — otherwise a checkpoint-mode group that never gets
+        // an explicit SetStreamCheckpointInterval never checkpoints at all: CommittedWatermark
+        // stays 0 forever, permanently blocking pruning if the group is mandatory, and losing
+        // ALL ack progress (not just "up to one interval's worth") on any failover.
+        var (ackIndex, proposals, timeProvider) = Compose();
+        ackIndex.ApplyLocal("group-1", [0]);
+
+        await using var checkpointer = new AckCheckpointer(new AckCheckpointerOptions(
+            ackIndex, Propose(proposals), IsLeader: () => true, IsCheckpointMode: _ => true,
+            GetCheckpointThresholds: () => (null, null), IsAdmissionPaused: () => false, timeProvider));
+
+        await AdvanceAndSettleAsync(timeProvider);
+
+        proposals.Should().ContainSingle("no explicit threshold must still fall back to a safe default interval, not disable checkpointing entirely");
+    }
+
+    [Fact]
     public async Task DisposeAsync_stops_the_loop() {
         var (ackIndex, proposals, timeProvider) = Compose();
         ackIndex.ApplyLocal("group-1", [0]);

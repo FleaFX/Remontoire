@@ -128,7 +128,7 @@ public abstract record MetaLogRecord {
             MetaLogRecordType.MigrationCompleted =>
                 new MigrationCompleted(new MigrationId(Guid.Parse(reader.ReadString())), reader.ReadString(), reader.ReadInt32()),
             MetaLogRecordType.SetConsumerGroupAckMode =>
-                new SetConsumerGroupAckMode(reader.ReadString(), reader.ReadString(), (AckMode)reader.ReadByte()),
+                new SetConsumerGroupAckMode(reader.ReadString(), reader.ReadString(), ReadAckMode(reader)),
             MetaLogRecordType.SetConsumerGroupMandatory =>
                 new SetConsumerGroupMandatory(reader.ReadString(), reader.ReadString(), reader.ReadBoolean()),
             MetaLogRecordType.SetStreamRetentionPolicy =>
@@ -137,6 +137,14 @@ public abstract record MetaLogRecord {
                 ReadSetStreamCheckpointInterval(reader),
             _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown MetaLogRecordType tag."),
         };
+    }
+
+    // A corrupted record, or a byte written by a future version with a third mode, must not
+    // silently decode into an undefined AckMode — downstream, neither Mode == Strict nor
+    // Mode == Checkpoint would match, an inconsistent combination neither mode intends.
+    static AckMode ReadAckMode(BinaryReader reader) {
+        var mode = (AckMode)reader.ReadByte();
+        return Enum.IsDefined(mode) ? mode : throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown AckMode value.");
     }
 
     static RegisterGroup ReadRegisterGroup(BinaryReader reader) {

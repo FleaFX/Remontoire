@@ -133,5 +133,18 @@ public class MetaLogRecordTests {
 
             act.Should().Throw<ArgumentOutOfRangeException>();
         }
+
+        [Fact]
+        public void Throws_for_an_unrecognized_AckMode_byte() {
+            // A corrupted record, or a byte written by a future version with a third mode, must
+            // not silently decode into an undefined AckMode — downstream, neither Mode == Strict
+            // nor Mode == Checkpoint would match, an inconsistent combination neither mode intends.
+            var bytes = MetaLogRecord.Encode(new SetConsumerGroupAckMode("orders", "billing", AckMode.Checkpoint));
+            bytes[^1] = 255; // the AckMode byte is encoded last for this record type
+
+            var act = () => MetaLogRecord.Decode(bytes);
+
+            act.Should().Throw<ArgumentOutOfRangeException>();
+        }
     }
 }

@@ -11,6 +11,14 @@ namespace Remontoire.Storage.Compaction;
 /// </summary>
 sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox, TimeProvider? timeProvider = null, TimeSpan? tickInterval = null) {
     static readonly TimeSpan DefaultTickInterval = TimeSpan.FromMinutes(5);
+    long _failedTicksTotal;
+
+    /// <summary>
+    /// Running count of ticks that failed (e.g. a corrupt or locked segment) and were silently
+    /// retried next tick — otherwise a persistently broken emergency-pruning path (exactly the
+    /// scenario it exists to guard against — a full disk) would have no observable signal at all.
+    /// </summary>
+    public long FailedTicksTotal => Volatile.Read(ref _failedTicksTotal);
 
     /// <summary>
     /// Loops until the actor's mailbox closes (normal shutdown).
@@ -19,33 +27,35 @@ sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Fun
         var timeProviderOrDefault = timeProvider ?? TimeProvider.System;
         var interval = tickInterval ?? DefaultTickInterval;
 
-        while (true) {
-            try {
+        try {
+            while (true) {
                 await Task.Delay(interval, timeProviderOrDefault, cancellationToken);
-            } catch (OperationCanceledException) {
-                return;
+
+                try {
+                    if (isAdmissionPaused?.Invoke() ?? false)
+                        continue;
+
+                    // Re-evaluated every tick, not resolved once — the real ceiling may not be known
+                    // yet at the moment this worker started (see RetentionPolicy.GetMaxTotalBytesPerVirtualShard's
+                    // own remarks); a null tick here is a skip, never a permanent disable.
+                    if (getMaxTotalBytes() is not { } maxTotalBytes)
+                        continue;
+
+                    var deletedPaths = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes, cancellationToken);
+                    if (deletedPaths.Count == 0)
+                        continue;
+
+                    if (!mailbox.TryWrite(new SizePruneCompleted(deletedPaths)))
+                        return; // mailbox closed in the meantime — the result is simply discarded, harmless
+                } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                    // A transient failure mid-tick must never permanently kill this loop — nothing
+                    // else would ever restart it. Best-effort: try again next tick.
+                    Interlocked.Increment(ref _failedTicksTotal);
+                }
             }
-
-            try {
-                if (isAdmissionPaused?.Invoke() ?? false)
-                    continue;
-
-                // Re-evaluated every tick, not resolved once — the real ceiling may not be known
-                // yet at the moment this worker started (see RetentionPolicy.GetMaxTotalBytesPerVirtualShard's
-                // own remarks); a null tick here is a skip, never a permanent disable.
-                if (getMaxTotalBytes() is not { } maxTotalBytes)
-                    continue;
-
-                var deletedPaths = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes, cancellationToken);
-                if (deletedPaths.Count == 0)
-                    continue;
-
-                if (!mailbox.TryWrite(new SizePruneCompleted(deletedPaths)))
-                    return; // mailbox closed in the meantime — the result is simply discarded, harmless
-            } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
-                // A transient failure mid-tick must never permanently kill this loop — nothing
-                // else would ever restart it. Best-effort: try again next tick.
-            }
+        } catch (OperationCanceledException) {
+            // Expected shutdown path — cancellation can land here whether the loop was idling in
+            // Task.Delay or mid-tick inside the prune itself; both must exit cleanly, not fault.
         }
     }
 }

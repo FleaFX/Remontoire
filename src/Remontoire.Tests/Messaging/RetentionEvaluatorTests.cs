@@ -27,7 +27,7 @@ public class RetentionEvaluatorTests {
 
             await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
-                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -56,7 +56,7 @@ public class RetentionEvaluatorTests {
 
             await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => MaxRetention,
-                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -83,7 +83,7 @@ public class RetentionEvaluatorTests {
 
             await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
-                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -110,7 +110,7 @@ public class RetentionEvaluatorTests {
 
             await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => MaxRetention,
-                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -139,13 +139,71 @@ public class RetentionEvaluatorTests {
             // computing utcNow - MaxValue must not throw and silently kill every future tick.
             await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => TimeSpan.MaxValue,
-                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, timeProvider));
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
             await AdvanceAndSettleAsync(timeProvider);
 
             forwarded.Should().BeEmpty("unbounded retention must never force a dead-letter forward");
             evaluator.SafeToPruneWatermark.Should().Be(1, "already covered by the mandatory watermark — an unbounded MaxRetention must not stall this");
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Never_forwards_on_a_follower_even_past_max_retention() {
+        // Only the leader may propose the dead-letter forward. Without this gate, a follower
+        // retries a doomed propose every tick forever (swallowed by the tick's own catch-all),
+        // permanently stuck at the first such offset instead of just waiting for the leader's
+        // own forward to eventually replicate through.
+        var directory = CreateTempDirectory();
+        try {
+            var timeProvider = new FakeTimeProvider();
+            var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - MaxRetention - TimeSpan.FromHours(1));
+            await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+            var ackIndex = new AckIndex();
+            var forwarded = new ConcurrentQueue<AppendRequest>();
+
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
+            await WaitForVisibleAsync(shardLog, 0);
+
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => false, timeProvider));
+
+            await AdvanceAndSettleAsync(timeProvider);
+
+            forwarded.Should().BeEmpty("only the leader may propose a dead-letter forward");
+            evaluator.DeadLetterMessagesTotal.Should().Be(0);
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Never_advances_the_watermark_when_the_forward_silently_did_nothing() {
+        // A false return means the dead-letter stream wasn't provisioned, the stream name couldn't
+        // be resolved, or the target group isn't hosted locally — all documented, silent v1 gaps.
+        // The message must NOT be treated as safe to prune in that case: no copy exists anywhere.
+        var directory = CreateTempDirectory();
+        try {
+            var timeProvider = new FakeTimeProvider();
+            var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - MaxRetention - TimeSpan.FromHours(1));
+            await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+            var ackIndex = new AckIndex();
+
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "hello world")));
+            await WaitForVisibleAsync(shardLog, 0);
+
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: (_, _) => Task.FromResult(false), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
+
+            await AdvanceAndSettleAsync(timeProvider);
+
+            evaluator.DeadLetterMessagesTotal.Should().Be(0, "no copy was actually made — this must not be counted as a successful dead-letter");
+            evaluator.SafeToPruneWatermark.Should().Be(0, "the message was never actually preserved anywhere — it is not safe to prune");
         } finally {
             Directory.Delete(directory, recursive: true);
         }
@@ -166,7 +224,7 @@ public class RetentionEvaluatorTests {
 
             await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 shardLog, ackIndex, IsMandatory: _ => true, GetMaxRetention: () => MaxRetention,
-                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => true, timeProvider));
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => true, IsLeader: () => true, timeProvider));
 
             await AdvanceAndSettleAsync(timeProvider);
 
@@ -177,10 +235,10 @@ public class RetentionEvaluatorTests {
         }
     }
 
-    static Func<AppendRequest, CancellationToken, Task> Forward(ConcurrentQueue<AppendRequest> forwarded) =>
+    static Func<AppendRequest, CancellationToken, Task<bool>> Forward(ConcurrentQueue<AppendRequest> forwarded) =>
         (request, _) => {
             forwarded.Enqueue(request);
-            return Task.CompletedTask;
+            return Task.FromResult(true);
         };
 
     static ulong ToMicros(DateTimeOffset at) => (ulong)at.ToUnixTimeMilliseconds() * 1000;

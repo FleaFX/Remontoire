@@ -65,6 +65,12 @@ public sealed partial class ShardLog : IAsyncDisposable {
     internal bool TryPost(ShardLogMessage message) => _mailbox.Writer.TryWrite(message);
 
     /// <summary>
+    /// One past the highest logical offset this log has actually applied — callers can use this
+    /// as an upper bound to reject offsets that don't refer to any message that actually exists yet.
+    /// </summary>
+    public ulong NextOffsetToApply => Volatile.Read(ref _nextOffsetToApply);
+
+    /// <summary>
     /// Shuts down in the order that guarantees every message already sitting in the mailbox is
     /// applied before anything stops. The committed-source itself is owned by its caller — this
     /// never disposes or completes it, only stops reading from it.

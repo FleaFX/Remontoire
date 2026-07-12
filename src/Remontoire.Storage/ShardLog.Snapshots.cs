@@ -67,7 +67,7 @@ public sealed partial class ShardLog {
 
         Volatile.Write(ref _segments, newSegments);
         Volatile.Write(ref _memTable, new MemTable());
-        _nextOffsetToApply = message.NextOffsetToApply;
+        Volatile.Write(ref _nextOffsetToApply, message.NextOffsetToApply);
 
         // Safe to delete immediately even if a concurrent TryGet/ReadFromAsync still holds one
         // of these open (FileShare.Delete — same precedent as CompactionPlan.MergeAsync), but

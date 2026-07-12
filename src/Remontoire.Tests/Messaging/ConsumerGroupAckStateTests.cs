@@ -147,20 +147,27 @@ public class ConsumerGroupAckStateTests {
 
     public class Concurrency {
         [Fact]
-        public void Concurrent_Ack_and_AdvanceWatermarkTo_never_corrupts_state() {
+        public void Concurrent_Ack_AdvanceWatermarkTo_and_ApplyLocally_never_corrupts_state() {
+            // ApplyLocally is the one genuinely concurrent second writer the lock exists for
+            // (checkpoint-mode gRPC threads, racing the replay loop's Ack/AdvanceWatermarkTo) —
+            // a prior version of this test never exercised it at all.
             var state = new ConsumerGroupAckState();
             const int offsetCount = 2000;
 
             Parallel.For(0, offsetCount, i => {
-                if (i % 50 == 0)
-                    state.AdvanceWatermarkTo((ulong)i);
-                else
-                    state.Ack([(ulong)i]);
+                switch (i % 3) {
+                    case 0: state.AdvanceWatermarkTo((ulong)i); break;
+                    case 1: state.ApplyLocally([(ulong)i]); break;
+                    default: state.Ack([(ulong)i]); break;
+                }
             });
 
-            // No crash, no exception, and the watermark must end up somewhere sane: at most
-            // offsetCount (everything acked or checkpointed), never negative/wrapped.
+            // No crash, no exception, both watermarks land somewhere sane (at most offsetCount),
+            // and — the core invariant a prior review bug broke — CommittedWatermark never
+            // exceeds LowWatermark: it may only advance through offsets Ack/AdvanceWatermarkTo
+            // themselves committed, never by borrowing ApplyLocally's local-only progress.
             state.LowWatermark.Should().BeLessThanOrEqualTo(offsetCount);
+            state.CommittedWatermark.Should().BeLessThanOrEqualTo(state.LowWatermark);
         }
     }
 }

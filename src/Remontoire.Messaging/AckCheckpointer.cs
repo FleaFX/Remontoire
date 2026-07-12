@@ -2,7 +2,7 @@ namespace Remontoire.Messaging;
 
 /// <summary>
 /// Everything <see cref="AckCheckpointer"/> needs, bundled into one type instead of a long,
-/// duplicated parameter list — same "Options" shape as <c>RaftServerOptions</c>/<c>RemontoireClientOptions</c>
+/// duplicated parameter list — same "Options" shape used by several other composition roots
 /// elsewhere in this codebase.
 /// </summary>
 public sealed record AckCheckpointerOptions(
@@ -21,6 +21,11 @@ public sealed record AckCheckpointerOptions(
 /// </summary>
 public sealed class AckCheckpointer : IAsyncDisposable {
     static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1);
+    // (Interval: null, OffsetCount: null) must not mean "never checkpoint" — without it, a
+    // checkpoint-mode group that never gets an explicit SetStreamCheckpointInterval would never
+    // checkpoint at all, permanently blocking pruning (if mandatory) and losing ALL ack progress
+    // on any failover, not just "up to one interval's worth" as the mode's own contract promises.
+    static readonly TimeSpan DefaultCheckpointInterval = TimeSpan.FromSeconds(30);
 
     readonly CancellationTokenSource _cts = new();
     readonly Task _loop;
@@ -50,6 +55,9 @@ public sealed class AckCheckpointer : IAsyncDisposable {
                     continue;
 
                 var (interval, offsetCount) = options.GetCheckpointThresholds();
+                // Only fall back when NEITHER threshold is set — an operator who explicitly chose
+                // a count-only threshold must not also get a silent, unrequested time-based one.
+                var effectiveInterval = interval ?? (offsetCount is null ? DefaultCheckpointInterval : null);
                 foreach (var consumerGroup in options.AckIndex.RegisteredConsumerGroups()) {
                     if (!options.IsCheckpointMode(consumerGroup))
                         continue;
@@ -63,7 +71,7 @@ public sealed class AckCheckpointer : IAsyncDisposable {
                         continue; // nothing new to checkpoint for this group
 
                     var dueByCount = offsetCount is { } count && watermark - lastWatermark >= (ulong)count;
-                    var dueByTime = interval is { } iv && timeProvider.GetUtcNow() - lastAt >= iv;
+                    var dueByTime = effectiveInterval is { } iv && timeProvider.GetUtcNow() - lastAt >= iv;
                     if (!dueByCount && !dueByTime)
                         continue;
 

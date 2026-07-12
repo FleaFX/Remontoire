@@ -126,29 +126,28 @@ static class Compactor {
     /// paths so a caller (<see cref="ShardLog"/>'s actor) can keep its own segment list in sync —
     /// this method never touches any in-memory state itself.
     /// </summary>
-    public static async Task<IReadOnlyList<string>> PruneOldestUntilUnderSizeAsync(string directory, long maxTotalBytes, CancellationToken cancellationToken = default) {
-        // Reuses LoadCandidatesAsync purely for its file-enumeration + oldest-first-by-MinOffset
-        // sort — MaxAge is irrelevant to this mode (deliberately null: size-based emergency
-        // pruning never waits for age).
-        var candidates = await LoadCandidatesAsync(directory, new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null), cancellationToken);
-
-        var totalBytes = candidates.Sum(c => new FileInfo(c.Path).Length);
+    public static Task<IReadOnlyList<string>> PruneOldestUntilUnderSizeAsync(string directory, long maxTotalBytes, CancellationToken cancellationToken = default) {
+        // Oldest-first by filename alone — segment-<MinOffset:D20>.sst's zero-padded offset
+        // already sorts correctly in plain lexicographic order, so nothing here ever needs to
+        // open a segment just to answer a size check (MinOffset/MaxOffset, the only reason
+        // LoadCandidatesAsync would open one, are never used below — only each file's path and
+        // size are).
+        var paths = Directory.EnumerateFiles(directory, "*.sst").OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        var totalBytes = paths.Sum(path => new FileInfo(path).Length);
         var deleted = new List<string>();
 
-        foreach (var candidate in candidates) {
-            if (totalBytes <= maxTotalBytes) {
-                candidate.Segment.Dispose(); // opened to inspect, not chosen for deletion — release the handle
-                continue;
-            }
+        foreach (var path in paths) {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (totalBytes <= maxTotalBytes)
+                break;
 
-            var size = new FileInfo(candidate.Path).Length;
-            candidate.Segment.Dispose();
-            File.Delete(candidate.Path);
-            deleted.Add(candidate.Path);
+            var size = new FileInfo(path).Length;
+            File.Delete(path);
+            deleted.Add(path);
             totalBytes -= size;
         }
 
-        return deleted;
+        return Task.FromResult<IReadOnlyList<string>>(deleted);
     }
 }
 

@@ -124,7 +124,8 @@ sealed class RaftReplicaHostedService(
                     || assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mandatory,
                 GetMaxRetention: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName ? assignmentTable.GetRetentionPolicy(streamName).MaxRetention : TimeSpan.MaxValue,
                 ForwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(ResolveStreamNameForGroup(group.GroupId), request, ct),
-                IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId)));
+                IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId),
+                IsLeader: () => replica.IsLeader));
         }
 
         if (raftOptions.MetaGroup is { } metaOptions) {
@@ -194,6 +195,8 @@ sealed class RaftReplicaHostedService(
             await log.DisposeAsync();
     }
 
+    const string DeadLetterStreamSuffix = ".__deadletter__";
+
     // A physical group carries no stream name of its own (neither WalRecord nor RaftGroupOptions
     // does) — the only way to answer "which stream does this group serve" is a reverse scan of the
     // shard-assignment table's own assignments. Deliberately re-run on every call rather than
@@ -202,26 +205,46 @@ sealed class RaftReplicaHostedService(
     // forever instead of self-healing once the table catches up. Cheap enough for that: an
     // in-memory scan, called at most once per periodic tick, never per request.
     string? ResolveStreamNameForGroup(string groupId) =>
-        assignmentTable.EnumerateAssignments().FirstOrDefault(a => a.GroupId == groupId).StreamName;
+        PickPrimaryStreamName(assignmentTable.EnumerateAssignments().Where(a => a.GroupId == groupId));
+
+    // A group can end up serving more than one stream once a dead-letter stream is provisioned
+    // onto the same physical group as its own source (§4.4's own v1 convention) — a plain
+    // FirstOrDefault would then resolve to whichever one ConcurrentDictionary's unordered
+    // enumeration happens to yield first, silently applying the wrong stream's retention/
+    // checkpoint policy. Prefer the real source stream over its own dead-letter shadow; extracted
+    // as its own static method so the tie-break rule is directly testable, independent of the
+    // table's actual iteration order.
+    internal static string? PickPrimaryStreamName(IEnumerable<VirtualShardAssignment> candidates) {
+        string? first = null;
+        foreach (var candidate in candidates) {
+            first ??= candidate.StreamName;
+            if (!candidate.StreamName.EndsWith(DeadLetterStreamSuffix))
+                return candidate.StreamName;
+        }
+
+        return first;
+    }
 
     // The one place that can resolve where a dead-letter stream's own virtual shard currently
     // lives — RetentionEvaluator (Remontoire.Messaging) has no reference to Remontoire.Sharding to
-    // do this itself. Fails silently (never forwards) when the destination isn't hosted on this
+    // do this itself. Returns false (never forwards) when the destination isn't hosted on this
     // node, or the dead-letter stream was never provisioned — both explicitly accepted v1 gaps
-    // (§4.4/§6.3), not a crash.
-    async Task ForwardToDeadLetterAsync(string? streamName, AppendRequest request, CancellationToken cancellationToken) {
+    // (§4.4/§6.3), not a crash — so the caller knows no copy was actually made and must not treat
+    // the source message as safe to prune.
+    async Task<bool> ForwardToDeadLetterAsync(string? streamName, AppendRequest request, CancellationToken cancellationToken) {
         if (streamName is null)
-            return;
+            return false;
 
-        var deadLetterStreamName = $"{streamName}.__deadletter__";
+        var deadLetterStreamName = $"{streamName}{DeadLetterStreamSuffix}";
         if (!assignmentTable.TryGetStreamConfig(deadLetterStreamName, out var config))
-            return;
+            return false;
 
         var virtualShardIndex = ShardRouter.GetVirtualShardIndex(request.PartitionKey.Span, config.VirtualShardCount, config.RoutingAlgorithm);
         if (!assignmentTable.TryGetAssignment(deadLetterStreamName, virtualShardIndex, out var assignment) ||
             !_replicas.TryGetValue(assignment.GroupId, out var replica))
-            return;
+            return false;
 
         await replica.ProposeAsync(request, cancellationToken);
+        return true;
     }
 }

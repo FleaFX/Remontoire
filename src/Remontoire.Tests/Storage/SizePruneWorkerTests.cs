@@ -81,6 +81,49 @@ public class SizePruneWorkerTests {
     }
 
     [Fact]
+    public async Task Never_faults_the_loop_when_cancellation_races_the_prune_itself() {
+        // Unlike AckCheckpointer/RetentionEvaluator, this loop had no outer OperationCanceledException
+        // catch around the whole while(true) — only around the idle Task.Delay. A cancellation that
+        // lands while the prune itself is in flight (not just while idling) must still shut the
+        // loop down cleanly rather than faulting RunAsync's own Task.
+        var directory = CreateTempDirectory();
+        try {
+            var path = await WriteSegmentAsync(directory, SampleEntries(0, 5));
+            var (mailbox, posted, timeProvider) = Compose();
+            using var cts = new CancellationTokenSource();
+            var worker = new SizePruneWorker(directory, getMaxTotalBytes: () => { cts.Cancel(); return 0; }, isAdmissionPaused: null, mailbox, timeProvider);
+            var run = worker.RunAsync(cts.Token);
+
+            await AdvanceAndSettleAsync(timeProvider);
+
+            var act = async () => await run;
+            await act.Should().NotThrowAsync("cancellation racing the prune's own work must shut the loop down cleanly, not fault it");
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Counts_a_persistently_failing_tick_instead_of_leaving_it_unobservable() {
+        // A persistently broken emergency-pruning path (a corrupt/locked segment, here simulated
+        // via a directory that no longer exists) must be observable, not silently retried forever
+        // with zero signal — exactly the scenario this worker exists to guard against (a full disk).
+        var missingDirectory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName()); // never created
+        var (mailbox, posted, timeProvider) = Compose();
+        using var cts = new CancellationTokenSource();
+        var worker = new SizePruneWorker(missingDirectory, getMaxTotalBytes: () => 0, isAdmissionPaused: null, mailbox, timeProvider);
+        var run = worker.RunAsync(cts.Token);
+
+        await AdvanceAndSettleAsync(timeProvider);
+        await AdvanceAndSettleAsync(timeProvider);
+
+        worker.FailedTicksTotal.Should().Be(2, "each failing tick must be counted, not silently swallowed");
+        posted.Should().BeEmpty();
+
+        await StopAsync(cts, run);
+    }
+
+    [Fact]
     public async Task Never_ticks_while_admission_is_paused() {
         var directory = CreateTempDirectory();
         try {
