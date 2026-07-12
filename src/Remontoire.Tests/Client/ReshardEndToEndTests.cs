@@ -175,9 +175,15 @@ public class ReshardEndToEndTests {
             // caught up on its server-side table before any publish is attempted. If this ever
             // times out, it isolates the failure to the watcher/journal path specifically, rather
             // than leaving it indistinguishable from any other publish-retry exhaustion.
+            // Checks BOTH TryGetStreamConfig (fed by CreateStream) and TryGetAssignment (fed by
+            // MigrationStarted/Cutover) — two independent dictionaries inside ShardAssignmentTable
+            // with no cross-validation, so one becoming visible never guarantees the other already
+            // is (confirmed via a real CI failure: Publish's own NotFound check, which reads
+            // TryGetStreamConfig first, fired even though an assignment-only precondition here had
+            // already passed).
             var fromGroupTable = fromGroup.Host.Services.GetRequiredService<ShardAssignmentTable>();
-            (await RunUntilAsync(() => fromGroupTable.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == FromGroupId, TimeSpan.FromSeconds(30)))
-                .Should().BeTrue("fromGroup's own watcher must see the stream/group assignment before any publish can ever succeed");
+            (await RunUntilAsync(() => fromGroupTable.TryGetStreamConfig(StreamName, out _) && fromGroupTable.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == FromGroupId, TimeSpan.FromSeconds(30)))
+                .Should().BeTrue("fromGroup's own watcher must see the stream config and the group assignment before any publish can ever succeed");
 
             using var connection = new RemontoireConnection(new RemontoireClientOptions(
                 MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));

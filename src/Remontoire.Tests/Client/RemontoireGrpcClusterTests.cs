@@ -711,8 +711,17 @@ public class RemontoireGrpcClusterTests {
                 .Should().BeTrue("flushThresholdBytes: 1 forces at least the first entry to flush almost immediately");
 
             // Sized off the real, current directory size, not a guessed constant — small enough
-            // that at least the oldest offset must go.
-            var currentTotalBytes = Directory.GetFiles(leader.DataDirectory, "*.sst").Sum(path => new FileInfo(path).Length);
+            // that at least the oldest offset must go. A background compaction/retention pass
+            // (real workers, ticking every 200ms in this harness) can delete or merge one of these
+            // files between listing them and stat'ing it — treat a since-vanished file as 0 bytes
+            // rather than letting a bare FileInfo.Length throw.
+            var currentTotalBytes = Directory.GetFiles(leader.DataDirectory, "*.sst").Sum(path => {
+                try {
+                    return new FileInfo(path).Length;
+                } catch (FileNotFoundException) {
+                    return 0L;
+                }
+            });
             var ceiling = currentTotalBytes / 2;
 
             foreach (var node in nodes) {
