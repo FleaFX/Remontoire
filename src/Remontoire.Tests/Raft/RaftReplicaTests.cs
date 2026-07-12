@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FluentAssertions;
 using Google.Protobuf;
 using Remontoire.Raft.V1;
@@ -930,6 +931,37 @@ public class RaftReplicaTests {
 
             replica.HasActiveLeaderContact.Should().BeTrue();
             replica.LeaderKnownCommitIndex.Should().Be(5);
+        }
+
+        // Regression coverage for a real, codebase-specific gotcha: the actor loop runs on its own
+        // detached Task.Run, so ambient Activity.Current there reflects whatever last ran on that
+        // background thread, never the caller's own request-scoped Activity. If ProposeAsync ever
+        // stopped explicitly capturing and threading the caller's ActivityContext through the
+        // message (relying on ambient Activity.Current instead), this test would catch it: the
+        // wal-append/raft-replicate spans would come back with no parent at all.
+        [Fact]
+        public async Task ProposeAsync_threads_the_callers_ActivityContext_to_the_wal_append_and_raft_replicate_spans() {
+            var recorded = new List<Activity>();
+            using var listener = new ActivityListener {
+                ShouldListenTo = _ => true,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+                ActivityStopped = recorded.Add,
+            };
+            ActivitySource.AddActivityListener(listener);
+
+            using var callerSource = new ActivitySource("Remontoire.Tests.RaftReplica");
+            using var callerActivity = callerSource.StartActivity("caller")!;
+
+            var (replica, _) = await StartAsync("node-1"); // single-node group -> immediate leader
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration));
+            await replica.DrainAsync();
+
+            await replica.ProposeAsync(new AppendRequest(ReadOnlyMemory<byte>.Empty, [], "hello"u8.ToArray()));
+
+            var walAppend = recorded.Should().ContainSingle(a => a.OperationName == "wal-append").Which;
+            var raftReplicate = recorded.Should().ContainSingle(a => a.OperationName == "raft-replicate").Which;
+            walAppend.ParentSpanId.Should().Be(callerActivity.SpanId);
+            raftReplicate.ParentSpanId.Should().Be(callerActivity.SpanId);
         }
     }
 }

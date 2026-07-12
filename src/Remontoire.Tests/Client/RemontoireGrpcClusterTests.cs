@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text;
@@ -344,6 +345,42 @@ public class RemontoireGrpcClusterTests {
             messages[0].Payload.ToArray().Should().Equal("hello"u8.ToArray());
 
             await connection.AckAsync(StreamName, "group-a", messages[0].ShardId, messages[0].Offset);
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    // ASP.NET Core only actually creates its own built-in per-request Activity when at least one
+    // ActivityListener is listening process-wide — without this, Activity.Current stays null
+    // inside Publish's handler even over a real request, and no correlation-id ever gets injected.
+    [Fact]
+    public async Task Publish_without_a_caller_supplied_correlation_header_stores_the_current_trace_id_as_the_header() {
+        using var listener = new ActivityListener {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            using var connection = Connect(nodes);
+            await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
+
+            var messages = new List<RemontoireMessage>();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await foreach (var message in connection.ConsumeAsync(StreamName, "group-a", cts.Token)) {
+                messages.Add(message);
+                break;
+            }
+
+            messages.Should().HaveCount(1);
+            messages[0].Headers.Should().ContainKey("correlation-id");
+            // W3C traceparent shape ("00-{32 hex}-{16 hex}-{2 hex}"), the exact string
+            // Activity.Current?.Id already produces — not just any non-empty value.
+            messages[0].Headers["correlation-id"].Should().MatchRegex("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$");
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }

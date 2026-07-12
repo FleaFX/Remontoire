@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
@@ -30,6 +32,12 @@ public sealed class RemontoireClientGrpcService(
     RaftReplicaRegistry raftRegistry, MessagingGroupRegistry messagingRegistry, LeaderAddressDirectory leaderAddresses,
     ShardAssignmentTable assignmentTable, MigrationAdmissionGate admissionGate)
     : RemontoireClient.RemontoireClientBase {
+    // The header key a message's own correlation-id rides under — durably stored alongside the
+    // message (the existing free-form headers mechanism), so a later Consume/Ack of that same
+    // message can recover the same value. Unified with OpenTelemetry's own trace-id (see Publish
+    // below) rather than inventing a second, parallel id scheme.
+    internal const string CorrelationIdHeaderKey = "correlation-id";
+
     /// <inheritdoc />
     public override async Task<PublishReply> Publish(PublishRequest request, ServerCallContext context) {
         if (!assignmentTable.TryGetStreamConfig(request.StreamName, out var config))
@@ -43,10 +51,14 @@ public sealed class RemontoireClientGrpcService(
         if (admissionGate.IsPaused(replica.GroupId))
             return new PublishReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } };
 
-        var appendRequest = new AppendRequest(
-            request.PartitionKey.Memory,
-            request.Headers.Select(header => new Header(header.Key.Memory, header.Value.Memory)).ToArray(),
-            request.Payload.Memory);
+        var headers = request.Headers.Select(header => new Header(header.Key.Memory, header.Value.Memory)).ToList();
+        // If the caller didn't already supply its own correlation-id, the current trace-id doubles
+        // as one for this message — every later Consume/Ack of it can then link back to this same
+        // Publish trace, even though tracing itself never forces one unbroken trace across both.
+        if (Activity.Current?.Id is { } currentTraceparent && !headers.Any(header => HeaderKeyEquals(header, CorrelationIdHeaderKey)))
+            headers.Add(new Header(Encoding.UTF8.GetBytes(CorrelationIdHeaderKey), Encoding.UTF8.GetBytes(currentTraceparent)));
+
+        var appendRequest = new AppendRequest(request.PartitionKey.Memory, headers, request.Payload.Memory);
 
         try {
             var result = await replica.ProposeAsync(appendRequest, context.CancellationToken);
@@ -153,10 +165,38 @@ public sealed class RemontoireClientGrpcService(
         }
 
         var watermark = ackIndex.GetOrCreate(request.ConsumerGroup).LowWatermark; // exclusive — already the first not-yet-acked offset
-        await foreach (var handle in ReadLiveAsync(shardLog, watermark, context.CancellationToken))
-            using (handle)
+        await foreach (var handle in ReadLiveAsync(shardLog, watermark, context.CancellationToken)) {
+            using (handle) {
+                LinkToStoredCorrelationContext(handle.Entry.Headers);
                 await responseStream.WriteAsync(new ConsumeReply { Message = ToProto(handle.Entry) });
+            }
+        }
     }
+
+    // A message's own stored correlation-id (set once, at Publish time — see CorrelationIdHeaderKey
+    // above) becomes a Link, never a parent, on this Consume call's own trace: a trace that stayed
+    // open from Publish until a possibly-much-later, possibly-repeated, possibly-never-arriving
+    // Consume wouldn't match how tracing backends expect a trace's lifetime to behave, and a Link
+    // is the only shape that survives independent consumer groups each reading the same message at
+    // their own, unrelated time.
+    internal static void LinkToStoredCorrelationContext(IReadOnlyList<Header> headers) {
+        if (Activity.Current is not { } activity)
+            return;
+
+        foreach (var header in headers) {
+            if (!HeaderKeyEquals(header, CorrelationIdHeaderKey))
+                continue;
+
+            var traceparent = Encoding.UTF8.GetString(header.Value.Span);
+            if (ActivityContext.TryParse(traceparent, traceState: null, out var linkedContext))
+                activity.AddLink(new ActivityLink(linkedContext));
+
+            return;
+        }
+    }
+
+    static bool HeaderKeyEquals(Header header, string key) =>
+        Encoding.UTF8.GetByteCount(key) == header.Key.Length && Encoding.UTF8.GetString(header.Key.Span) == key;
 
     // Follower reads are safe by construction (State Machine Safety: whatever a follower has
     // already applied is identical to what the leader applied), just possibly a fraction behind

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Remontoire.Messaging;
 using Remontoire.Meta.V1;
+using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Sharding;
@@ -81,7 +82,10 @@ sealed class RaftReplicaHostedService(
                 ElectionTimeoutMin: TimeSpan.FromMilliseconds(250),
                 ElectionTimeoutMax: TimeSpan.FromMilliseconds(500));
 
-            var log = await WalRaftLog.OpenAsync(group.DataDirectory, cancellationToken: cancellationToken);
+            var log = await WalRaftLog.OpenAsync(group.DataDirectory,
+                onFsyncDurationMeasured: duration => RemontoireMetrics.WalFsyncDurationSeconds.Record(duration.TotalSeconds,
+                    new KeyValuePair<string, object?>("shard", group.GroupId)),
+                cancellationToken: cancellationToken);
             _logs[group.GroupId] = log; // tracked immediately — StopAsync must be able to reach it even if a later step here throws
             var stateStore = new FileRaftStateStore(group.DataDirectory);
 
@@ -100,7 +104,9 @@ sealed class RaftReplicaHostedService(
             // be circular. By the time this delegate is ever actually called, the dictionary entry
             // below is long since populated.
             var compactionPolicy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null,
-                GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(_retentionEvaluators[group.GroupId].SafeToPruneWatermark));
+                GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(_retentionEvaluators[group.GroupId].SafeToPruneWatermark),
+                OnCompactionDurationMeasured: duration => RemontoireMetrics.SegmentCompactionDurationSeconds.Record(duration.TotalSeconds,
+                    new KeyValuePair<string, object?>("shard", group.GroupId)));
 
             // Re-resolved every tick rather than fixed at construction — see ResolveStreamNameForGroup's
             // own remarks: this group's assignment isn't known yet at this point in StartAsync (the

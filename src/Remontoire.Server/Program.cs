@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using OpenTelemetry.Trace;
 using Remontoire.Raft.Grpc;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
@@ -31,6 +32,21 @@ builder.Services.AddHealthChecks()
     .AddCheck<RaftLivenessCheck>("raft-liveness", tags: ["live"])
     .AddCheck<RaftReadinessCheck>("raft-readiness", tags: ["ready"])
     .AddCheck<DiskSpaceReadinessCheck>("disk-space", tags: ["ready"]);
+
+// AddAspNetCoreInstrumentation covers Publish/Ack/Consume and the Raft transport's own server side
+// for free (both are plain Grpc.AspNetCore services). AddGrpcClientInstrumentation covers
+// Remontoire.Client and RaftGrpcTransport's peer-to-peer replication calls for free (both ride
+// Grpc.Net.Client), including automatic W3C trace-context propagation over gRPC metadata — no
+// manual code needed for either. AddSource("Remontoire.Raft") picks up the wal-append/
+// raft-replicate spans RaftActivitySource starts manually, since those live inside one method call,
+// not at an RPC boundary auto-instrumentation could ever see. Exporter: console, a zero-infra
+// starting point — swapping in OTLP-to-a-collector later needs no code change beyond this one line.
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddGrpcClientInstrumentation()
+        .AddSource("Remontoire.Raft")
+        .AddConsoleExporter());
 
 var app = builder.Build();
 

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Text;
 using Remontoire.Raft.V1;
 using Remontoire.Storage;
@@ -16,7 +17,10 @@ public sealed partial class RaftReplica {
         ValidateRequest(request);
 
         var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var accepted = _channel.Writer.TryWrite(new ProposeReceived(request, completion));
+        // Captured here, not re-derived on the actor loop: that loop runs on its own detached
+        // Task.Run, so Activity.Current there reflects whatever last ran on that background thread,
+        // never the caller's own request-scoped Activity.
+        var accepted = _channel.Writer.TryWrite(new ProposeReceived(request, completion, Activity.Current?.Context));
         ObjectDisposedException.ThrowIf(!accepted, this);
 
         return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
@@ -32,7 +36,7 @@ public sealed partial class RaftReplica {
         ValidateRequest(request);
 
         var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var accepted = _channel.Writer.TryWrite(new ProposeAckReceived(request, completion));
+        var accepted = _channel.Writer.TryWrite(new ProposeAckReceived(request, completion, Activity.Current?.Context));
         ObjectDisposedException.ThrowIf(!accepted, this);
 
         return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
@@ -48,7 +52,7 @@ public sealed partial class RaftReplica {
         ValidateRequest(request);
 
         var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var accepted = _channel.Writer.TryWrite(new ProposeAckCheckpointReceived(request, completion));
+        var accepted = _channel.Writer.TryWrite(new ProposeAckCheckpointReceived(request, completion, Activity.Current?.Context));
         ObjectDisposedException.ThrowIf(!accepted, this);
 
         return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
@@ -106,26 +110,26 @@ public sealed partial class RaftReplica {
     async Task HandleProposeReceivedAsync(ProposeReceived message) {
         var request = message.Request;
         await ProposeRecordAsync(WalRecordType.Append, request.PartitionKey, request.Headers, request.Payload,
-            consumesLogicalOffset: true, message.Reply);
+            consumesLogicalOffset: true, message.Reply, message.CallerContext);
     }
 
     async Task HandleProposeAckReceivedAsync(ProposeAckReceived message) {
         var request = message.Request;
         await ProposeRecordAsync(WalRecordType.Ack, Encoding.UTF8.GetBytes(request.ConsumerGroup), headers: [],
-            EncodeAckPayload(request.Offsets), consumesLogicalOffset: false, message.Reply);
+            EncodeAckPayload(request.Offsets), consumesLogicalOffset: false, message.Reply, message.CallerContext);
     }
 
     async Task HandleProposeAckCheckpointReceivedAsync(ProposeAckCheckpointReceived message) {
         var request = message.Request;
         await ProposeRecordAsync(WalRecordType.AckCheckpoint, Encoding.UTF8.GetBytes(request.ConsumerGroup), headers: [],
-            EncodeWatermarkPayload(request.Watermark), consumesLogicalOffset: false, message.Reply);
+            EncodeWatermarkPayload(request.Watermark), consumesLogicalOffset: false, message.Reply, message.CallerContext);
     }
 
     // Shared by both ProposeAsync overloads' handlers — the only place _nextLogicalOffset++ is
     // ever called, and only when consumesLogicalOffset is true: an Ack is not a consumer-visible
     // message, so it must never open a gap in the LogicalOffset sequence Append entries hand out.
     async Task ProposeRecordAsync(WalRecordType recordType, ReadOnlyMemory<byte> partitionKey, IReadOnlyList<Header> headers,
-        ReadOnlyMemory<byte> payload, bool consumesLogicalOffset, TaskCompletionSource<ProposeResult> reply) {
+        ReadOnlyMemory<byte> payload, bool consumesLogicalOffset, TaskCompletionSource<ProposeResult> reply, ActivityContext? callerContext) {
         if (_role != ReplicaRole.Leader || !_isLeaderReady) {
             reply.TrySetException(new NotLeaderException(GroupId, _leaderHint));
             return;
@@ -139,9 +143,13 @@ public sealed partial class RaftReplica {
         // ProposeResult escapes the replica before its entry is committed.
         _pendingProposals!.Add(record.RaftIndex, new PendingProposal(new ProposeResult(record.RaftIndex, logicalOffset, timestampMicros), reply));
 
-        // Durable local append before replication: the leader's own entry counts toward the
-        // quorum, and it may only count once fsynced.
-        await raftLog.AppendAsync([record]);
+        // Explicit parentContext, never ambient Activity.Current: this method runs on the actor's
+        // own detached Task.Run, so Activity.Current here would reflect whatever last ran on that
+        // background thread, never the caller's own request-scoped Activity.
+        using (RaftActivitySource.Source.StartActivity("wal-append", ActivityKind.Internal, callerContext ?? default))
+            // Durable local append before replication: the leader's own entry counts toward the
+            // quorum, and it may only count once fsynced.
+            await raftLog.AppendAsync([record]);
 
         // For a single-node group (no peers) this is the ONLY place anything ever re-checks
         // commit progress for this entry — there is no peer AppendEntriesResponseReceived to
@@ -149,7 +157,8 @@ public sealed partial class RaftReplica {
         // without this call.
         await TryAdvanceLeaderCommitAsync();
 
-        await ReplicateToAllPeersAsync();
+        using (RaftActivitySource.Source.StartActivity("raft-replicate", ActivityKind.Internal, callerContext ?? default))
+            await ReplicateToAllPeersAsync();
     }
 
     // [uint32 count][uint64 offsets...], little-endian — small enough (typically a handful of
