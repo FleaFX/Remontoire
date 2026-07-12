@@ -1,4 +1,5 @@
 using Grpc.Net.Client;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Remontoire.Messaging;
 using Remontoire.Meta.V1;
@@ -29,7 +30,7 @@ namespace Remontoire.Server;
 sealed class RaftReplicaHostedService(
     IOptions<RaftServerOptions> options, RaftReplicaRegistry registry, MessagingGroupRegistry messagingRegistry,
     LeaderAddressDirectory leaderAddresses, ShardAssignmentTable assignmentTable, MetaLogJournal metaLogJournal,
-    MigrationAdmissionGate admissionGate)
+    MigrationAdmissionGate admissionGate, ILoggerFactory loggerFactory)
     : IHostedService {
     readonly Dictionary<string, WalRaftLog> _logs = new();
     readonly Dictionary<string, RaftReplica> _replicas = new();
@@ -62,6 +63,15 @@ sealed class RaftReplicaHostedService(
         _transport = new RaftGrpcTransport(allPeers, rpcTimeout);
 
         foreach (var group in raftOptions.Groups) {
+            // Every background loop started below (RaftReplica's actor, ShardLog's actor/compaction/
+            // size-prune workers, AckCheckpointer, RetentionEvaluator) is a Task.Run — each captures
+            // this scope's ambient ExecutionContext at its own Task.Run call, so it keeps carrying
+            // NodeId/ShardGroupId on every log line for its whole lifetime, entirely independent of
+            // this scope disposing at the end of this loop iteration.
+            using var groupScope = loggerFactory.CreateLogger(nameof(RaftReplicaHostedService)).BeginScope(new Dictionary<string, object> {
+                ["NodeId"] = group.NodeId, ["ShardGroupId"] = group.GroupId,
+            });
+
             var peers = group.Peers.Select(peer => new RaftGroupMember(peer.NodeId, new Uri(peer.Address))).ToArray();
             var config = new RaftReplicaConfig(
                 GroupId: group.GroupId,
@@ -75,7 +85,7 @@ sealed class RaftReplicaHostedService(
             _logs[group.GroupId] = log; // tracked immediately — StopAsync must be able to reach it even if a later step here throws
             var stateStore = new FileRaftStateStore(group.DataDirectory);
 
-            var replica = new RaftReplica(stateStore, log, _transport, config);
+            var replica = new RaftReplica(stateStore, log, _transport, config, logger: loggerFactory.CreateLogger($"Remontoire.Raft.RaftReplica[{group.GroupId}]"));
             await replica.StartAsync(cancellationToken);
             registry.Register(replica);
             _replicas[group.GroupId] = replica;
@@ -102,7 +112,8 @@ sealed class RaftReplicaHostedService(
                 IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId));
 
             var shardLog = await ShardLog.OpenAsync(group.DataDirectory, replica.ReadCommittedAsync,
-                compactionPolicy: compactionPolicy, retentionPolicy: retentionPolicy, cancellationToken: cancellationToken);
+                compactionPolicy: compactionPolicy, retentionPolicy: retentionPolicy,
+                logger: loggerFactory.CreateLogger($"Remontoire.Storage.ShardLog[{group.GroupId}]"), cancellationToken: cancellationToken);
             _shardLogs[group.GroupId] = shardLog;
 
             var ackIndexApplier = new AckIndexApplier(shardLog, ackIndex);
@@ -117,7 +128,8 @@ sealed class RaftReplicaHostedService(
                 GetCheckpointThresholds: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName
                     ? (assignmentTable.GetRetentionPolicy(streamName).CheckpointInterval, assignmentTable.GetRetentionPolicy(streamName).CheckpointOffsetCount)
                     : (null, null),
-                IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId)));
+                IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId),
+                Logger: loggerFactory.CreateLogger($"Remontoire.Messaging.AckCheckpointer[{group.GroupId}]")));
 
             var retentionEvaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 ShardLog: shardLog, AckIndex: ackIndex,
@@ -126,13 +138,18 @@ sealed class RaftReplicaHostedService(
                 GetMaxRetention: () => ResolveStreamNameForGroup(group.GroupId) is { } streamName ? assignmentTable.GetRetentionPolicy(streamName).MaxRetention : TimeSpan.MaxValue,
                 ForwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(ResolveStreamNameForGroup(group.GroupId), request, ct),
                 IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId),
-                IsLeader: () => replica.IsLeader));
+                IsLeader: () => replica.IsLeader,
+                Logger: loggerFactory.CreateLogger($"Remontoire.Messaging.RetentionEvaluator[{group.GroupId}]")));
             _retentionEvaluators[group.GroupId] = retentionEvaluator;
 
             messagingRegistry.Register(group.GroupId, shardLog, ackIndex, retentionEvaluator);
         }
 
         if (raftOptions.MetaGroup is { } metaOptions) {
+            using var metaScope = loggerFactory.CreateLogger(nameof(RaftReplicaHostedService)).BeginScope(new Dictionary<string, object> {
+                ["NodeId"] = metaOptions.NodeId, ["ShardGroupId"] = "__meta__",
+            });
+
             var metaConfig = new RaftReplicaConfig(
                 GroupId: "__meta__",
                 NodeId: metaOptions.NodeId,
@@ -144,7 +161,7 @@ sealed class RaftReplicaHostedService(
             _metaLog = await WalRaftLog.OpenAsync(metaOptions.DataDirectory, cancellationToken: cancellationToken);
             var metaStateStore = new FileRaftStateStore(metaOptions.DataDirectory);
 
-            _metaReplica = new RaftReplica(metaStateStore, _metaLog, _transport, metaConfig);
+            _metaReplica = new RaftReplica(metaStateStore, _metaLog, _transport, metaConfig, logger: loggerFactory.CreateLogger("Remontoire.Raft.RaftReplica[__meta__]"));
             await _metaReplica.StartAsync(cancellationToken);
             registry.Register(_metaReplica);
 
@@ -152,7 +169,7 @@ sealed class RaftReplicaHostedService(
         } else if (raftOptions.MetaGroupSeedAddresses is { Count: > 0 } seedAddresses) {
             _watcherChannel = GrpcChannel.ForAddress(seedAddresses[0]);
             var client = new ShardAssignmentMeta.ShardAssignmentMetaClient(_watcherChannel);
-            _tableWatcher = new ShardAssignmentWatcher(client, assignmentTable);
+            _tableWatcher = new ShardAssignmentWatcher(client, assignmentTable, logger: loggerFactory.CreateLogger("Remontoire.Sharding.ShardAssignmentWatcher"));
         }
     }
 

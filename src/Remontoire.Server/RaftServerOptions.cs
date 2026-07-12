@@ -27,9 +27,8 @@ public sealed class RaftServerOptions {
 
     /// <summary>
     /// Below this many free bytes on any hosted group's (or the meta-group's) data directory,
-    /// readiness fails (<c>DiskSpaceReadinessCheck</c>) — fase 7's "geen acute schijfruimte-nood"
-    /// condition. Starting point: 1 GiB; the exact value is an open, later-tunable question
-    /// (`7_observability-design.md` §9 punt 1), not a technical constraint.
+    /// readiness fails (<c>DiskSpaceReadinessCheck</c>). Starting point: 1 GiB — a reasonable
+    /// default, not a value tuned against any real production disk-pressure data yet.
     /// </summary>
     public long MinFreeDiskSpaceBytes { get; set; } = 1L * 1024 * 1024 * 1024;
 }

@@ -188,8 +188,8 @@ static class Compactor {
 /// </param>
 /// <param name="OnCompactionDurationMeasured">
 /// Invoked once per completed merge (<see cref="Compaction.CompactionPlan.MergeAsync"/>) with its
-/// wall-clock duration — fase 7's <c>remontoire_segment_compaction_duration_seconds</c> histogram
-/// source. Same one-way injection discipline as <see cref="GetAckedLowWatermarkAsync"/>:
+/// wall-clock duration — the source for a compaction-duration metric maintained outside this
+/// project. Same one-way injection discipline as <see cref="GetAckedLowWatermarkAsync"/>:
 /// <see langword="null"/> disables it entirely, this project never references a metrics library directly.
 /// </param>
 public sealed record CompactionPolicy(

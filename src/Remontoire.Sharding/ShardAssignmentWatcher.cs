@@ -1,4 +1,5 @@
 using Grpc.Core;
+using Microsoft.Extensions.Logging;
 using Remontoire.Meta.V1;
 
 namespace Remontoire.Sharding;
@@ -49,12 +50,12 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
     /// continuous <c>Watch</c> from the version it returned, alongside a periodic reconciliation
     /// poll every <paramref name="reconciliationInterval"/> (default two minutes).
     /// </summary>
-    public ShardAssignmentWatcher(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, TimeSpan? reconciliationInterval = null) {
-        _watchLoop = Task.Run(() => RunWatchLoopAsync(client, table, _cts.Token));
-        _reconciliationLoop = Task.Run(() => RunReconciliationLoopAsync(client, table, reconciliationInterval ?? DefaultReconciliationInterval, _cts.Token));
+    public ShardAssignmentWatcher(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, TimeSpan? reconciliationInterval = null, ILogger? logger = null) {
+        _watchLoop = Task.Run(() => RunWatchLoopAsync(client, table, logger, _cts.Token));
+        _reconciliationLoop = Task.Run(() => RunReconciliationLoopAsync(client, table, reconciliationInterval ?? DefaultReconciliationInterval, logger, _cts.Token));
     }
 
-    async Task RunWatchLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, CancellationToken cancellationToken) {
+    async Task RunWatchLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, ILogger? logger, CancellationToken cancellationToken) {
         try {
             while (true) {
                 try {
@@ -67,6 +68,7 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
                     // The meta-group isn't reachable yet (e.g. still starting up) — keep retrying
                     // the initial fill rather than giving up on the whole watcher.
                     _lastFailure = ex;
+                    logger?.LogWarning(ex, "Initial GetSnapshot failed, retrying — meta-group not reachable yet?");
                     await Task.Delay(WatchReconnectDelay, cancellationToken);
                 }
             }
@@ -89,6 +91,7 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
                     // wherever we last got to; the periodic reconciliation poll is the backstop
                     // if this loop somehow stops making progress for longer than expected.
                     _lastFailure = ex;
+                    logger?.LogWarning(ex, "Watch stream dropped, reconnecting from version {NextVersionWanted}.", NextVersionWanted());
                     await Task.Delay(WatchReconnectDelay, cancellationToken);
                 }
             }
@@ -105,7 +108,7 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
         lock (_versionGate) return _lastAppliedVersion is { } v ? v + 1 : 0UL;
     }
 
-    async Task RunReconciliationLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, TimeSpan interval, CancellationToken cancellationToken) {
+    async Task RunReconciliationLoopAsync(ShardAssignmentMeta.ShardAssignmentMetaClient client, ShardAssignmentTable table, TimeSpan interval, ILogger? logger, CancellationToken cancellationToken) {
         try {
             while (true) {
                 await Task.Delay(interval, cancellationToken);
@@ -117,6 +120,7 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
                 } catch (RpcException ex) {
                     // Best-effort — the next scheduled poll, or the live Watch loop, will catch up.
                     _lastFailure = ex;
+                    logger?.LogWarning(ex, "Periodic reconciliation GetSnapshot failed — the live Watch loop is the backstop.");
                 }
             }
         } catch (OperationCanceledException) {

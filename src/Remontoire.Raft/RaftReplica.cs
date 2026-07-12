@@ -13,7 +13,7 @@ public sealed partial class RaftReplica(
     IRaftTransport transport,
     RaftReplicaConfig replicaConfig,
     TimeProvider? timeProvider = null,
-    ILogger<RaftReplica>? logger = null,
+    ILogger? logger = null,
     Func<ulong, CancellationToken, Task<IReadOnlyList<string>>>? prepareSnapshot = null,
     Func<IReadOnlyList<string>, ulong, CancellationToken, Task>? installSnapshot = null
 ) : IAsyncDisposable {

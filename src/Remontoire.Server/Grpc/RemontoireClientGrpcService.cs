@@ -107,11 +107,11 @@ public sealed class RemontoireClientGrpcService(
         }
     }
 
-    // remontoire_ack_messages_total: no consumer_group dimension risk here — the histogram is the
-    // one metric that dimension is deliberately withheld from (§2.5); this counter is cheap
-    // regardless of cardinality. remontoire_ack_latency_seconds needs one ShardLog lookup per
+    // remontoire_ack_messages_total: no consumer_group dimension risk here — a plain counter is
+    // cheap regardless of cardinality. remontoire_ack_latency_seconds needs one ShardLog lookup per
     // acked offset to read back the message's own ingest timestamp — never consumer_group-tagged,
-    // to keep the histogram's cardinality bounded to stream+shard.
+    // since a histogram (unlike a counter) keeps per-tag-combination state for the process's whole
+    // lifetime, and consumer groups are the least bounded dimension available here.
     static void RecordAckMetrics(Remontoire.Client.V1.AckRequest request, ShardLog shardLog) {
         RemontoireMetrics.AckMessagesTotal.Add(request.Offsets.Count,
             new KeyValuePair<string, object?>("stream", request.StreamName),

@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
@@ -37,9 +38,12 @@ public sealed partial class ShardLog : IAsyncDisposable {
     // itself, only "something changed, look again."
     volatile TaskCompletionSource _appended = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    readonly ILogger? _logger;
+
     internal ShardLog(
         string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource, MemTable memTable, SstSegment[] segments,
-        ulong nextOffsetToApply, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null, RetentionPolicy? retentionPolicy = null) {
+        ulong nextOffsetToApply, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null, RetentionPolicy? retentionPolicy = null,
+        ILogger? logger = null) {
         _directory = directory;
         _committedSource = committedSource;
         _memTable = memTable;
@@ -48,6 +52,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
         _flushThresholdBytes = flushThresholdBytes;
         _compactionPolicy = compactionPolicy;
         _retentionPolicy = retentionPolicy;
+        _logger = logger;
 
         _actorLoop = Task.Run(RunActorAsync);
         _tailingLoop = Task.Run(RunTailingLoopAsync);
@@ -56,7 +61,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
             : Task.Run(() => RunRetentionTickerAsync(compactionPolicy.RetentionTickInterval, _retentionCts.Token));
         _sizePruneWorker = retentionPolicy is null ? null
             : new SizePruneWorker(directory, retentionPolicy.GetMaxTotalBytesPerVirtualShard, retentionPolicy.IsAdmissionPaused, _mailbox.Writer,
-                tickInterval: retentionPolicy.SizePruneTickInterval);
+                tickInterval: retentionPolicy.SizePruneTickInterval, logger: logger);
         _sizePruneWorkerLoop = _sizePruneWorker is null ? null : Task.Run(() => _sizePruneWorker.RunAsync(_retentionCts.Token));
     }
 

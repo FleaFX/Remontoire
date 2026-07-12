@@ -5,9 +5,9 @@ namespace Remontoire.Server.HealthChecks;
 
 /// <summary>
 /// Fails once any hosted group's (or the meta-group's) data directory has less than
-/// <see cref="RaftServerOptions.MinFreeDiskSpaceBytes"/> of free space on its own drive — fase 7's
-/// "geen acute schijfruimte-nood" readiness condition. Deduplicates by resolved drive root, so two
-/// groups sharing one physical disk are only ever checked once per scrape.
+/// <see cref="RaftServerOptions.MinFreeDiskSpaceBytes"/> of free space on its own drive — an acute
+/// disk-space shortage is a readiness concern, not a liveness one. Deduplicates by resolved drive
+/// root, so two groups sharing one physical disk are only ever checked once per scrape.
 /// </summary>
 sealed class DiskSpaceReadinessCheck(IOptions<RaftServerOptions> options) : IHealthCheck {
     public Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default) {

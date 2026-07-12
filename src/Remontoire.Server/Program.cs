@@ -8,6 +8,10 @@ using Remontoire.Sharding;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// One JSON object per line, with scopes included — IncludeScopes surfaces the NodeId/ShardGroupId
+// scope RaftReplicaHostedService opens per group onto every log line written within it.
+builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
+
 // No mTLS yet (a later phase) — peers talk plain HTTP/2, which Kestrel only serves when told to.
 builder.WebHost.ConfigureKestrel(options =>
     options.ConfigureEndpointDefaults(listenOptions => listenOptions.Protocols = HttpProtocols.Http2));

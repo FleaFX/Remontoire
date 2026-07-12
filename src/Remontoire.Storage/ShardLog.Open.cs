@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace Remontoire.Storage;
 
 public sealed partial class ShardLog {
@@ -10,13 +12,13 @@ public sealed partial class ShardLog {
     public static async Task<ShardLog> OpenAsync(
         string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource,
         long flushThresholdBytes = 64 * 1024 * 1024, CompactionPolicy? compactionPolicy = null, RetentionPolicy? retentionPolicy = null,
-        CancellationToken cancellationToken = default) {
+        ILogger? logger = null, CancellationToken cancellationToken = default) {
         RecoverInterruptedCompactions(directory);
 
         var segments = await LoadSegmentsAsync(directory, cancellationToken);
         var nextOffsetToApply = segments.Length > 0 ? segments[^1].MaxOffset + 1 : 0UL;
 
-        return new ShardLog(directory, committedSource, new MemTable(), segments, nextOffsetToApply, flushThresholdBytes, compactionPolicy, retentionPolicy);
+        return new ShardLog(directory, committedSource, new MemTable(), segments, nextOffsetToApply, flushThresholdBytes, compactionPolicy, retentionPolicy, logger);
     }
 
     // A crash between a compaction's "delete old inputs" and "rename to final name" steps

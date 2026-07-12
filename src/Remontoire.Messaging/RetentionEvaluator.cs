@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Remontoire.Storage;
 
 namespace Remontoire.Messaging;
@@ -10,7 +11,7 @@ namespace Remontoire.Messaging;
 public sealed record RetentionEvaluatorOptions(
     ShardLog ShardLog, AckIndex AckIndex, Func<string, bool> IsMandatory,
     Func<TimeSpan> GetMaxRetention, Func<AppendRequest, CancellationToken, Task<bool>> ForwardToDeadLetterAsync,
-    Func<bool> IsAdmissionPaused, Func<bool> IsLeader, TimeProvider? TimeProvider = null, TimeSpan? TickInterval = null);
+    Func<bool> IsAdmissionPaused, Func<bool> IsLeader, TimeProvider? TimeProvider = null, TimeSpan? TickInterval = null, ILogger? Logger = null);
 
 /// <summary>
 /// Periodically scans for messages past their stream's max-retention window that no mandatory
@@ -99,12 +100,14 @@ public sealed class RetentionEvaluator : IAsyncDisposable {
 
                             Interlocked.Increment(ref _deadLetterMessagesTotal);
                             Volatile.Write(ref _safeToPruneWatermark, entry.LogicalOffset + 1);
+                            _options.Logger?.LogWarning("Forwarded offset {LogicalOffset} to the dead-letter stream — past max-retention, not fully acked by every mandatory group.", entry.LogicalOffset);
                         }
                     }
-                } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                } catch (Exception ex) when (!cancellationToken.IsCancellationRequested) {
                     // A transient failure mid-tick (e.g. a leadership handover while forwarding)
                     // must never permanently kill this loop — nothing else would ever restart it.
                     // Best-effort: try again next tick.
+                    _options.Logger?.LogDebug(ex, "Retention tick failed, will retry next tick.");
                 }
             }
         } catch (OperationCanceledException) {

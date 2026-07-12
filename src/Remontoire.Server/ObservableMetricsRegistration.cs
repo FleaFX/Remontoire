@@ -37,9 +37,9 @@ static class ObservableMetricsRegistration {
                 Math.Max(0L, (long)replica.LeaderKnownCommitIndex - (long)replica.CommitIndex),
                 new KeyValuePair<string, object?>("shard", replica.GroupId))));
 
-        // Resolves 3_raft-consensus-design.md §12 open question 7 — heartbeats and real
-        // replication share the one SendAppendEntriesAsync call site (RaftReplica.Leader.cs), so
-        // this counts both identically; no separate heartbeat RPC exists to count instead.
+        // Heartbeats and real replication share the one SendAppendEntriesAsync call site
+        // (RaftReplica.Leader.cs), so this counts both identically — no separate heartbeat RPC
+        // exists to count instead.
         RemontoireMetrics.Meter.CreateObservableCounter(RemontoireMetrics.RaftAppendEntriesSentTotalName, () =>
             raftRegistry.All.SelectMany(replica => replica.AppendEntriesSentTotal.Select(sent => new Measurement<long>(sent.Value,
                 new KeyValuePair<string, object?>("shard", replica.GroupId),
@@ -57,7 +57,7 @@ static class ObservableMetricsRegistration {
 
         // CommittedWatermark, not LowWatermark — this feeds the pruning-blocked alert, so it must
         // reflect what's actually Raft-committed, never an isolated, possibly-stale leader's own
-        // optimistic local state (6_ack-retention-design.md §7/§3.7).
+        // optimistic local state.
         RemontoireMetrics.Meter.CreateObservableGauge(RemontoireMetrics.OldestUnackedMessageAgeSecondsName, () =>
             messagingRegistry.All.SelectMany(group => {
                 var streamName = ResolveStreamName(group.GroupId) ?? group.GroupId;

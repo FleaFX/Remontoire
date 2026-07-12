@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+
 namespace Remontoire.Messaging;
 
 /// <summary>
@@ -9,7 +11,7 @@ public sealed record AckCheckpointerOptions(
     AckIndex AckIndex, Func<string, ulong, CancellationToken, Task> ProposeCheckpointAsync,
     Func<bool> IsLeader, Func<string, bool> IsCheckpointMode,
     Func<(TimeSpan? Interval, int? OffsetCount)> GetCheckpointThresholds,
-    Func<bool> IsAdmissionPaused, TimeProvider? TimeProvider = null);
+    Func<bool> IsAdmissionPaused, TimeProvider? TimeProvider = null, ILogger? Logger = null);
 
 /// <summary>
 /// Periodically proposes a cheap AckCheckpoint record replicating each checkpoint-mode consumer
@@ -78,10 +80,11 @@ public sealed class AckCheckpointer : IAsyncDisposable {
                     try {
                         await options.ProposeCheckpointAsync(consumerGroup, watermark, cancellationToken);
                         lastCheckpointed[consumerGroup] = (watermark, timeProvider.GetUtcNow());
-                    } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                    } catch (Exception ex) when (!cancellationToken.IsCancellationRequested) {
                         // A transient failure for this one group (e.g. a leadership handover mid-
                         // propose) must never stop the others in this tick, or permanently kill
                         // the loop — nothing else would ever restart it. Retried next tick.
+                        options.Logger?.LogDebug(ex, "Checkpoint propose failed for consumer group {ConsumerGroup}, will retry next tick.", consumerGroup);
                     }
                 }
             }

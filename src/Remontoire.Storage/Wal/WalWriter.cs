@@ -68,9 +68,9 @@ public sealed class WalWriter : IAsyncDisposable {
     /// <inheritdoc cref="OpenAsync(string, CancellationToken)"/>
     /// <param name="path">The WAL file path.</param>
     /// <param name="onFlushDurationMeasured">
-    /// Invoked once per batch fsync with its wall-clock duration — fase 7's
-    /// <c>remontoire_wal_fsync_duration_seconds</c> histogram source. This project never
-    /// references a metrics library directly (same one-way dependency discipline as
+    /// Invoked once per batch fsync with its wall-clock duration — the source for a fsync-duration
+    /// metric maintained outside this project. This project never references a metrics library
+    /// directly (same one-way dependency discipline as
     /// <see cref="CompactionPolicy.GetAckedLowWatermarkAsync"/>); <see langword="null"/> disables
     /// the callback entirely.
     /// </param>

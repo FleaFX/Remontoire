@@ -94,10 +94,9 @@ public sealed partial class RaftReplica {
     ulong? _pendingConfigChangeIndex;
     TaskCompletionSource? _pendingConfigChangeReply;
 
-    // Observability counters/timestamps (fase 7) — diagnostic-only, never read by any protocol
-    // decision above. Per-peer since heartbeats and real replication share the single
-    // SendAppendEntriesAsync call site (RaftReplica.Leader.cs) — there is no separate heartbeat
-    // RPC to count instead.
+    // Observability counters/timestamps — diagnostic-only, never read by any protocol decision
+    // above. Per-peer since heartbeats and real replication share the single SendAppendEntriesAsync
+    // call site (RaftReplica.Leader.cs) — there is no separate heartbeat RPC to count instead.
     readonly ConcurrentDictionary<string, long> _appendEntriesSentTotal = new();
     long _leaderElectionsTotal;
 

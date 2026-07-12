@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
@@ -57,6 +58,7 @@ public sealed partial class ShardLog {
         // still actually there keeps its true, current state; the next compaction pass simply
         // retries with whatever's still around.
         if (completed.Plan.Sources.Any(source => Array.IndexOf(_segments, source) < 0)) {
+            _logger?.LogInformation("Discarding a compaction merge result at {MergedPath} — a concurrent prune already removed one of its source segments.", mergedPath);
             File.Delete(mergedPath);
             return;
         }

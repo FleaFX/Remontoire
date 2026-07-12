@@ -79,7 +79,7 @@ public sealed class WalRaftLog : IRaftLog, IAsyncDisposable {
     /// </summary>
     /// <param name="onFsyncDurationMeasured">
     /// Invoked once per batch fsync, on whichever <see cref="WalWriter"/> is active at the time —
-    /// fase 7's <c>remontoire_wal_fsync_duration_seconds</c> histogram source. <see langword="null"/>
+    /// the source for a fsync-duration metric maintained outside this project. <see langword="null"/>
     /// disables it entirely; see <see cref="WalWriter.OpenAsync(string, Action{TimeSpan}?, CancellationToken)"/>.
     /// </param>
     public static async Task<WalRaftLog> OpenAsync(

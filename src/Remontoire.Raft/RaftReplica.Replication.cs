@@ -258,7 +258,7 @@ public sealed partial class RaftReplica {
             await AdvanceCommitIndexAsync(Math.Min(request.LeaderCommit, lastNewIndex));
 
             // Only on this, the accepted (Success = true) path — a rejected request (stale term,
-            // log mismatch) is not "active contact with a leader we're accepting" (fase 7).
+            // log mismatch) is not active contact with a leader we're actually accepting.
             Volatile.Write(ref _lastLeaderContactUtcTicks, _timeProvider.GetUtcNow().Ticks);
             Volatile.Write(ref _leaderKnownCommitIndex, request.LeaderCommit);
 

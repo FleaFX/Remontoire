@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 
 namespace Remontoire.Storage.Compaction;
 
@@ -9,7 +10,9 @@ namespace Remontoire.Storage.Compaction;
 /// answerable), so this simply ticks, runs <see cref="Compactor.PruneOldestUntilUnderSizeAsync"/>
 /// directly, and reports back via <see cref="SizePruneCompleted"/>.
 /// </summary>
-sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox, TimeProvider? timeProvider = null, TimeSpan? tickInterval = null) {
+sealed class SizePruneWorker(
+    string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox,
+    TimeProvider? timeProvider = null, TimeSpan? tickInterval = null, ILogger? logger = null) {
     static readonly TimeSpan DefaultTickInterval = TimeSpan.FromMinutes(5);
     long _failedTicksTotal;
     long _messagesPrunedTotal;
@@ -52,14 +55,20 @@ sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Fun
                     if (deletedSegments.Count == 0)
                         continue;
 
-                    Interlocked.Add(ref _messagesPrunedTotal, (long)deletedSegments.Sum(segment => (long)segment.MessageCount));
+                    var messageCount = deletedSegments.Sum(segment => (long)segment.MessageCount);
+                    Interlocked.Add(ref _messagesPrunedTotal, messageCount);
+                    // A guarantee break, not routine pruning — always worth a prominent log line,
+                    // regardless of ack status (mirrors the Interlocked counter's own remarks).
+                    logger?.LogWarning("Force-pruned {MessageCount} messages across {SegmentCount} segments in {Directory} — a guarantee break, not routine pruning.",
+                        messageCount, deletedSegments.Count, directory);
 
                     if (!mailbox.TryWrite(new SizePruneCompleted(deletedSegments.Select(segment => segment.Path).ToArray())))
                         return; // mailbox closed in the meantime — the result is simply discarded, harmless
-                } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                } catch (Exception ex) when (!cancellationToken.IsCancellationRequested) {
                     // A transient failure mid-tick must never permanently kill this loop — nothing
                     // else would ever restart it. Best-effort: try again next tick.
                     Interlocked.Increment(ref _failedTicksTotal);
+                    logger?.LogWarning(ex, "Size-prune tick failed in {Directory}, will retry next tick.", directory);
                 }
             }
         } catch (OperationCanceledException) {
