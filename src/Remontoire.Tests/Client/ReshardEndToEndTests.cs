@@ -260,7 +260,10 @@ public class ReshardEndToEndTests {
     }
 
     static async Task<PublishResult> PublishOnceReadyAsync(RemontoireConnection connection, string payload) {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        // A generous budget: real Kestrel-host startup and the meta-group watcher's own catch-up
+        // can genuinely take longer than 5s under CI's more constrained CPU (confirmed — this
+        // exact call failed consistently in CI at the 5s mark, never locally).
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
         while (true) {
             try {
                 return await connection.PublishAsync(StreamName, "key", Encoding.UTF8.GetBytes(payload));
