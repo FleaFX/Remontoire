@@ -864,4 +864,72 @@ public class RaftReplicaTests {
             replica.CurrentTerm.Should().Be(termAfterBecomingCandidate, "the term must not bump a second time from a stale timer firing");
         }
     }
+
+    // Fase 7 — plain diagnostic counters/timestamps, never read by any protocol decision.
+    public class Observability {
+        [Fact]
+        public async Task AppendEntriesSentTotal_increments_identically_for_a_heartbeat_tick_and_a_real_replication_call() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> candidate, term 1
+            await replica.DrainAsync();
+            replica.TryPost(new VoteResponseReceived("node-2", new VoteResponse { Term = 1, VoteGranted = true }, 1));
+            await replica.DrainAsync(); // -> leader, sends the term-opening NoOp (1st AppendEntries)
+
+            replica.AppendEntriesSentTotal["node-2"].Should().Be(1);
+
+            replica.TryPost(new HeartbeatIntervalElapsed(replica.HeartbeatTimerGeneration)); // 2nd AppendEntries — a pure heartbeat
+            await replica.DrainAsync();
+
+            replica.AppendEntriesSentTotal["node-2"].Should().Be(2, "a heartbeat and real replication both funnel through SendAppendEntriesAsync identically");
+        }
+
+        [Fact]
+        public async Task LeaderElectionsTotal_increments_once_per_successful_election() {
+            var (replica, _) = await StartAsync("node-1");
+            replica.LeaderElectionsTotal.Should().Be(0);
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // single-node group -> immediate leader
+            await replica.DrainAsync();
+
+            replica.LeaderElectionsTotal.Should().Be(1);
+        }
+
+        [Fact]
+        public async Task LastActorLoopActivity_advances_after_processing_a_message() {
+            var (replica, _) = await StartAsync("node-1");
+            var before = replica.LastActorLoopActivity;
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration));
+            await replica.DrainAsync();
+
+            replica.LastActorLoopActivity.Should().BeOnOrAfter(before);
+        }
+
+        [Fact]
+        public async Task HasActiveLeaderContact_and_LeaderKnownCommitIndex_are_set_only_on_an_accepted_AppendEntries() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+            replica.HasActiveLeaderContact.Should().BeFalse("this replica has never accepted an AppendEntries yet");
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> candidate, term 1, so Term = 0 below is genuinely stale
+            await replica.DrainAsync();
+
+            var staleReply = new TaskCompletionSource<AppendEntriesResponse>();
+            replica.TryPost(new AppendEntriesReceived(
+                new AppendEntriesRequest { GroupId = "group-1", Term = 0, LeaderId = "node-2", PrevLogIndex = 0, PrevLogTerm = 0, LeaderCommit = 5 }, staleReply));
+            await replica.DrainAsync();
+            (await staleReply.Task).Success.Should().BeFalse();
+            replica.HasActiveLeaderContact.Should().BeFalse("a rejected (stale-term) AppendEntries must never count as active contact");
+            replica.LeaderKnownCommitIndex.Should().Be(0);
+
+            var acceptedReply = new TaskCompletionSource<AppendEntriesResponse>();
+            replica.TryPost(new AppendEntriesReceived(
+                new AppendEntriesRequest { GroupId = "group-1", Term = 3, LeaderId = "node-2", PrevLogIndex = 0, PrevLogTerm = 0, LeaderCommit = 5 }, acceptedReply));
+            await replica.DrainAsync();
+            (await acceptedReply.Task).Success.Should().BeTrue();
+
+            replica.HasActiveLeaderContact.Should().BeTrue();
+            replica.LeaderKnownCommitIndex.Should().Be(5);
+        }
+    }
 }

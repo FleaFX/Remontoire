@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using FluentAssertions;
 using Remontoire.Messaging;
 using Remontoire.Storage;
@@ -46,7 +47,7 @@ public class MessagingGroupRegistryTests {
         return new Composed(directory, shardLog, ackIndex, retentionEvaluator);
     }
 
-    static async IAsyncEnumerable<WalRecord> EmptyCommittedSourceAsync(CancellationToken cancellationToken) {
+    static async IAsyncEnumerable<WalRecord> EmptyCommittedSourceAsync([EnumeratorCancellation] CancellationToken cancellationToken) {
         await Task.CompletedTask;
         yield break;
     }

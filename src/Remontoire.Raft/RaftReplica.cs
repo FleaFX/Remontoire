@@ -45,6 +45,51 @@ public sealed partial class RaftReplica(
     public ulong CommitIndex => Volatile.Read(ref _commitIndex);
 
     /// <summary>
+    /// This group's own election-timeout upper bound — the natural staleness threshold for
+    /// diagnostics built on top of <see cref="LastActorLoopActivity"/>/<see cref="HasActiveLeaderContact"/>,
+    /// rather than inventing a second, unrelated timing constant.
+    /// </summary>
+    public TimeSpan ElectionTimeoutMax => replicaConfig.ElectionTimeoutMax;
+
+    /// <summary>
+    /// The number of <c>AppendEntries</c> RPCs sent to each peer so far — heartbeats and real
+    /// replication both funnel through the single <c>SendAppendEntriesAsync</c> call site, so this
+    /// counts both identically.
+    /// </summary>
+    public IReadOnlyDictionary<string, long> AppendEntriesSentTotal => _appendEntriesSentTotal;
+
+    /// <summary>
+    /// The number of times this replica has become leader.
+    /// </summary>
+    public long LeaderElectionsTotal => Volatile.Read(ref _leaderElectionsTotal);
+
+    /// <summary>
+    /// The last time the actor loop processed a message — a liveness signal: this replica's actor
+    /// loop is presumed stuck once this falls far enough behind <see cref="ElectionTimeoutMax"/>.
+    /// </summary>
+    public DateTimeOffset LastActorLoopActivity => new(Volatile.Read(ref _lastActorLoopActivityUtcTicks), TimeSpan.Zero);
+
+    /// <summary>
+    /// Whether this replica has recently accepted an <c>AppendEntries</c> from a current leader —
+    /// <see langword="false"/> both when it never has, and when the last acceptance is older than
+    /// <see cref="ElectionTimeoutMax"/>. Meaningless (always <see langword="false"/>) while this
+    /// replica is itself the leader — see <see cref="IsLeader"/> for that case instead.
+    /// </summary>
+    public bool HasActiveLeaderContact {
+        get {
+            var ticks = Volatile.Read(ref _lastLeaderContactUtcTicks);
+            return ticks != 0 && _timeProvider.GetUtcNow() - new DateTimeOffset(ticks, TimeSpan.Zero) <= replicaConfig.ElectionTimeoutMax;
+        }
+    }
+
+    /// <summary>
+    /// The <c>LeaderCommit</c> carried by the last accepted <c>AppendEntries</c> — combined with
+    /// <see cref="CommitIndex"/>, the replication-lag gauge's two source values. Meaningless on a
+    /// leader itself, which already knows its own commit index directly.
+    /// </summary>
+    public ulong LeaderKnownCommitIndex => Volatile.Read(ref _leaderKnownCommitIndex);
+
+    /// <summary>
     /// Loads durable state, starts the actor loop and arms the election timer.
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default) {
@@ -81,6 +126,7 @@ public sealed partial class RaftReplica(
     // rule out.
     async Task RunActorLoopAsync(CancellationToken cancellationToken) {
         await foreach (var message in _channel.Reader.ReadAllAsync(cancellationToken)) {
+            Volatile.Write(ref _lastActorLoopActivityUtcTicks, _timeProvider.GetUtcNow().Ticks);
             try {
                 await (message switch {
                     AppendEntriesReceived appendEntriesReceived => HandleAppendEntriesReceivedAsync(appendEntriesReceived),

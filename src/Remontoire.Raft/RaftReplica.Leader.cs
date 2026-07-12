@@ -14,6 +14,7 @@ public sealed partial class RaftReplica {
     /// is quorum-committed — never earlier.
     /// </summary>
     async Task BecomeLeaderAsync() {
+        Interlocked.Increment(ref _leaderElectionsTotal);
         _role = ReplicaRole.Leader;
         Volatile.Write(ref _leaderHint, replicaConfig.NodeId);
         _electionTimerGeneration++; // a leader has no election timeout — invalidate without re-arming
@@ -47,6 +48,8 @@ public sealed partial class RaftReplica {
     }
 
     async Task SendAppendEntriesAsync(string peerId) {
+        _appendEntriesSentTotal.AddOrUpdate(peerId, 1, (_, count) => count + 1);
+
         var nextIndex = _nextIndex![peerId];
         if (nextIndex <= raftLog.SnapshotIndex) {
             // The peer needs entries that were compacted away — AppendEntries cannot help.
