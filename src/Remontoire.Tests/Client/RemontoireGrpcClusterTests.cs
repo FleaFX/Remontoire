@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Text;
 using FluentAssertions;
@@ -9,6 +10,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Client.V1;
 using Remontoire.Messaging;
+using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Server;
@@ -342,6 +344,64 @@ public class RemontoireGrpcClusterTests {
             messages[0].Payload.ToArray().Should().Equal("hello"u8.ToArray());
 
             await connection.AckAsync(StreamName, "group-a", messages[0].ShardId, messages[0].Offset);
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    // This whole test class is [Collection("RealNetwork")] (DisableParallelization) — the only
+    // other tests exercising RemontoireClientGrpcService.Publish/Ack (and therefore
+    // RemontoireMetrics's shared, process-wide Meter) live in the same collection, so nothing else
+    // can post a measurement while this listener is attached.
+    [Fact]
+    public async Task Publish_and_Ack_record_the_expected_metrics() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            var ingestMeasurements = new List<(long Value, KeyValuePair<string, object?>[] Tags)>();
+            var ackMeasurements = new List<(long Value, KeyValuePair<string, object?>[] Tags)>();
+            var latencyMeasurements = new List<(double Value, KeyValuePair<string, object?>[] Tags)>();
+
+            using var listener = new MeterListener {
+                InstrumentPublished = (instrument, meterListener) => {
+                    if (instrument.Meter.Name == RemontoireMetrics.Meter.Name)
+                        meterListener.EnableMeasurementEvents(instrument);
+                },
+            };
+            listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) => {
+                if (instrument.Name == "remontoire_ingest_messages_total") ingestMeasurements.Add((value, tags.ToArray()));
+                if (instrument.Name == "remontoire_ack_messages_total") ackMeasurements.Add((value, tags.ToArray()));
+            });
+            listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) => {
+                if (instrument.Name == "remontoire_ack_latency_seconds") latencyMeasurements.Add((value, tags.ToArray()));
+            });
+            listener.Start();
+
+            using var connection = Connect(nodes);
+            await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
+
+            ingestMeasurements.Should().ContainSingle();
+            ingestMeasurements[0].Value.Should().Be(1);
+            ingestMeasurements[0].Tags.Should().Contain(new KeyValuePair<string, object?>("stream", StreamName));
+            ingestMeasurements[0].Tags.Should().Contain(new KeyValuePair<string, object?>("shard", GroupId));
+
+            var messages = new List<RemontoireMessage>();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await foreach (var message in connection.ConsumeAsync(StreamName, "group-a", cts.Token)) {
+                messages.Add(message);
+                break;
+            }
+
+            await connection.AckAsync(StreamName, "group-a", messages[0].ShardId, messages[0].Offset);
+
+            ackMeasurements.Should().ContainSingle();
+            ackMeasurements[0].Value.Should().Be(1);
+            ackMeasurements[0].Tags.Should().Contain(new KeyValuePair<string, object?>("consumer_group", "group-a"));
+
+            latencyMeasurements.Should().ContainSingle("one offset was acked");
+            latencyMeasurements[0].Value.Should().BeGreaterThanOrEqualTo(0, "ack must never happen before ingest");
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }

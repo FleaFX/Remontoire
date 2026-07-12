@@ -4,6 +4,7 @@ using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Remontoire.Client.V1;
 using Remontoire.Messaging;
+using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Sharding;
@@ -49,6 +50,9 @@ public sealed class RemontoireClientGrpcService(
 
         try {
             var result = await replica.ProposeAsync(appendRequest, context.CancellationToken);
+            RemontoireMetrics.IngestMessagesTotal.Add(1,
+                new KeyValuePair<string, object?>("stream", request.StreamName),
+                new KeyValuePair<string, object?>("shard", replica.GroupId));
             return new PublishReply {
                 Success = new PublishSuccess {
                     ShardId = virtualShardIndex,
@@ -90,14 +94,39 @@ public sealed class RemontoireClientGrpcService(
             // here costs no round-trip. Silently drop anything referring to a message that doesn't
             // exist yet rather than letting it advance this group's watermark past undelivered data.
             await ackIndex.ApplyLocalAsync(request.ConsumerGroup, WithinLogBounds(request.Offsets, shardLog.NextOffsetToApply), context.CancellationToken);
+            RecordAckMetrics(request, shardLog);
             return new AckReply { Success = new Empty() };
         }
 
         try {
             await replica.ProposeAsync(new Remontoire.Raft.AckRequest(request.ConsumerGroup, request.Offsets), context.CancellationToken);
+            RecordAckMetrics(request, shardLog);
             return new AckReply { Success = new Empty() };
         } catch (NotLeaderException ex) {
             return new AckReply { NotLeader = BuildNotLeader(request.StreamName, ex) };
+        }
+    }
+
+    // remontoire_ack_messages_total: no consumer_group dimension risk here — the histogram is the
+    // one metric that dimension is deliberately withheld from (§2.5); this counter is cheap
+    // regardless of cardinality. remontoire_ack_latency_seconds needs one ShardLog lookup per
+    // acked offset to read back the message's own ingest timestamp — never consumer_group-tagged,
+    // to keep the histogram's cardinality bounded to stream+shard.
+    static void RecordAckMetrics(Remontoire.Client.V1.AckRequest request, ShardLog shardLog) {
+        RemontoireMetrics.AckMessagesTotal.Add(request.Offsets.Count,
+            new KeyValuePair<string, object?>("stream", request.StreamName),
+            new KeyValuePair<string, object?>("shard", request.ShardId.ToString()),
+            new KeyValuePair<string, object?>("consumer_group", request.ConsumerGroup));
+
+        var nowMicros = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
+        foreach (var offset in request.Offsets) {
+            if (!shardLog.TryGet(offset, out var handle))
+                continue;
+
+            using (handle)
+                RemontoireMetrics.AckLatencySeconds.Record((nowMicros - handle.Entry.TimestampMicros) / 1_000_000.0,
+                    new KeyValuePair<string, object?>("stream", request.StreamName),
+                    new KeyValuePair<string, object?>("shard", request.ShardId.ToString()));
         }
     }
 
