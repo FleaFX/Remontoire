@@ -1,7 +1,9 @@
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Remontoire.Raft.Grpc;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
+using Remontoire.Server.HealthChecks;
 using Remontoire.Sharding;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,6 +23,11 @@ builder.Services.AddSingleton<ReshardOrchestrator>();
 builder.Services.AddHostedService<RaftReplicaHostedService>();
 builder.Services.AddGrpc();
 
+builder.Services.AddHealthChecks()
+    .AddCheck<RaftLivenessCheck>("raft-liveness", tags: ["live"])
+    .AddCheck<RaftReadinessCheck>("raft-readiness", tags: ["ready"])
+    .AddCheck<DiskSpaceReadinessCheck>("disk-space", tags: ["ready"]);
+
 var app = builder.Build();
 
 ObservableMetricsRegistration.Register(
@@ -35,6 +42,9 @@ app.MapGrpcService<RemontoireClientGrpcService>();
 // without one has no MetaLogJournal content and nothing else would ever route to it anyway.
 if (builder.Configuration.GetSection("Raft:MetaGroup").Exists())
     app.MapGrpcService<ShardAssignmentMetaGrpcService>();
+
+app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = check => check.Tags.Contains("live") });
+app.MapHealthChecks("/healthz/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") });
 
 app.MapGet("/", () => "Hello World!");
 

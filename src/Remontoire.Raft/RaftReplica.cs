@@ -70,6 +70,13 @@ public sealed partial class RaftReplica(
     public DateTimeOffset LastActorLoopActivity => new(Volatile.Read(ref _lastActorLoopActivityUtcTicks), TimeSpan.Zero);
 
     /// <summary>
+    /// The active WAL file's own fsync-in-progress diagnostic (<see cref="WalRaftLog.FlushInProgressSince"/>),
+    /// or <see langword="null"/> for any <see cref="IRaftLog"/> that isn't a <see cref="WalRaftLog"/>
+    /// (e.g. test fakes) — those have no comparable notion of a flush to report on.
+    /// </summary>
+    public DateTimeOffset? WalFlushInProgressSince => (raftLog as WalRaftLog)?.FlushInProgressSince;
+
+    /// <summary>
     /// Whether this replica has recently accepted an <c>AppendEntries</c> from a current leader —
     /// <see langword="false"/> both when it never has, and when the last acceptance is older than
     /// <see cref="ElectionTimeoutMax"/>. Meaningless (always <see langword="false"/>) while this
@@ -93,6 +100,12 @@ public sealed partial class RaftReplica(
     /// Loads durable state, starts the actor loop and arms the election timer.
     /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default) {
+        // Stamped here too, not only per-message inside RunActorLoopAsync: without this, a
+        // just-started replica reads as "stuck" (LastActorLoopActivity at its zero/epoch default)
+        // for the brief window between StartAsync returning and its first election-timer message
+        // actually arriving — a healthy, merely-idle replica must never appear stuck.
+        Volatile.Write(ref _lastActorLoopActivityUtcTicks, _timeProvider.GetUtcNow().Ticks);
+
         (_currentTerm, _votedFor, _snapshotNextLogicalOffset, _snapshotConfiguration) = await stateStore.LoadAsync(cancellationToken);
         (_activeConfiguration, _activeConfigurationIndex) = await RecoverActiveConfigurationAsync();
 
