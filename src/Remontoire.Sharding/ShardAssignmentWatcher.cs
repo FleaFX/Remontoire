@@ -38,6 +38,13 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
     public Exception? LastFailure => _lastFailure;
 
     /// <summary>
+    /// The highest meta-log version actually applied so far — <see langword="null"/> if nothing
+    /// has been applied yet. A diagnostic seam: proves exactly how far this watcher has gotten
+    /// when something downstream never becomes visible on the table it feeds.
+    /// </summary>
+    public ulong? LastAppliedVersion { get { lock (_versionGate) return _lastAppliedVersion; } }
+
+    /// <summary>
     /// Starts filling <paramref name="table"/> immediately: an initial <c>GetSnapshot</c>, then a
     /// continuous <c>Watch</c> from the version it returned, alongside a periodic reconciliation
     /// poll every <paramref name="reconciliationInterval"/> (default two minutes).

@@ -129,16 +129,6 @@ public class ReshardEndToEndTests {
 
     [Fact]
     public async Task An_operator_can_live_reshard_a_stream_without_losing_messages_or_downtime() {
-        // This is the heaviest test in the RealNetwork collection — three real Kestrel hosts (meta
-        // plus two data groups), each a real Raft replica with real heartbeat timers, two watchers
-        // each running two background loops, an orchestrator, and a client connection, all
-        // Task.Run-scheduled onto the shared thread pool. On a CPU-constrained CI runner, the pool
-        // grows only slowly under sustained demand (throttled thread injection) — confirmed via a
-        // real CI failure where fromGroup's watcher made zero progress for 30s with zero exceptions
-        // (LastFailure empty): not a transport failure, nothing ever got a turn to run. Raising the
-        // minimum up front avoids that injection delay entirely.
-        ThreadPool.SetMinThreads(Environment.ProcessorCount * 8, Environment.ProcessorCount * 8);
-
         var directoryRoot = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(directoryRoot);
 
@@ -193,7 +183,8 @@ public class ReshardEndToEndTests {
             // already passed).
             var fromGroupTable = fromGroup.Host.Services.GetRequiredService<ShardAssignmentTable>();
             (await RunUntilAsync(() => fromGroupTable.TryGetStreamConfig(StreamName, out _) && fromGroupTable.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == FromGroupId, TimeSpan.FromSeconds(30)))
-                .Should().BeTrue($"fromGroup's own watcher must see the stream config and the group assignment before any publish can ever succeed — last watcher failure: {fromGroup.Watcher.LastFailure}");
+                .Should().BeTrue($"fromGroup's own watcher must see the stream config and the group assignment before any publish can ever succeed — " +
+                    $"last applied version: {fromGroup.Watcher.LastAppliedVersion}, last watcher failure: {fromGroup.Watcher.LastFailure}");
 
             using var connection = new RemontoireConnection(new RemontoireClientOptions(
                 MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
