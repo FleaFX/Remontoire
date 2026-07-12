@@ -129,6 +129,16 @@ public class ReshardEndToEndTests {
 
     [Fact]
     public async Task An_operator_can_live_reshard_a_stream_without_losing_messages_or_downtime() {
+        // This is the heaviest test in the RealNetwork collection — three real Kestrel hosts (meta
+        // plus two data groups), each a real Raft replica with real heartbeat timers, two watchers
+        // each running two background loops, an orchestrator, and a client connection, all
+        // Task.Run-scheduled onto the shared thread pool. On a CPU-constrained CI runner, the pool
+        // grows only slowly under sustained demand (throttled thread injection) — confirmed via a
+        // real CI failure where fromGroup's watcher made zero progress for 30s with zero exceptions
+        // (LastFailure empty): not a transport failure, nothing ever got a turn to run. Raising the
+        // minimum up front avoids that injection delay entirely.
+        ThreadPool.SetMinThreads(Environment.ProcessorCount * 8, Environment.ProcessorCount * 8);
+
         var directoryRoot = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
         Directory.CreateDirectory(directoryRoot);
 
