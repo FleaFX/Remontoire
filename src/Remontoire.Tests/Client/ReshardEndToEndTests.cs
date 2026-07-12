@@ -183,7 +183,7 @@ public class ReshardEndToEndTests {
             // already passed).
             var fromGroupTable = fromGroup.Host.Services.GetRequiredService<ShardAssignmentTable>();
             (await RunUntilAsync(() => fromGroupTable.TryGetStreamConfig(StreamName, out _) && fromGroupTable.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == FromGroupId, TimeSpan.FromSeconds(30)))
-                .Should().BeTrue("fromGroup's own watcher must see the stream config and the group assignment before any publish can ever succeed");
+                .Should().BeTrue($"fromGroup's own watcher must see the stream config and the group assignment before any publish can ever succeed — last watcher failure: {fromGroup.Watcher.LastFailure}");
 
             using var connection = new RemontoireConnection(new RemontoireClientOptions(
                 MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));

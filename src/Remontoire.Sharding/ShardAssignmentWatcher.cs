@@ -27,6 +27,15 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
     // whole check-then-apply, so the two loops can never apply out of version order.
     readonly Lock _versionGate = new();
     ulong? _lastAppliedVersion; // null: nothing applied yet — version 0 (a real, valid first record) must still apply
+    volatile Exception? _lastFailure;
+
+    /// <summary>
+    /// The most recent transport failure from any of the three loops (initial fill, live watch,
+    /// reconciliation poll) — every one of them otherwise retries silently. A caller stuck waiting
+    /// for this watcher's table to catch up has no other way to tell "still starting up, keep
+    /// waiting" apart from "genuinely can't reach the meta-group at all."
+    /// </summary>
+    public Exception? LastFailure => _lastFailure;
 
     /// <summary>
     /// Starts filling <paramref name="table"/> immediately: an initial <c>GetSnapshot</c>, then a
@@ -49,9 +58,10 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
 
                     fromVersion = snapshot.Version;
                     break;
-                } catch (RpcException) {
+                } catch (RpcException ex) {
                     // The meta-group isn't reachable yet (e.g. still starting up) — keep retrying
                     // the initial fill rather than giving up on the whole watcher.
+                    _lastFailure = ex;
                     await Task.Delay(WatchReconnectDelay, cancellationToken);
                 }
             }
@@ -64,10 +74,11 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
                         ApplyIfNewer(table, record);
                         fromVersion = record.Version;
                     }
-                } catch (RpcException) {
+                } catch (RpcException ex) {
                     // A dropped stream or an unreachable member — reconnect and resume from
                     // wherever we last got to; the periodic reconciliation poll is the backstop
                     // if this loop somehow stops making progress for longer than expected.
+                    _lastFailure = ex;
                     await Task.Delay(WatchReconnectDelay, cancellationToken);
                 }
             }
@@ -85,8 +96,9 @@ public sealed class ShardAssignmentWatcher : IAsyncDisposable {
                     var snapshot = await client.GetSnapshotAsync(new GetSnapshotRequest(), cancellationToken: cancellationToken);
                     foreach (var record in snapshot.Records)
                         ApplyIfNewer(table, record);
-                } catch (RpcException) {
+                } catch (RpcException ex) {
                     // Best-effort — the next scheduled poll, or the live Watch loop, will catch up.
+                    _lastFailure = ex;
                 }
             }
         } catch (OperationCanceledException) {
