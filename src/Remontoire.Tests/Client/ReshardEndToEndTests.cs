@@ -169,6 +169,15 @@ public class ReshardEndToEndTests {
             await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new MigrationStarted(seedMigrationId, StreamName, 0, FromGroupId, FromGroupId))));
             await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [], MetaLogRecord.Encode(new Cutover(seedMigrationId, StreamName, 0, FromGroupId))));
 
+            // Explicit precondition, not folded into PublishOnceReadyAsync's own retry loop:
+            // proves fromGroup's OWN watcher (a separate instance from the connection's) actually
+            // caught up on its server-side table before any publish is attempted. If this ever
+            // times out, it isolates the failure to the watcher/journal path specifically, rather
+            // than leaving it indistinguishable from any other publish-retry exhaustion.
+            var fromGroupTable = fromGroup.Host.Services.GetRequiredService<ShardAssignmentTable>();
+            (await RunUntilAsync(() => fromGroupTable.TryGetAssignment(StreamName, 0, out var a) && a.GroupId == FromGroupId, TimeSpan.FromSeconds(30)))
+                .Should().BeTrue("fromGroup's own watcher must see the stream/group assignment before any publish can ever succeed");
+
             using var connection = new RemontoireConnection(new RemontoireClientOptions(
                 MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
 
