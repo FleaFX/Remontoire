@@ -106,7 +106,6 @@ sealed class RaftReplicaHostedService(
             _shardLogs[group.GroupId] = shardLog;
 
             var ackIndexApplier = new AckIndexApplier(shardLog, ackIndex);
-            messagingRegistry.Register(group.GroupId, shardLog, ackIndex);
             _ackIndexAppliers[group.GroupId] = ackIndexApplier;
 
             _ackCheckpointers[group.GroupId] = new AckCheckpointer(new AckCheckpointerOptions(
@@ -120,7 +119,7 @@ sealed class RaftReplicaHostedService(
                     : (null, null),
                 IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId)));
 
-            _retentionEvaluators[group.GroupId] = new RetentionEvaluator(new RetentionEvaluatorOptions(
+            var retentionEvaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
                 ShardLog: shardLog, AckIndex: ackIndex,
                 IsMandatory: consumerGroup => ResolveStreamNameForGroup(group.GroupId) is not { } streamName
                     || assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mandatory,
@@ -128,6 +127,9 @@ sealed class RaftReplicaHostedService(
                 ForwardToDeadLetterAsync: (request, ct) => ForwardToDeadLetterAsync(ResolveStreamNameForGroup(group.GroupId), request, ct),
                 IsAdmissionPaused: () => admissionGate.IsPaused(group.GroupId),
                 IsLeader: () => replica.IsLeader));
+            _retentionEvaluators[group.GroupId] = retentionEvaluator;
+
+            messagingRegistry.Register(group.GroupId, shardLog, ackIndex, retentionEvaluator);
         }
 
         if (raftOptions.MetaGroup is { } metaOptions) {

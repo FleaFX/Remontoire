@@ -24,4 +24,11 @@ public sealed class RaftReplicaRegistry {
     /// Looks up the replica owning <paramref name="groupId"/>, if any is currently registered.
     /// </summary>
     public bool TryGet(string groupId, out RaftReplica replica) => _replicas.TryGetValue(groupId, out replica!);
+
+    /// <summary>
+    /// Every replica currently registered — a live snapshot, not a fixed collection: a group
+    /// registered or unregistered after this property is read is not reflected in the snapshot
+    /// already handed out.
+    /// </summary>
+    public IReadOnlyCollection<RaftReplica> All => _replicas.Values.ToArray();
 }

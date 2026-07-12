@@ -145,7 +145,6 @@ public class RemontoireGrpcClusterTests {
                     IsAdmissionPaused: () => admissionGate.IsPaused(GroupId),
                     SizePruneTickInterval: FastTickInterval));
             var applier = new AckIndexApplier(shardLog, ackIndex);
-            hosts[i].Services.GetRequiredService<MessagingGroupRegistry>().Register(GroupId, shardLog, ackIndex);
 
             var ackCheckpointer = new AckCheckpointer(new AckCheckpointerOptions(
                 ackIndex,
@@ -164,6 +163,7 @@ public class RemontoireGrpcClusterTests {
                 IsLeader: () => replica.IsLeader,
                 TickInterval: FastTickInterval));
             retentionEvaluatorRef = retentionEvaluator;
+            hosts[i].Services.GetRequiredService<MessagingGroupRegistry>().Register(GroupId, shardLog, ackIndex, retentionEvaluator);
 
             // Every node's own table needs to already agree on the one stream/group/assignment
             // this whole test file uses — hosts other than 0 have no meta-group replica of their
