@@ -23,6 +23,11 @@ builder.Services.AddGrpc();
 
 var app = builder.Build();
 
+ObservableMetricsRegistration.Register(
+    app.Services.GetRequiredService<RaftReplicaRegistry>(),
+    app.Services.GetRequiredService<MessagingGroupRegistry>(),
+    app.Services.GetRequiredService<ShardAssignmentTable>());
+
 app.MapGrpcService<RaftTransportGrpcService>();
 app.MapGrpcService<RemontoireClientGrpcService>();
 

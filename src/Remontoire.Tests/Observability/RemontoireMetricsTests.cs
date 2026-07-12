@@ -20,8 +20,6 @@ public class RemontoireMetricsTests {
 
         RemontoireMetrics.SegmentCompactionDurationSeconds.Name.Should().Be("remontoire_segment_compaction_duration_seconds");
         RemontoireMetrics.SegmentCompactionDurationSeconds.Unit.Should().Be("s");
-
-        RemontoireMetrics.RaftAppendEntriesSentTotal.Name.Should().Be("remontoire_raft_append_entries_sent_total");
     }
 
     [Fact]
@@ -30,6 +28,7 @@ public class RemontoireMetricsTests {
         RemontoireMetrics.ReplicationLagEntriesName.Should().Be("remontoire_replication_lag_entries");
         RemontoireMetrics.LeaderElectionsTotalName.Should().Be("remontoire_leader_elections_total");
         RemontoireMetrics.RaftTermName.Should().Be("remontoire_raft_term");
+        RemontoireMetrics.RaftAppendEntriesSentTotalName.Should().Be("remontoire_raft_append_entries_sent_total");
         RemontoireMetrics.OldestUnackedMessageAgeSecondsName.Should().Be("remontoire_oldest_unacked_message_age_seconds");
         RemontoireMetrics.PruningBlockedByGroupName.Should().Be("remontoire_pruning_blocked_by_group");
         RemontoireMetrics.ForcedPruneMessagesTotalName.Should().Be("remontoire_forced_prune_messages_total");

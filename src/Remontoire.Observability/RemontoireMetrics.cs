@@ -22,15 +22,17 @@ public static class RemontoireMetrics {
         Meter.CreateHistogram<double>("remontoire_wal_fsync_duration_seconds", unit: "s");
     public static readonly Histogram<double> SegmentCompactionDurationSeconds =
         Meter.CreateHistogram<double>("remontoire_segment_compaction_duration_seconds", unit: "s");
-    public static readonly Counter<long> RaftAppendEntriesSentTotal =
-        Meter.CreateCounter<long>("remontoire_raft_append_entries_sent_total");
 
     // State-snapshot — ObservableGauge/ObservableCounter registration itself happens once in
     // Program.cs (the callbacks need DI-resolved registries); this type only names them.
+    // remontoire_raft_append_entries_sent_total belongs here, not above: it's read off
+    // RaftReplica.AppendEntriesSentTotal (a per-peer dictionary already maintained on the actor),
+    // scraped via a callback over RaftReplicaRegistry.All — never recorded inline.
     public const string QueueDepthName = "remontoire_queue_depth";
     public const string ReplicationLagEntriesName = "remontoire_replication_lag_entries";
     public const string LeaderElectionsTotalName = "remontoire_leader_elections_total";
     public const string RaftTermName = "remontoire_raft_term";
+    public const string RaftAppendEntriesSentTotalName = "remontoire_raft_append_entries_sent_total";
     public const string OldestUnackedMessageAgeSecondsName = "remontoire_oldest_unacked_message_age_seconds";
     public const string PruningBlockedByGroupName = "remontoire_pruning_blocked_by_group";
     public const string ForcedPruneMessagesTotalName = "remontoire_forced_prune_messages_total";
