@@ -5,13 +5,14 @@ namespace Remontoire.Security;
 
 /// <summary>
 /// Generates a throwaway CA and CA-signed leaf certificates entirely in-process, using pure BCL
-/// <see cref="CertificateRequest"/> — no NuGet package, no external tool. For local dev-cluster
-/// bootstrapping and tests only: this CA's private key exists only in memory for as long as the
-/// caller holds it, with no revocation, rotation, or audit trail whatsoever. Never use in
-/// production — fase 8 deliberately does not build or run a real CA service (§5.6); an operator
-/// supplies real, already-issued certificates via <see cref="ClusterMtlsOptions"/> instead.
+/// <see cref="CertificateRequest"/> — no NuGet package, no external tool. Test-only: lives in
+/// <c>Remontoire.Tests</c>, not the shipped <c>Remontoire.Security</c> package, since nothing in
+/// production ever calls it — fase 8 deliberately does not build or run a real CA service (§5.6);
+/// an operator supplies real, already-issued certificates via <see cref="ClusterMtlsOptions"/>
+/// instead. This CA's private key exists only in memory for as long as the caller holds it, with
+/// no revocation, rotation, or audit trail whatsoever — never use outside tests.
 /// </summary>
-public static class DevClusterCertificateFactory {
+static class DevClusterCertificateFactory {
     static readonly TimeSpan NotBeforeSkew = TimeSpan.FromMinutes(5); // tolerate minor clock skew between this process and whoever validates the cert
     static readonly TimeSpan Lifetime = TimeSpan.FromDays(7);
 
