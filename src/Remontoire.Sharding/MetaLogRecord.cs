@@ -108,6 +108,27 @@ public abstract record MetaLogRecord {
                 WriteNullableInt32(writer, r.OffsetCount);
                 break;
 
+            case SetProduceAcl r:
+                writer.Write((byte)MetaLogRecordType.SetProduceAcl);
+                writer.Write(r.Subject);
+                writer.Write(r.StreamName);
+                writer.Write(r.Allowed);
+                break;
+
+            case SetConsumeAcl r:
+                writer.Write((byte)MetaLogRecordType.SetConsumeAcl);
+                writer.Write(r.Subject);
+                writer.Write(r.StreamName);
+                writer.Write(r.ConsumerGroup);
+                writer.Write(r.Allowed);
+                break;
+
+            case SetStreamSubjectClaimType r:
+                writer.Write((byte)MetaLogRecordType.SetStreamSubjectClaimType);
+                writer.Write(r.StreamName);
+                WriteNullableString(writer, r.ClaimType);
+                break;
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case.");
         }
@@ -135,6 +156,12 @@ public abstract record MetaLogRecord {
                 new SetStreamRetentionPolicy(reader.ReadString(), TimeSpan.FromTicks(reader.ReadInt64()), TimeSpan.FromTicks(reader.ReadInt64()), ReadNullableInt64(reader)),
             MetaLogRecordType.SetStreamCheckpointInterval =>
                 ReadSetStreamCheckpointInterval(reader),
+            MetaLogRecordType.SetProduceAcl =>
+                new SetProduceAcl(reader.ReadString(), reader.ReadString(), reader.ReadBoolean()),
+            MetaLogRecordType.SetConsumeAcl =>
+                new SetConsumeAcl(reader.ReadString(), reader.ReadString(), reader.ReadString(), reader.ReadBoolean()),
+            MetaLogRecordType.SetStreamSubjectClaimType =>
+                new SetStreamSubjectClaimType(reader.ReadString(), ReadNullableString(reader)),
             _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown MetaLogRecordType tag."),
         };
     }
@@ -178,6 +205,14 @@ public abstract record MetaLogRecord {
     static long? ReadNullableInt64(BinaryReader reader) => reader.ReadBoolean() ? reader.ReadInt64() : null;
 
     static int? ReadNullableInt32(BinaryReader reader) => reader.ReadBoolean() ? reader.ReadInt32() : null;
+
+    static void WriteNullableString(BinaryWriter writer, string? value) {
+        writer.Write(value is not null);
+        if (value is not null)
+            writer.Write(value);
+    }
+
+    static string? ReadNullableString(BinaryReader reader) => reader.ReadBoolean() ? reader.ReadString() : null;
 }
 
 /// <summary>
@@ -247,3 +282,28 @@ public sealed record SetStreamRetentionPolicy(string StreamName, TimeSpan AuditR
 /// own default.
 /// </summary>
 public sealed record SetStreamCheckpointInterval(string StreamName, TimeSpan? Interval, int? OffsetCount) : MetaLogRecord;
+
+/// <summary>
+/// Grants or revokes one subject's permission to produce onto one stream. A single toggle
+/// command, not a separate grant/revoke pair — see <see cref="SetConsumeAcl"/>'s own remarks
+/// for why.
+/// </summary>
+public sealed record SetProduceAcl(string Subject, string StreamName, bool Allowed) : MetaLogRecord;
+
+/// <summary>
+/// Grants or revokes one subject's permission to consume/ack as one consumer group on one
+/// stream. A separate record from <see cref="SetProduceAcl"/> because the two describe a
+/// different resource shape — stream-scoped versus stream-and-group-scoped — not because they
+/// have different authorization actors the way <see cref="SetConsumerGroupAckMode"/>/
+/// <see cref="SetConsumerGroupMandatory"/> do: ACL management (grant and revoke, for either
+/// resource) is uniformly operator-only.
+/// </summary>
+public sealed record SetConsumeAcl(string Subject, string StreamName, string ConsumerGroup, bool Allowed) : MetaLogRecord;
+
+/// <summary>
+/// Overrides which claim identifies the calling subject for ACL purposes on one stream — e.g.
+/// "client_id" for a stream meant for machine clients, "sub" for one meant for delegated human
+/// users. Falls back to the cluster-wide default when <paramref name="ClaimType"/> is
+/// <see langword="null"/>.
+/// </summary>
+public sealed record SetStreamSubjectClaimType(string StreamName, string? ClaimType) : MetaLogRecord;

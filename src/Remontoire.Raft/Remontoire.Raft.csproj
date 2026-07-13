@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\Remontoire.Security\Remontoire.Security.csproj" />
     <ProjectReference Include="..\Remontoire.Storage\Remontoire.Storage.csproj" />
   </ItemGroup>
 

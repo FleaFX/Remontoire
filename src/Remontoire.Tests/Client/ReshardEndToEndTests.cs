@@ -15,6 +15,7 @@ using Remontoire.Server;
 using Remontoire.Server.Grpc;
 using Remontoire.Sharding;
 using Remontoire.Storage;
+using Remontoire.Tests;
 
 namespace Remontoire.Client;
 
@@ -55,8 +56,7 @@ public class ReshardEndToEndTests {
     static async Task<WebApplication> StartDataHostAsync() {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
 
         builder.Services.AddGrpc();
         builder.Services.AddSingleton<RaftReplicaRegistry>();
@@ -75,8 +75,7 @@ public class ReshardEndToEndTests {
     static async Task<WebApplication> StartMetaHostAsync() {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
 
         builder.Services.AddGrpc();
         builder.Services.AddSingleton<MetaLogJournal>();
@@ -198,7 +197,8 @@ public class ReshardEndToEndTests {
                     $"assignment: {(fromGroupTable.TryGetAssignment(StreamName, 0, out var finalAssignment) ? finalAssignment.ToString() : "none")}");
 
             using var connection = new RemontoireConnection(new RemontoireClientOptions(
-                MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
+                MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50),
+                AllowInsecureTransport: true));
 
             var published = new List<(long Offset, string Payload)>();
             for (var i = 0; i < 5; i++) {

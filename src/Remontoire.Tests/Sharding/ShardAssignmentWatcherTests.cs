@@ -11,6 +11,7 @@ using Remontoire.Raft;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
 using Remontoire.Storage;
+using Remontoire.Tests;
 
 namespace Remontoire.Sharding;
 
@@ -61,8 +62,7 @@ public class ShardAssignmentWatcherTests {
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
         builder.Services.AddGrpc();
         builder.Services.AddSingleton(journal);
 

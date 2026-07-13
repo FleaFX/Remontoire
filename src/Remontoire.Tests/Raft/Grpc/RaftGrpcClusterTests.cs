@@ -5,7 +5,9 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Raft.Grpc;
+using Remontoire.Security;
 using Remontoire.Storage;
+using Remontoire.Tests;
 
 namespace Remontoire.Raft;
 
@@ -33,8 +35,7 @@ public class RaftGrpcClusterTests {
     static async Task<WebApplication> StartHostAsync() {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(System.Net.IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
 
         builder.Services.AddGrpc();
         builder.Services.AddSingleton<RaftReplicaRegistry>();
@@ -64,7 +65,7 @@ public class RaftGrpcClusterTests {
                     ElectionTimeoutMin: TimeSpan.FromMilliseconds(150),
                     ElectionTimeoutMax: TimeSpan.FromMilliseconds(300));
 
-                var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout);
+                var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout, new ClusterMtlsOptions { AllowInsecureTransport = true });
                 transports.Add(transport);
 
                 var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), transport, config);

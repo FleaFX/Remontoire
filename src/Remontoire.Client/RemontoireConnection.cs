@@ -1,10 +1,15 @@
 using System.Collections.Concurrent;
+using System.Net.Security;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography.X509Certificates;
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Remontoire.Client.V1;
 using Remontoire.Meta.V1;
+using Remontoire.Security;
 using Remontoire.Sharding;
 
 namespace Remontoire.Client;
@@ -21,25 +26,61 @@ namespace Remontoire.Client;
 /// </summary>
 public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsumer, IDisposable {
     readonly RemontoireClientOptions _options;
+    readonly ILogger<RemontoireConnection> _logger;
     readonly LeaderAddressCache _leaderCache = new();
     readonly ConcurrentDictionary<Uri, (GrpcChannel Channel, RemontoireClient.RemontoireClientClient Client)> _clients = new();
     readonly ShardAssignmentTable _table = new();
     readonly ShardAssignmentWatcher _watcher;
     readonly GrpcChannel _seedChannel;
-
-    // Without mTLS (a later phase), member addresses are plain http:// — .NET's HTTP/2 client
-    // otherwise refuses cleartext HTTP/2 outright. Process-wide and idempotent, so setting it
-    // here means it can never be silently missed, the same reasoning RaftGrpcTransport uses.
-    static RemontoireConnection() => AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
+    readonly X509Certificate2? _caCertificate;
+    readonly PeerCertificateValidator? _caValidator;
 
     /// <summary>
     /// Starts a <see cref="ShardAssignmentWatcher"/> against the first of
     /// <see cref="RemontoireClientOptions.MetaGroupSeedAddresses"/> immediately.
     /// </summary>
-    public RemontoireConnection(RemontoireClientOptions options) {
+    public RemontoireConnection(RemontoireClientOptions options, ILogger<RemontoireConnection>? logger = null) {
         _options = options;
-        _seedChannel = GrpcChannel.ForAddress(options.MetaGroupSeedAddresses[0]);
+        _logger = logger ?? NullLogger<RemontoireConnection>.Instance;
+
+        if (options.AllowInsecureTransport) {
+            // Without mTLS, member addresses are plain http:// — .NET's HTTP/2 client otherwise
+            // refuses cleartext HTTP/2 outright. Set per-instance (never as an unconditional
+            // static switch) and logged loudly every time, so an accidentally-insecure deployment
+            // fails loud rather than silently succeeding — the same discipline RaftGrpcTransport uses.
+            _logger.LogCritical("AllowInsecureTransport is set — this connection talks to the cluster unencrypted. Never use this outside development/test.");
+            AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
+        }
+
+        // The cluster's client-facing certificate may be signed by the same cluster-internal CA
+        // node-to-node mTLS uses (never an OS-trusted root, by design) — without this, no real
+        // connection could ever complete a TLS handshake against it. expectedSubjects: null — this
+        // connection can legitimately reach any member of the cluster, not one pinned identity.
+        if (options.ClusterCaCertificatePath is { } caCertificatePath) {
+            _caCertificate = X509CertificateLoader.LoadCertificateFromFile(caCertificatePath);
+            _caValidator = new PeerCertificateValidator(_caCertificate, expectedSubjects: null);
+        }
+
+        _seedChannel = CreateChannel(options.MetaGroupSeedAddresses[0]);
         _watcher = new ShardAssignmentWatcher(new ShardAssignmentMeta.ShardAssignmentMetaClient(_seedChannel), _table);
+    }
+
+    // A fresh SocketsHttpHandler per channel — never shared, since GrpcChannelOptions.DisposeHttpClient
+    // ties each handler's lifetime to its own channel's Dispose(); sharing one across multiple
+    // channels would make disposing the first channel tear down every other channel's handler too.
+    // _caValidator itself is safely shared: it's just logic plus an immutable CA certificate, not
+    // tied to any one channel's lifetime.
+    GrpcChannel CreateChannel(Uri address) {
+        if (_caValidator is null)
+            return GrpcChannel.ForAddress(address);
+
+        var handler = new SocketsHttpHandler {
+            SslOptions = new SslClientAuthenticationOptions {
+                RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
+                    certificate is X509Certificate2 candidate && chain is not null && _caValidator.Validate(candidate, chain, errors),
+            },
+        };
+        return GrpcChannel.ForAddress(address, new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true });
     }
 
     /// <inheritdoc />
@@ -215,8 +256,8 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     static Uri RandomMemberAddress(IReadOnlyList<Uri> memberAddresses) => memberAddresses[Random.Shared.Next(memberAddresses.Count)];
 
     RemontoireClient.RemontoireClientClient ClientFor(Uri address) =>
-        _clients.GetOrAdd(address, static a => {
-            var channel = GrpcChannel.ForAddress(a);
+        _clients.GetOrAdd(address, a => {
+            var channel = CreateChannel(a);
             return (channel, new RemontoireClient.RemontoireClientClient(channel));
         }).Client;
 
@@ -240,5 +281,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
 
         foreach (var (channel, _) in _clients.Values)
             channel.Dispose();
+
+        _caCertificate?.Dispose();
     }
 }

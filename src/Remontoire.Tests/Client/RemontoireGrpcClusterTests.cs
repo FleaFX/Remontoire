@@ -14,10 +14,12 @@ using Remontoire.Messaging;
 using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
+using Remontoire.Security;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
 using Remontoire.Sharding;
 using Remontoire.Storage;
+using Remontoire.Tests;
 
 namespace Remontoire.Client;
 
@@ -83,8 +85,7 @@ public class RemontoireGrpcClusterTests {
     static async Task<WebApplication> StartHostAsync() {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
 
         builder.Services.AddGrpc();
         builder.Services.AddSingleton<RaftReplicaRegistry>();
@@ -117,7 +118,7 @@ public class RemontoireGrpcClusterTests {
                 ElectionTimeoutMin: TimeSpan.FromMilliseconds(150),
                 ElectionTimeoutMax: TimeSpan.FromMilliseconds(300));
 
-            var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout);
+            var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout, new ClusterMtlsOptions { AllowInsecureTransport = true });
             var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), transport, config);
             await replica.StartAsync();
             hosts[i].Services.GetRequiredService<RaftReplicaRegistry>().Register(replica);
@@ -237,7 +238,8 @@ public class RemontoireGrpcClusterTests {
         new(new RemontoireClientOptions(
             MetaGroupSeedAddresses: [new Uri(nodes.First().Host.Urls.First())],
             MaxRedirectAttempts: 10,
-            RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
+            RedirectRetryDelay: TimeSpan.FromMilliseconds(50),
+            AllowInsecureTransport: true));
 
     // Overwrites GroupId's membership, as seen from node's own table, down to node's own address
     // only — reproducing "this connection has never heard of any other member" now that a client

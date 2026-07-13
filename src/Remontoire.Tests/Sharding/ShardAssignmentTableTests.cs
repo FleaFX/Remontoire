@@ -271,6 +271,109 @@ public class ShardAssignmentTableTests {
         }
     }
 
+    public class CanProduce {
+        [Fact]
+        public void Defaults_to_denied_for_a_never_granted_subject_and_stream() {
+            var table = new ShardAssignmentTable();
+
+            table.CanProduce("client-1", "orders").Should().BeFalse();
+        }
+
+        [Fact]
+        public void SetProduceAcl_with_true_grants_access() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new SetProduceAcl("client-1", "orders", true));
+
+            table.CanProduce("client-1", "orders").Should().BeTrue();
+        }
+
+        [Fact]
+        public void SetProduceAcl_with_false_revokes_a_previous_grant() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new SetProduceAcl("client-1", "orders", true));
+
+            table.Apply(new SetProduceAcl("client-1", "orders", false));
+
+            table.CanProduce("client-1", "orders").Should().BeFalse();
+        }
+
+        [Fact]
+        public void A_grant_for_one_subject_and_stream_does_not_affect_a_different_subject_or_stream() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new SetProduceAcl("client-1", "orders", true));
+
+            table.CanProduce("client-2", "orders").Should().BeFalse("the grant is scoped to client-1, not every subject");
+            table.CanProduce("client-1", "shipments").Should().BeFalse("the grant is scoped to the orders stream, not every stream");
+        }
+    }
+
+    public class CanConsume {
+        [Fact]
+        public void Defaults_to_denied_for_a_never_granted_subject_stream_and_consumer_group() {
+            var table = new ShardAssignmentTable();
+
+            table.CanConsume("client-1", "orders", "billing").Should().BeFalse();
+        }
+
+        [Fact]
+        public void SetConsumeAcl_with_true_grants_access() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new SetConsumeAcl("client-1", "orders", "billing", true));
+
+            table.CanConsume("client-1", "orders", "billing").Should().BeTrue();
+        }
+
+        [Fact]
+        public void SetConsumeAcl_with_false_revokes_a_previous_grant() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new SetConsumeAcl("client-1", "orders", "billing", true));
+
+            table.Apply(new SetConsumeAcl("client-1", "orders", "billing", false));
+
+            table.CanConsume("client-1", "orders", "billing").Should().BeFalse();
+        }
+
+        [Fact]
+        public void A_grant_for_one_consumer_group_does_not_affect_a_different_consumer_group_on_the_same_stream() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new SetConsumeAcl("client-1", "orders", "billing", true));
+
+            table.CanConsume("client-1", "orders", "shipping").Should().BeFalse();
+        }
+    }
+
+    public class GetSubjectClaimTypeOverride {
+        [Fact]
+        public void Returns_null_for_a_never_touched_stream() {
+            var table = new ShardAssignmentTable();
+
+            table.GetSubjectClaimTypeOverride("orders").Should().BeNull();
+        }
+
+        [Fact]
+        public void SetStreamSubjectClaimType_sets_the_override() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new SetStreamSubjectClaimType("orders", "client_id"));
+
+            table.GetSubjectClaimTypeOverride("orders").Should().Be("client_id");
+        }
+
+        [Fact]
+        public void SetStreamSubjectClaimType_with_null_clears_a_previous_override() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new SetStreamSubjectClaimType("orders", "client_id"));
+
+            table.Apply(new SetStreamSubjectClaimType("orders", null));
+
+            table.GetSubjectClaimTypeOverride("orders").Should().BeNull();
+        }
+    }
+
     public class GetConsumerGroupPolicy {
         [Fact]
         public void Defaults_to_strict_and_mandatory_for_a_never_touched_group() {

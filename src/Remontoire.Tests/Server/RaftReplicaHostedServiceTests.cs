@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
+using Remontoire.Security;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 
@@ -17,7 +18,8 @@ public class RaftReplicaHostedServiceTests {
                 var registry = new RaftReplicaRegistry();
                 var messagingRegistry = new MessagingGroupRegistry();
                 var service = new RaftReplicaHostedService(
-                    Options.Create(new RaftServerOptions { Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }] }),
+                    Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true }, Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }] }),
                     registry, messagingRegistry, new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
@@ -42,6 +44,7 @@ public class RaftReplicaHostedServiceTests {
                 var messagingRegistry = new MessagingGroupRegistry();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [
                             new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = directoryA },
                             new RaftGroupOptions { GroupId = "group-2", NodeId = "node-1", DataDirectory = directoryB },
@@ -73,6 +76,7 @@ public class RaftReplicaHostedServiceTests {
                 var messagingRegistry = new MessagingGroupRegistry();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
@@ -104,6 +108,7 @@ public class RaftReplicaHostedServiceTests {
                 var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
@@ -135,6 +140,7 @@ public class RaftReplicaHostedServiceTests {
                 var registry = new RaftReplicaRegistry();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [
                             new RaftGroupOptions {
                                 GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory,
@@ -164,6 +170,7 @@ public class RaftReplicaHostedServiceTests {
             try {
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroupSeedAddresses = ["http://localhost:61002"],
                     }),
@@ -193,6 +200,7 @@ public class RaftReplicaHostedServiceTests {
             try {
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
@@ -219,6 +227,7 @@ public class RaftReplicaHostedServiceTests {
                 var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
@@ -312,6 +321,7 @@ public class RaftReplicaHostedServiceTests {
                 var registry = new RaftReplicaRegistry();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RaftServerOptions {
+                        Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),

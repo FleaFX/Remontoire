@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Remontoire.Observability;
 using Remontoire.Raft.Grpc;
+using Remontoire.Security;
 using Remontoire.Sharding;
 
 namespace Remontoire.Server;
@@ -39,7 +40,10 @@ public class ObservabilityEndToEndTests {
         var messagingRegistry = new MessagingGroupRegistry();
         var assignmentTable = new ShardAssignmentTable();
         var service = new RaftReplicaHostedService(
-            Options.Create(new RaftServerOptions { Groups = [new RaftGroupOptions { GroupId = GroupId, NodeId = "node-1", DataDirectory = directory }] }),
+            Options.Create(new RaftServerOptions {
+                Mtls = new ClusterMtlsOptions { AllowInsecureTransport = true },
+                Groups = [new RaftGroupOptions { GroupId = GroupId, NodeId = "node-1", DataDirectory = directory }],
+            }),
             raftRegistry, messagingRegistry, new LeaderAddressDirectory(), assignmentTable, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory);
 
         try {
