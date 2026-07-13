@@ -22,6 +22,7 @@ namespace Remontoire.Security;
 // the full authorization scenario matrix yet (RemontoireAuthorizationInterceptorTests covers that
 // separately, step 4), just the one thing this step adds: an unauthenticated call is rejected
 // before it ever reaches RemontoireClientGrpcService's own logic.
+[Collection("RealNetwork")]
 public class RemontoireAuthenticationInterceptorTests {
     static async Task<WebApplication> StartHostAsync() {
         var builder = WebApplication.CreateBuilder();

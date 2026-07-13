@@ -15,9 +15,14 @@ public sealed record ClusterMtlsCredentials(X509Certificate2 CaCertificate, X509
 public static class ClusterMtlsCredentialsLoader {
     public static ClusterMtlsCredentials Load(ClusterMtlsOptions options) {
         var ca = X509CertificateLoader.LoadCertificateFromFile(options.ClusterCaCertificatePath);
-        var node = string.IsNullOrEmpty(options.NodeCertificatePassword)
-            ? X509Certificate2.CreateFromPemFile(options.NodeCertificatePath, options.NodeCertificateKeyPath)
-            : X509Certificate2.CreateFromEncryptedPemFile(options.NodeCertificatePath, options.NodeCertificatePassword, options.NodeCertificateKeyPath);
-        return new ClusterMtlsCredentials(ca, node);
+        try {
+            var node = string.IsNullOrEmpty(options.NodeCertificatePassword)
+                ? X509Certificate2.CreateFromPemFile(options.NodeCertificatePath, options.NodeCertificateKeyPath)
+                : X509Certificate2.CreateFromEncryptedPemFile(options.NodeCertificatePath, options.NodeCertificatePassword, options.NodeCertificateKeyPath);
+            return new ClusterMtlsCredentials(ca, node);
+        } catch {
+            ca.Dispose();
+            throw;
+        }
     }
 }

@@ -20,6 +20,7 @@ namespace Remontoire.Raft.Grpc;
 // ClientCertificateMode.RequireCertificate, validated by the actual production
 // PeerCertificateValidator (not a reimplementation) — not the PeerCertificateRequiredInterceptor,
 // which is defense-in-depth only (§5.1); this test proves the TLS handshake itself is the real gate.
+[Collection("RealNetwork")]
 public class RaftGrpcMtlsClusterTests {
     static async Task<WebApplication> StartServerAsync(X509Certificate2 caPublic, X509Certificate2 serverCertificate) {
         var builder = WebApplication.CreateBuilder();

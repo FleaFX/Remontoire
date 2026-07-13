@@ -21,6 +21,7 @@ namespace Remontoire.Security;
 // ClientCertificateMode.RequireCertificate over a real TLS connection is that test's own concern;
 // this one is only about what PeerCertificateRequiredInterceptor itself does once a certificate
 // either is or isn't present on the connection.
+[Collection("RealNetwork")]
 public class PeerCertificateRequiredInterceptorTests {
     static async Task<WebApplication> StartHostAsync(X509Certificate2? clientCertificate) {
         var builder = WebApplication.CreateBuilder();

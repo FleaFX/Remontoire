@@ -27,6 +27,7 @@ namespace Remontoire.Security;
 // here is proven by reaching NotFound (no stream registered in this minimal host) rather than a
 // full, working Publish/Ack/Consume — that end-to-end business logic is already covered elsewhere
 // (RemontoireGrpcClusterTests); this file is only about the authorization gate itself.
+[Collection("RealNetwork")]
 public class RemontoireAuthorizationInterceptorTests {
     const string StreamName = "orders";
     const string ConsumerGroup = "billing";

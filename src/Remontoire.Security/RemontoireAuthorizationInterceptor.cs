@@ -42,6 +42,16 @@ public sealed class RemontoireAuthorizationInterceptor(RemontoireAuthorizer auth
 
             case ConsumeRequest consume when !authorizer.CanConsume(user, consume.StreamName, consume.ConsumerGroup):
                 throw new RpcException(new Status(StatusCode.PermissionDenied, $"Not authorized to consume/ack as '{consume.ConsumerGroup}' on '{consume.StreamName}'."));
+
+            // One of the three known request types, but didn't match any of the deny-conditions
+            // above — authorized, let it through.
+            case PublishRequest or AckRequest or ConsumeRequest:
+                break;
+
+            // Fail closed, not open: a request type this interceptor was never taught to check
+            // must never silently bypass authorization just because no case matched it.
+            default:
+                throw new RpcException(new Status(StatusCode.PermissionDenied, $"No authorization rule registered for request type '{typeof(TRequest).Name}'."));
         }
     }
 }

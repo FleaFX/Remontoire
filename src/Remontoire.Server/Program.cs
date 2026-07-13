@@ -21,6 +21,16 @@ var raftOptions = builder.Configuration.GetSection("Raft").Get<RaftServerOptions
 var secure = !raftOptions.Mtls.AllowInsecureTransport;
 var mtlsCredentials = secure ? ClusterMtlsCredentialsLoader.Load(raftOptions.Mtls) : null;
 
+if (!secure) {
+    // No DI container to resolve a logger from yet at this point in startup (Kestrel's own
+    // endpoints are configured before builder.Build()) — a throwaway logger factory just for this
+    // one critical line, so this branch is never silent, the same discipline RaftGrpcTransport and
+    // RemontoireConnection apply to the exact same flag.
+    using var bootstrapLoggerFactory = LoggerFactory.Create(logging => logging.AddJsonConsole(options => options.IncludeScopes = true));
+    bootstrapLoggerFactory.CreateLogger("Program").LogCritical(
+        "AllowInsecureTransport is set — Raft peer and client gRPC traffic run unencrypted, without mTLS. Never use this outside development/test.");
+}
+
 // Server-side never knows, before validation, which specific peer is connecting — so unlike
 // RaftGrpcTransport's own outbound-only validators (one expected subject per dialed peer), this is
 // the union of every configured peer's expected subject across every group this node hosts. Empty
