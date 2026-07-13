@@ -99,7 +99,9 @@ static class ObservableMetricsRegistration {
 
         using (handle) {
             var nowMicros = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
-            return (nowMicros - handle.Entry.TimestampMicros) / 1_000_000.0;
+            // Both operands cast to long before subtracting — see RemontoireClientGrpcService.
+            // RecordAckMetrics's identical clock-skew-clamp reasoning.
+            return Math.Max(0L, (long)nowMicros - (long)handle.Entry.TimestampMicros) / 1_000_000.0;
         }
     }
 }

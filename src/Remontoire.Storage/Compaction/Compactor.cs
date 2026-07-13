@@ -133,7 +133,10 @@ static class Compactor {
     /// segment to read its offset range before deleting it — a deliberate, new per-tick I/O cost
     /// (this pass used to need only each file's path and size, never its contents) needed so
     /// forced pruning can report a message count, not just a segment count. Acceptable because
-    /// size-pruning is already an infrequent, last-resort path.
+    /// size-pruning is already an infrequent, last-resort path. A segment that fails to open (a
+    /// corrupt or locked file) is skipped — left in place, not counted as freed — rather than
+    /// letting the whole pass throw: this is the last-resort guarantee break against a full disk,
+    /// so one unreadable segment must never permanently block every other, readable one behind it.
     /// </remarks>
     public static async Task<IReadOnlyList<PrunedSegment>> PruneOldestUntilUnderSizeAsync(string directory, long maxTotalBytes, CancellationToken cancellationToken = default) {
         // Oldest-first by filename alone — segment-<MinOffset:D20>.sst's zero-padded offset
@@ -150,10 +153,18 @@ static class Compactor {
                 break;
 
             var size = new FileInfo(path).Length;
-            using (var segment = await SstSegment.OpenAsync(path, cancellationToken))
-                deleted.Add(new PrunedSegment(path, segment.MaxOffset - segment.MinOffset + 1));
+            ulong messageCount;
+            try {
+                using var segment = await SstSegment.OpenAsync(path, cancellationToken);
+                messageCount = segment.MaxOffset - segment.MinOffset + 1;
+            } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                // Left on disk, not counted toward totalBytes below — a corrupt/locked segment
+                // must not stop this pass from still freeing whatever else it safely can.
+                continue;
+            }
 
             File.Delete(path);
+            deleted.Add(new PrunedSegment(path, messageCount));
             totalBytes -= size;
         }
 

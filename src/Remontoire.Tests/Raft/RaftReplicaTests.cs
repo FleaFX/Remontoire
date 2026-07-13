@@ -904,7 +904,9 @@ public class RaftReplicaTests {
             replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration));
             await replica.DrainAsync();
 
-            replica.LastActorLoopActivity.Should().BeOnOrAfter(before);
+            // BeAfter, not BeOnOrAfter: a regression where this field never updates again after
+            // StartAsync's own initial stamp must fail this test, not pass it by coincidence.
+            replica.LastActorLoopActivity.Should().BeAfter(before);
         }
 
         [Fact]
@@ -958,8 +960,13 @@ public class RaftReplicaTests {
 
             await replica.ProposeAsync(new AppendRequest(ReadOnlyMemory<byte>.Empty, [], "hello"u8.ToArray()));
 
-            var walAppend = recorded.Should().ContainSingle(a => a.OperationName == "wal-append").Which;
-            var raftReplicate = recorded.Should().ContainSingle(a => a.OperationName == "raft-replicate").Which;
+            // ActivityListener is registered process-wide — other, concurrently-running test
+            // classes can produce their own "wal-append"/"raft-replicate" activities from their own,
+            // unrelated ProposeAsync calls. Filtering by this test's own TraceId (a fresh, random
+            // value per StartActivity call) rules out that cross-test contamination entirely.
+            var ownTrace = recorded.Where(a => a.TraceId == callerActivity.TraceId).ToList();
+            var walAppend = ownTrace.Should().ContainSingle(a => a.OperationName == "wal-append").Which;
+            var raftReplicate = ownTrace.Should().ContainSingle(a => a.OperationName == "raft-replicate").Which;
             walAppend.ParentSpanId.Should().Be(callerActivity.SpanId);
             raftReplicate.ParentSpanId.Should().Be(callerActivity.SpanId);
         }

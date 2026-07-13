@@ -16,6 +16,7 @@ namespace Remontoire.Server;
 // RemontoireGrpcClusterTests (its harness already runs a fast-ticking RetentionEvaluator — this
 // one, going through RaftReplicaHostedService's own hardcoded 1-minute default tick, would make
 // that scenario needlessly slow here).
+[Collection("ConsoleOutput")]
 public class ObservabilityEndToEndTests {
     // RemontoireMetrics.Meter is a process-wide static singleton, and this test suite runs many
     // test classes in parallel — a literal "group-1" would collide with RemontoireGrpcClusterTests'

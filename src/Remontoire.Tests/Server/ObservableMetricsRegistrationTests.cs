@@ -77,7 +77,8 @@ public class ObservableMetricsRegistrationTests {
                         measurements.Where(m => m.Name == "remontoire_raft_term").Should().ContainSingle(m =>
                             (long)m.Value == 1 && m.Tags.Contains(new KeyValuePair<string, object?>("shard", "shard-a")));
 
-                        measurements.Where(m => m.Name == "remontoire_leader_elections_total").Should().ContainSingle(m => (long)m.Value == 1);
+                        measurements.Where(m => m.Name == "remontoire_leader_elections_total" && m.Tags.Contains(new KeyValuePair<string, object?>("shard", "shard-a")))
+                            .Should().ContainSingle(m => (long)m.Value == 1);
 
                         // At least one send (the term-opening NoOp) plus one per real propose below —
                         // exact count isn't asserted (a heartbeat/retry could add more); only that
@@ -102,8 +103,10 @@ public class ObservableMetricsRegistrationTests {
                         measurements.Where(m => m.Name == "remontoire_oldest_unacked_message_age_seconds" && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "fast-group")))
                             .Should().ContainSingle(m => (double)m.Value == 0, "fast-group's watermark caught up to NextOffsetToApply — nothing unacked to age");
 
-                        measurements.Should().ContainSingle(m => m.Name == "remontoire_forced_prune_messages_total" && (long)m.Value == 0);
-                        measurements.Should().ContainSingle(m => m.Name == "remontoire_dead_letter_messages_total" && (long)m.Value == 0);
+                        measurements.Where(m => m.Name == "remontoire_forced_prune_messages_total" && m.Tags.Contains(new KeyValuePair<string, object?>("shard", "shard-a")))
+                            .Should().ContainSingle(m => (long)m.Value == 0);
+                        measurements.Where(m => m.Name == "remontoire_dead_letter_messages_total" && m.Tags.Contains(new KeyValuePair<string, object?>("shard", "shard-a")))
+                            .Should().ContainSingle(m => (long)m.Value == 0);
                     } finally {
                         await retentionEvaluator.DisposeAsync();
                     }

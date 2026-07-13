@@ -6,6 +6,7 @@ namespace Remontoire.Server;
 
 // Regression test for a real pitfall: JsonConsoleFormatter silently drops scopes with no error at
 // all unless IncludeScopes is explicitly set to true.
+[Collection("ConsoleOutput")]
 public class JsonConsoleLoggingTests {
     [Fact]
     public void A_log_line_written_inside_a_scope_carries_NodeId_and_ShardGroupId_when_IncludeScopes_is_enabled() {

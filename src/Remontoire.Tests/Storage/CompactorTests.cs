@@ -232,6 +232,26 @@ public class CompactorTests {
                 Directory.Delete(directory, recursive: true);
             }
         }
+
+        // Regression test: this is the last-resort guarantee break against a full disk — a single
+        // corrupt segment must never permanently block every other, readable segment behind it.
+        [Fact]
+        public async Task Skips_a_corrupt_segment_but_still_prunes_every_other_readable_one() {
+            var directory = CreateTempDirectory();
+            try {
+                var corruptPath = Path.Combine(directory, $"segment-{0:D20}.sst");
+                await File.WriteAllBytesAsync(corruptPath, "not a real segment file"u8.ToArray());
+                var readable = await WriteSegmentAsync(directory, SampleEntries(10, 5)); // sorts after the corrupt one
+
+                var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes: 0);
+
+                deleted.Should().ContainSingle().Which.Path.Should().Be(readable);
+                File.Exists(corruptPath).Should().BeTrue("a segment that fails to open must be left in place, not deleted blind");
+                File.Exists(readable).Should().BeFalse();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     public class MergeAsync {
@@ -243,11 +263,11 @@ public class CompactorTests {
                 var pathTwo = await WriteSegmentAsync(directory, SampleEntries(5, 5));
                 var plan = new CompactionPlan([await SstSegment.OpenAsync(pathOne), await SstSegment.OpenAsync(pathTwo)]);
 
-                TimeSpan? measured = null;
-                await plan.MergeAsync(duration => measured = duration);
+                var measurements = new List<TimeSpan>();
+                await plan.MergeAsync(measurements.Add);
 
-                measured.Should().NotBeNull();
-                measured!.Value.Should().BeGreaterThanOrEqualTo(TimeSpan.Zero);
+                measurements.Should().ContainSingle("the name promises \"once\" — a regression invoking the callback more than once must fail this");
+                measurements[0].Should().BeGreaterThanOrEqualTo(TimeSpan.Zero);
             } finally {
                 Directory.Delete(directory, recursive: true);
             }

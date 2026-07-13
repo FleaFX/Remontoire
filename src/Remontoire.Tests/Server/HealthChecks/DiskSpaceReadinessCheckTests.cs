@@ -22,6 +22,19 @@ public class DiskSpaceReadinessCheckTests {
         result.Description.Should().Contain("below threshold");
     }
 
+    // Regression test: Path.GetPathRoot returns "" for a relative path (e.g. this repo's own
+    // appsettings.json configures DataDirectory as a relative "data/node-1"), which used to get
+    // silently filtered out of driveRoots entirely — the check would then unconditionally report
+    // Healthy regardless of actual free space, never even reaching the DriveInfo lookup.
+    [Fact]
+    public async Task Resolves_a_relative_DataDirectory_to_its_real_drive_instead_of_silently_skipping_it() {
+        var check = new DiskSpaceReadinessCheck(OptionsFor("some-relative-directory", minFreeDiskSpaceBytes: long.MaxValue));
+
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        result.Status.Should().Be(HealthStatus.Unhealthy, "a relative path must still resolve to its real drive, not be silently dropped from the check");
+    }
+
     [Fact]
     public async Task Checks_both_the_meta_group_and_every_data_group_s_directory() {
         var options = new RaftServerOptions {

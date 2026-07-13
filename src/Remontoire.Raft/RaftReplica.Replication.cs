@@ -146,7 +146,7 @@ public sealed partial class RaftReplica {
         // Explicit parentContext, never ambient Activity.Current: this method runs on the actor's
         // own detached Task.Run, so Activity.Current here would reflect whatever last ran on that
         // background thread, never the caller's own request-scoped Activity.
-        using (RaftActivitySource.Source.StartActivity("wal-append", ActivityKind.Internal, callerContext ?? default))
+        using (RaftActivitySource.StartActivity("wal-append", callerContext))
             // Durable local append before replication: the leader's own entry counts toward the
             // quorum, and it may only count once fsynced.
             await raftLog.AppendAsync([record]);
@@ -157,7 +157,7 @@ public sealed partial class RaftReplica {
         // without this call.
         await TryAdvanceLeaderCommitAsync();
 
-        using (RaftActivitySource.Source.StartActivity("raft-replicate", ActivityKind.Internal, callerContext ?? default))
+        using (RaftActivitySource.StartActivity("raft-replicate", callerContext))
             await ReplicateToAllPeersAsync();
     }
 

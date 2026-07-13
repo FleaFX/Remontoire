@@ -16,7 +16,13 @@ sealed class DiskSpaceReadinessCheck(IOptions<RaftServerOptions> options) : IHea
         if (raftOptions.MetaGroup is { } metaGroup)
             dataDirectories = dataDirectories.Append(metaGroup.DataDirectory);
 
-        var driveRoots = dataDirectories.Select(Path.GetPathRoot).Where(root => !string.IsNullOrEmpty(root)).Distinct();
+        // GetFullPath first: GetPathRoot returns "" for a relative path (this repo's own
+        // appsettings.json configures DataDirectory as a relative "data/node-1"), which would
+        // otherwise silently drop it from driveRoots below and this check would never fail no
+        // matter how little free space is left. OrdinalIgnoreCase for Distinct: Windows drive
+        // letters are case-insensitive ("C:\" and "c:\" are the same drive).
+        var driveRoots = dataDirectories.Select(directory => Path.GetPathRoot(Path.GetFullPath(directory)))
+            .Where(root => !string.IsNullOrEmpty(root)).Distinct(StringComparer.OrdinalIgnoreCase);
 
         foreach (var root in driveRoots) {
             var drive = new DriveInfo(root!);

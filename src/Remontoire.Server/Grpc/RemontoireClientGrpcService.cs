@@ -136,7 +136,13 @@ public sealed class RemontoireClientGrpcService(
                 continue;
 
             using (handle)
-                RemontoireMetrics.AckLatencySeconds.Record((nowMicros - handle.Entry.TimestampMicros) / 1_000_000.0,
+                // Both operands cast to long before subtracting, not after: TimestampMicros was
+                // stamped by whichever node was leader at ingest time, nowMicros by whichever node
+                // handles this Ack (possibly a different one, via a follower read) — clock skew
+                // between them can make TimestampMicros briefly exceed nowMicros, which a plain
+                // ulong subtraction would silently wrap into a multi-billion-second latency instead
+                // of clamping to zero.
+                RemontoireMetrics.AckLatencySeconds.Record(Math.Max(0L, (long)nowMicros - (long)handle.Entry.TimestampMicros) / 1_000_000.0,
                     new KeyValuePair<string, object?>("stream", request.StreamName),
                     new KeyValuePair<string, object?>("shard", request.ShardId.ToString()));
         }

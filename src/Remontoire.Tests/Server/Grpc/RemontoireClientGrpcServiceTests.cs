@@ -51,8 +51,11 @@ public class RemontoireClientGrpcServiceTests {
             using var consumeActivity = TestSource.StartActivity("consume")!;
             RemontoireClientGrpcService.LinkToStoredCorrelationContext(headers);
 
+            // Links, not ParentId: LinkToStoredCorrelationContext only ever calls AddLink, never
+            // anything that could set ParentId — Activity.ParentId is fixed permanently at
+            // construction anyway (before this method is ever called), so asserting on it here
+            // would test the BCL's own Activity API, not this method's behavior.
             consumeActivity.Links.Should().ContainSingle(link => link.Context.TraceId == publishActivity.TraceId);
-            consumeActivity.ParentId.Should().BeNull("the stored correlation context must never become this activity's parent");
         }
 
         [Fact]
