@@ -1,7 +1,9 @@
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using OpenTelemetry.Trace;
 using Remontoire.Raft.Grpc;
+using Remontoire.Security;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
 using Remontoire.Server.HealthChecks;
@@ -26,7 +28,25 @@ builder.Services.AddSingleton<MetaLogJournal>();
 builder.Services.AddSingleton<MigrationAdmissionGate>();
 builder.Services.AddSingleton<ReshardOrchestrator>();
 builder.Services.AddHostedService<RaftReplicaHostedService>();
-builder.Services.AddGrpc();
+
+// Client authentication + authorization — RaftTransportGrpcService (node-to-node) never carries
+// a bearer token, so the interceptor below is registered per-service, not on AddGrpc() globally.
+builder.Services.Configure<RemontoireSecurityOptions>(builder.Configuration.GetSection("Security"));
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options => {
+        var security = builder.Configuration.GetSection("Security").Get<RemontoireSecurityOptions>() ?? new RemontoireSecurityOptions();
+        options.Authority = security.Authority;
+        options.Audience = security.Audience;
+        options.RequireHttpsMetadata = security.RequireHttpsMetadata;
+        options.MapInboundClaims = false;
+        options.TokenValidationParameters.RoleClaimType = security.RoleClaimType;
+        options.TokenValidationParameters.NameClaimType = security.SubjectClaimType;
+    });
+builder.Services.AddAuthorization();
+builder.Services.AddSingleton<RemontoireAuthorizer>();
+
+builder.Services.AddGrpc()
+    .AddServiceOptions<RemontoireClientGrpcService>(options => options.Interceptors.Add<RemontoireAuthenticationInterceptor>());
 
 builder.Services.AddHealthChecks()
     .AddCheck<RaftLivenessCheck>("raft-liveness", tags: ["live"])
@@ -54,6 +74,9 @@ ObservableMetricsRegistration.Register(
     app.Services.GetRequiredService<RaftReplicaRegistry>(),
     app.Services.GetRequiredService<MessagingGroupRegistry>(),
     app.Services.GetRequiredService<ShardAssignmentTable>());
+
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapGrpcService<RaftTransportGrpcService>();
 app.MapGrpcService<RemontoireClientGrpcService>();
