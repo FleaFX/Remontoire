@@ -20,11 +20,23 @@ builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
 var raftOptions = builder.Configuration.GetSection("Raft").Get<RaftServerOptions>() ?? new RaftServerOptions();
 var secure = !raftOptions.Mtls.AllowInsecureTransport;
 var mtlsCredentials = secure ? ClusterMtlsCredentialsLoader.Load(raftOptions.Mtls) : null;
-// Server-side never knows, before validation, which specific peer is connecting — no single
-// expected subject to check here (§5.4/§5.5); RaftGrpcTransport's own, outbound-only validators
-// (constructed inside RaftReplicaHostedService) are where a specific peer's expected subject is
-// actually enforced.
-var peerCertificateValidator = mtlsCredentials is null ? null : new PeerCertificateValidator(mtlsCredentials.CaCertificate, expectedSubject: null);
+
+// Server-side never knows, before validation, which specific peer is connecting — so unlike
+// RaftGrpcTransport's own outbound-only validators (one expected subject per dialed peer), this is
+// the union of every configured peer's expected subject across every group this node hosts. Empty
+// (nobody ever set ExpectedCertificateSubject) falls back to null — CA-signature-only, same as an
+// individual unconfigured peer already means (§5.4). Mirrors RaftReplicaHostedService's own
+// allPeers/expectedCertificateSubjects computation, since Kestrel's endpoint config here runs
+// before that hosted service ever starts.
+var expectedCertificateSubjects = raftOptions.Groups.SelectMany(group => group.Peers)
+    .Concat(raftOptions.MetaGroup?.Peers ?? [])
+    .Select(peer => peer.ExpectedCertificateSubject)
+    .Where(subject => subject is not null)
+    .Select(subject => subject!)
+    .Distinct()
+    .ToArray();
+var peerCertificateValidator = mtlsCredentials is null ? null
+    : new PeerCertificateValidator(mtlsCredentials.CaCertificate, expectedCertificateSubjects.Length == 0 ? null : expectedCertificateSubjects);
 
 // Two endpoints, one process: the peer port requires a client certificate (node-to-node, §5.3),
 // the client port never does (client-to-cluster auth is JWT, §2). AllowInsecureTransport skips TLS

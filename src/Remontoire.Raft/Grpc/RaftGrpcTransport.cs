@@ -76,8 +76,10 @@ public sealed class RaftGrpcTransport : IRaftTransport, IDisposable {
                 };
 
                 if (credentials is not null) {
+                    // Dialing this one specific peer — unlike the server side, this check is
+                    // precise: exactly this peer's own expected subject, not the whole cluster's.
                     var expectedSubject = expectedCertificateSubjects?.GetValueOrDefault(peer.NodeId);
-                    var validator = new PeerCertificateValidator(credentials.CaCertificate, expectedSubject);
+                    var validator = new PeerCertificateValidator(credentials.CaCertificate, expectedSubject is null ? null : [expectedSubject]);
                     handler.SslOptions = new SslClientAuthenticationOptions {
                         ClientCertificates = [credentials.NodeCertificate],
                         RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>

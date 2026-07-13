@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Remontoire.Contracts\Remontoire.Contracts.csproj" />
+    <ProjectReference Include="..\Remontoire.Security\Remontoire.Security.csproj" />
     <ProjectReference Include="..\Remontoire.Sharding\Remontoire.Sharding.csproj" />
   </ItemGroup>
 

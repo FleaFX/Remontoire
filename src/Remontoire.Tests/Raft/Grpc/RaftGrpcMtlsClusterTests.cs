@@ -27,7 +27,7 @@ public class RaftGrpcMtlsClusterTests {
         builder.Services.AddSingleton<RaftReplicaRegistry>();
         builder.Services.AddGrpc();
 
-        var validator = new PeerCertificateValidator(caPublic, expectedSubject: null);
+        var validator = new PeerCertificateValidator(caPublic, expectedSubjects: null);
         builder.WebHost.ConfigureKestrel(options =>
             options.Listen(IPAddress.Loopback, 0, listenOptions => {
                 listenOptions.Protocols = HttpProtocols.Http2;
@@ -45,7 +45,7 @@ public class RaftGrpcMtlsClusterTests {
     }
 
     static GrpcChannel CreateClientChannel(Uri address, X509Certificate2 caPublic, X509Certificate2? clientCertificate) {
-        var validator = new PeerCertificateValidator(caPublic, expectedSubject: null);
+        var validator = new PeerCertificateValidator(caPublic, expectedSubjects: null);
         var handler = new SocketsHttpHandler {
             SslOptions = new SslClientAuthenticationOptions {
                 ClientCertificates = clientCertificate is null ? [] : [clientCertificate],
