@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Raft.V1;
+using Remontoire.Tests;
 
 namespace Remontoire.Security;
 
@@ -24,8 +25,7 @@ public class PeerCertificateRequiredInterceptorTests {
     static async Task<WebApplication> StartHostAsync(X509Certificate2? clientCertificate) {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
 
         builder.Services.AddSingleton<RaftReplicaRegistry>();
         builder.Services.AddGrpc()

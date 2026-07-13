@@ -14,6 +14,7 @@ using Remontoire.Raft.Grpc;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
 using Remontoire.Sharding;
+using Remontoire.Tests;
 
 namespace Remontoire.Security;
 
@@ -25,8 +26,7 @@ public class RemontoireAuthenticationInterceptorTests {
     static async Task<WebApplication> StartHostAsync() {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
 
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options => options.RequireHttpsMetadata = false);

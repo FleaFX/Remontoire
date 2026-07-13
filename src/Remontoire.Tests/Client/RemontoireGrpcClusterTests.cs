@@ -19,6 +19,7 @@ using Remontoire.Server;
 using Remontoire.Server.Grpc;
 using Remontoire.Sharding;
 using Remontoire.Storage;
+using Remontoire.Tests;
 
 namespace Remontoire.Client;
 
@@ -84,8 +85,7 @@ public class RemontoireGrpcClusterTests {
     static async Task<WebApplication> StartHostAsync() {
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
-        builder.WebHost.ConfigureKestrel(options =>
-            options.Listen(IPAddress.Loopback, 0, listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+        builder.WebHost.ConfigureKestrel(options => options.ConfigureLoopbackHttp2());
 
         builder.Services.AddGrpc();
         builder.Services.AddSingleton<RaftReplicaRegistry>();
