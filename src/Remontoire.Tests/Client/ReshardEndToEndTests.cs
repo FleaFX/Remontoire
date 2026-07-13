@@ -198,7 +198,8 @@ public class ReshardEndToEndTests {
                     $"assignment: {(fromGroupTable.TryGetAssignment(StreamName, 0, out var finalAssignment) ? finalAssignment.ToString() : "none")}");
 
             using var connection = new RemontoireConnection(new RemontoireClientOptions(
-                MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
+                MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50),
+                AllowInsecureTransport: true));
 
             var published = new List<(long Offset, string Payload)>();
             for (var i = 0; i < 5; i++) {

@@ -238,7 +238,8 @@ public class RemontoireGrpcClusterTests {
         new(new RemontoireClientOptions(
             MetaGroupSeedAddresses: [new Uri(nodes.First().Host.Urls.First())],
             MaxRedirectAttempts: 10,
-            RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
+            RedirectRetryDelay: TimeSpan.FromMilliseconds(50),
+            AllowInsecureTransport: true));
 
     // Overwrites GroupId's membership, as seen from node's own table, down to node's own address
     // only — reproducing "this connection has never heard of any other member" now that a client
