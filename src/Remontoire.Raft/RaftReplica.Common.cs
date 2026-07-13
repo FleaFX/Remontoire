@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Remontoire.Storage;
 
@@ -92,6 +93,24 @@ public sealed partial class RaftReplica {
     // holds for one change at a time, never for two in flight concurrently.
     ulong? _pendingConfigChangeIndex;
     TaskCompletionSource? _pendingConfigChangeReply;
+
+    // Observability counters/timestamps — diagnostic-only, never read by any protocol decision
+    // above. Per-peer since heartbeats and real replication share the single SendAppendEntriesAsync
+    // call site (RaftReplica.Leader.cs) — there is no separate heartbeat RPC to count instead.
+    readonly ConcurrentDictionary<string, long> _appendEntriesSentTotal = new();
+    long _leaderElectionsTotal;
+
+    // Stamped at the top of every RunActorLoopAsync message dispatch — a liveness probe's
+    // "has this replica's actor loop processed anything recently" signal, distinct from any Raft
+    // protocol state.
+    long _lastActorLoopActivityUtcTicks;
+
+    // Stamped only on a successfully accepted (Success = true) AppendEntries from the current
+    // leader (RaftReplica.Replication.cs) — 0 means "never had contact", not "contact at the Unix
+    // epoch". LeaderCommit from that same accepted request, for the replication-lag gauge —
+    // meaningless on a leader itself (it already knows its own commit index).
+    long _lastLeaderContactUtcTicks;
+    ulong _leaderKnownCommitIndex;
 
     /// <summary>
     /// A proposal awaiting quorum commit: the result it will resolve to (RaftIndex and

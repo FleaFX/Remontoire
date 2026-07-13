@@ -24,6 +24,13 @@ public sealed class RaftServerOptions {
     /// reads its own local replica directly instead, no network hop needed.
     /// </summary>
     public List<string> MetaGroupSeedAddresses { get; set; } = [];
+
+    /// <summary>
+    /// Below this many free bytes on any hosted group's (or the meta-group's) data directory,
+    /// readiness fails (<c>DiskSpaceReadinessCheck</c>). Starting point: 1 GiB — a reasonable
+    /// default, not a value tuned against any real production disk-pressure data yet.
+    /// </summary>
+    public long MinFreeDiskSpaceBytes { get; set; } = 1L * 1024 * 1024 * 1024;
 }
 
 /// <summary>

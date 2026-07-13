@@ -1,5 +1,6 @@
 using System.Text;
 using FluentAssertions;
+using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
 
@@ -188,7 +189,7 @@ public class CompactorTests {
 
                 var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, budget);
 
-                deleted.Should().BeEquivalentTo([oldest, middle], "oldest-first: the two lowest-offset segments must go before the newest one");
+                deleted.Select(segment => segment.Path).Should().BeEquivalentTo([oldest, middle], "oldest-first: the two lowest-offset segments must go before the newest one");
                 File.Exists(oldest).Should().BeFalse();
                 File.Exists(middle).Should().BeFalse();
                 File.Exists(newest).Should().BeTrue();
@@ -207,8 +208,82 @@ public class CompactorTests {
 
                 var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes: 0);
 
-                deleted.Should().Equal(path);
+                deleted.Should().ContainSingle().Which.Path.Should().Be(path);
                 File.Exists(path).Should().BeFalse();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Reports_each_deleted_segment_s_own_message_count_not_just_that_it_was_deleted() {
+            var directory = CreateTempDirectory();
+            try {
+                var oldest = await WriteSegmentAsync(directory, SampleEntries(0, 5));  // offsets 0..4 — 5 messages
+                var newest = await WriteSegmentAsync(directory, SampleEntries(5, 3));  // offsets 5..7 — 3 messages
+
+                var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes: 0);
+
+                deleted.Should().BeEquivalentTo([
+                    new Compactor.PrunedSegment(oldest, MessageCount: 5),
+                    new Compactor.PrunedSegment(newest, MessageCount: 3),
+                ], "MaxOffset - MinOffset + 1 per segment — a regression test against an off-by-one in the +1");
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        // Regression test: this is the last-resort guarantee break against a full disk — a single
+        // corrupt segment must never permanently block every other, readable segment behind it.
+        [Fact]
+        public async Task Skips_a_corrupt_segment_but_still_prunes_every_other_readable_one() {
+            var directory = CreateTempDirectory();
+            try {
+                var corruptPath = Path.Combine(directory, $"segment-{0:D20}.sst");
+                await File.WriteAllBytesAsync(corruptPath, "not a real segment file"u8.ToArray());
+                var readable = await WriteSegmentAsync(directory, SampleEntries(10, 5)); // sorts after the corrupt one
+
+                var deleted = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes: 0);
+
+                deleted.Should().ContainSingle().Which.Path.Should().Be(readable);
+                File.Exists(corruptPath).Should().BeTrue("a segment that fails to open must be left in place, not deleted blind");
+                File.Exists(readable).Should().BeFalse();
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    public class MergeAsync {
+        [Fact]
+        public async Task Invokes_onDurationMeasured_once_with_a_nonnegative_duration() {
+            var directory = CreateTempDirectory();
+            try {
+                var pathOne = await WriteSegmentAsync(directory, SampleEntries(0, 5));
+                var pathTwo = await WriteSegmentAsync(directory, SampleEntries(5, 5));
+                var plan = new CompactionPlan([await SstSegment.OpenAsync(pathOne), await SstSegment.OpenAsync(pathTwo)]);
+
+                var measurements = new List<TimeSpan>();
+                await plan.MergeAsync(measurements.Add);
+
+                measurements.Should().ContainSingle("the name promises \"once\" — a regression invoking the callback more than once must fail this");
+                measurements[0].Should().BeGreaterThanOrEqualTo(TimeSpan.Zero);
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Never_measures_when_no_callback_is_given() {
+            var directory = CreateTempDirectory();
+            try {
+                var pathOne = await WriteSegmentAsync(directory, SampleEntries(0, 5));
+                var pathTwo = await WriteSegmentAsync(directory, SampleEntries(5, 5));
+                var plan = new CompactionPlan([await SstSegment.OpenAsync(pathOne), await SstSegment.OpenAsync(pathTwo)]);
+
+                var act = async () => await plan.MergeAsync();
+
+                await act.Should().NotThrowAsync("no Stopwatch is even started when nothing measures it");
             } finally {
                 Directory.Delete(directory, recursive: true);
             }

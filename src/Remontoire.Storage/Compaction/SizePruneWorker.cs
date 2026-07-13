@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 
 namespace Remontoire.Storage.Compaction;
 
@@ -9,9 +10,12 @@ namespace Remontoire.Storage.Compaction;
 /// answerable), so this simply ticks, runs <see cref="Compactor.PruneOldestUntilUnderSizeAsync"/>
 /// directly, and reports back via <see cref="SizePruneCompleted"/>.
 /// </summary>
-sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox, TimeProvider? timeProvider = null, TimeSpan? tickInterval = null) {
+sealed class SizePruneWorker(
+    string directory, Func<long?> getMaxTotalBytes, Func<bool>? isAdmissionPaused, ChannelWriter<ShardLogMessage> mailbox,
+    TimeProvider? timeProvider = null, TimeSpan? tickInterval = null, ILogger? logger = null) {
     static readonly TimeSpan DefaultTickInterval = TimeSpan.FromMinutes(5);
     long _failedTicksTotal;
+    long _messagesPrunedTotal;
 
     /// <summary>
     /// Running count of ticks that failed (e.g. a corrupt or locked segment) and were silently
@@ -19,6 +23,12 @@ sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Fun
     /// scenario it exists to guard against — a full disk) would have no observable signal at all.
     /// </summary>
     public long FailedTicksTotal => Volatile.Read(ref _failedTicksTotal);
+
+    /// <summary>
+    /// Running count of messages forcibly pruned — every increase here is a guarantee-break (a
+    /// message discarded regardless of ack status), never routine, expected pruning.
+    /// </summary>
+    public long MessagesPrunedTotal => Volatile.Read(ref _messagesPrunedTotal);
 
     /// <summary>
     /// Loops until the actor's mailbox closes (normal shutdown).
@@ -41,16 +51,24 @@ sealed class SizePruneWorker(string directory, Func<long?> getMaxTotalBytes, Fun
                     if (getMaxTotalBytes() is not { } maxTotalBytes)
                         continue;
 
-                    var deletedPaths = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes, cancellationToken);
-                    if (deletedPaths.Count == 0)
+                    var deletedSegments = await Compactor.PruneOldestUntilUnderSizeAsync(directory, maxTotalBytes, cancellationToken);
+                    if (deletedSegments.Count == 0)
                         continue;
 
-                    if (!mailbox.TryWrite(new SizePruneCompleted(deletedPaths)))
+                    var messageCount = deletedSegments.Sum(segment => (long)segment.MessageCount);
+                    Interlocked.Add(ref _messagesPrunedTotal, messageCount);
+                    // A guarantee break, not routine pruning — always worth a prominent log line,
+                    // regardless of ack status (mirrors the Interlocked counter's own remarks).
+                    logger?.LogWarning("Force-pruned {MessageCount} messages across {SegmentCount} segments in {Directory} — a guarantee break, not routine pruning.",
+                        messageCount, deletedSegments.Count, directory);
+
+                    if (!mailbox.TryWrite(new SizePruneCompleted(deletedSegments.Select(segment => segment.Path).ToArray())))
                         return; // mailbox closed in the meantime — the result is simply discarded, harmless
-                } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                } catch (Exception ex) when (!cancellationToken.IsCancellationRequested) {
                     // A transient failure mid-tick must never permanently kill this loop — nothing
                     // else would ever restart it. Best-effort: try again next tick.
                     Interlocked.Increment(ref _failedTicksTotal);
+                    logger?.LogWarning(ex, "Size-prune tick failed in {Directory}, will retry next tick.", directory);
                 }
             }
         } catch (OperationCanceledException) {

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Remontoire.Storage.Compaction;
 
 /// <summary>
@@ -12,7 +14,14 @@ readonly record struct CompactionPlan(SstSegment[] Sources) {
     /// Does not touch the actor's live segment array — that happens afterward, via
     /// <see cref="ReplaceIn"/>, once the actor has processed the result.
     /// </summary>
-    public async Task<string> MergeAsync() {
+    /// <param name="onDurationMeasured">
+    /// Invoked once, with the merge's own wall-clock duration, right after it completes — see
+    /// <see cref="CompactionPolicy.OnCompactionDurationMeasured"/>. <see langword="null"/> skips
+    /// the measurement (and its <see cref="Stopwatch"/>) entirely.
+    /// </param>
+    public async Task<string> MergeAsync(Action<TimeSpan>? onDurationMeasured = null) {
+        var stopwatch = onDurationMeasured is null ? null : Stopwatch.StartNew();
+
         var directory = Path.GetDirectoryName(Sources[0].Path)!;
         var finalPath = Path.Combine(directory, $"segment-{Sources[0].MinOffset:D20}.sst");
         var mergedPath = finalPath + ".merging";
@@ -23,6 +32,7 @@ readonly record struct CompactionPlan(SstSegment[] Sources) {
             File.Delete(source.Path); // safe thanks to FileShare.Delete, even if a live SstSegment still has it open
 
         File.Move(mergedPath, finalPath);
+        onDurationMeasured?.Invoke(stopwatch!.Elapsed);
         return finalPath;
     }
 

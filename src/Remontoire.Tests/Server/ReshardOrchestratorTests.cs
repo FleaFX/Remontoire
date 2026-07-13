@@ -213,10 +213,10 @@ public class ReshardOrchestratorTests {
         public required RaftReplica MetaReplica { get; init; }
         public required ShardAssignmentTableApplier MetaApplier { get; init; }
         public required RaftReplica FromReplica { get; init; }
-        public required (ShardLog ShardLog, AckIndex AckIndex) FromMessaging { get; init; }
+        public required (ShardLog ShardLog, AckIndex AckIndex, RetentionEvaluator RetentionEvaluator) FromMessaging { get; init; }
         public required AckIndexApplier FromApplier { get; init; }
         public required RaftReplica ToReplica { get; init; }
-        public required (ShardLog ShardLog, AckIndex AckIndex) ToMessaging { get; init; }
+        public required (ShardLog ShardLog, AckIndex AckIndex, RetentionEvaluator RetentionEvaluator) ToMessaging { get; init; }
         public required AckIndexApplier ToApplier { get; init; }
         public required string DirectoryRoot { get; init; }
 
@@ -224,9 +224,11 @@ public class ReshardOrchestratorTests {
             await MetaApplier.DisposeAsync();
             await MetaReplica.DisposeAsync();
             await FromApplier.DisposeAsync();
+            await FromMessaging.RetentionEvaluator.DisposeAsync();
             await FromMessaging.ShardLog.DisposeAsync();
             await FromReplica.DisposeAsync();
             await ToApplier.DisposeAsync();
+            await ToMessaging.RetentionEvaluator.DisposeAsync();
             await ToMessaging.ShardLog.DisposeAsync();
             await ToReplica.DisposeAsync();
             Directory.Delete(DirectoryRoot, recursive: true);
@@ -249,13 +251,13 @@ public class ReshardOrchestratorTests {
         var fromReplica = await StartSingleNodeReplicaAsync(FromGroupId, "node-1");
         raftRegistry.Register(fromReplica);
         var fromMessaging = await ComposeMessagingAsync(fromReplica, Path.Combine(directoryRoot, FromGroupId));
-        messagingRegistry.Register(FromGroupId, fromMessaging.ShardLog, fromMessaging.AckIndex);
+        messagingRegistry.Register(FromGroupId, fromMessaging.ShardLog, fromMessaging.AckIndex, fromMessaging.RetentionEvaluator);
         var fromApplier = new AckIndexApplier(fromMessaging.ShardLog, fromMessaging.AckIndex);
 
         var toReplica = await StartSingleNodeReplicaAsync(ToGroupId, "node-2");
         raftRegistry.Register(toReplica);
         var toMessaging = await ComposeMessagingAsync(toReplica, Path.Combine(directoryRoot, ToGroupId));
-        messagingRegistry.Register(ToGroupId, toMessaging.ShardLog, toMessaging.AckIndex);
+        messagingRegistry.Register(ToGroupId, toMessaging.ShardLog, toMessaging.AckIndex, toMessaging.RetentionEvaluator);
         var toApplier = new AckIndexApplier(toMessaging.ShardLog, toMessaging.AckIndex);
 
         // Seeds the pre-migration state — a stream whose one virtual shard already, "always",
@@ -289,12 +291,15 @@ public class ReshardOrchestratorTests {
         return replica;
     }
 
-    static async Task<(ShardLog ShardLog, AckIndex AckIndex)> ComposeMessagingAsync(RaftReplica replica, string directory) {
+    static async Task<(ShardLog ShardLog, AckIndex AckIndex, RetentionEvaluator RetentionEvaluator)> ComposeMessagingAsync(RaftReplica replica, string directory) {
         Directory.CreateDirectory(directory);
         var ackIndex = new AckIndex();
         var shardLog = await ShardLog.OpenAsync(directory, replica.ReadCommittedAsync,
             compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(ackIndex.AllGroupsLowWatermark())));
-        return (shardLog, ackIndex);
+        var retentionEvaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+            ShardLog: shardLog, AckIndex: ackIndex, IsMandatory: _ => true, GetMaxRetention: () => TimeSpan.MaxValue,
+            ForwardToDeadLetterAsync: (_, _) => Task.FromResult(false), IsAdmissionPaused: () => false, IsLeader: () => replica.IsLeader));
+        return (shardLog, ackIndex, retentionEvaluator);
     }
 
     static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) {

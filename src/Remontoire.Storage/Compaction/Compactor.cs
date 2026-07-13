@@ -122,19 +122,30 @@ static class Compactor {
     /// Deletes whole segments, oldest-first, until the directory's total size is back under
     /// <paramref name="maxTotalBytes"/> — the size-based emergency floor. Deliberately NEVER
     /// consults the acked watermark and NEVER routes through dead-letter forwarding: this is a
-    /// last-resort guarantee break against a full disk, not routine pruning. Returns the deleted
-    /// paths so a caller (<see cref="ShardLog"/>'s actor) can keep its own segment list in sync —
-    /// this method never touches any in-memory state itself.
+    /// last-resort guarantee break against a full disk, not routine pruning. Returns each deleted
+    /// segment's path and message count (<c>MaxOffset - MinOffset + 1</c>, offsets within one
+    /// segment are always contiguous by construction) so a caller (<see cref="ShardLog"/>'s actor,
+    /// and <see cref="Compaction.SizePruneWorker"/>'s own forced-prune counter) can keep its own
+    /// state in sync — this method never touches any in-memory state itself.
     /// </summary>
-    public static Task<IReadOnlyList<string>> PruneOldestUntilUnderSizeAsync(string directory, long maxTotalBytes, CancellationToken cancellationToken = default) {
+    /// <remarks>
+    /// Unlike <see cref="LoadCandidatesAsync"/>'s size-only pass, this opens every candidate
+    /// segment to read its offset range before deleting it — a deliberate, new per-tick I/O cost
+    /// (this pass used to need only each file's path and size, never its contents) needed so
+    /// forced pruning can report a message count, not just a segment count. Acceptable because
+    /// size-pruning is already an infrequent, last-resort path. A segment that fails to open (a
+    /// corrupt or locked file) is skipped — left in place, not counted as freed — rather than
+    /// letting the whole pass throw: this is the last-resort guarantee break against a full disk,
+    /// so one unreadable segment must never permanently block every other, readable one behind it.
+    /// </remarks>
+    public static async Task<IReadOnlyList<PrunedSegment>> PruneOldestUntilUnderSizeAsync(string directory, long maxTotalBytes, CancellationToken cancellationToken = default) {
         // Oldest-first by filename alone — segment-<MinOffset:D20>.sst's zero-padded offset
-        // already sorts correctly in plain lexicographic order, so nothing here ever needs to
-        // open a segment just to answer a size check (MinOffset/MaxOffset, the only reason
-        // LoadCandidatesAsync would open one, are never used below — only each file's path and
-        // size are).
+        // already sorts correctly in plain lexicographic order, so the total-size pass below never
+        // needs to open a segment just to decide WHICH ones to delete — only to report what was
+        // actually pruned, once a segment is already condemned.
         var paths = Directory.EnumerateFiles(directory, "*.sst").OrderBy(path => path, StringComparer.Ordinal).ToArray();
         var totalBytes = paths.Sum(path => new FileInfo(path).Length);
-        var deleted = new List<string>();
+        var deleted = new List<PrunedSegment>();
 
         foreach (var path in paths) {
             cancellationToken.ThrowIfCancellationRequested();
@@ -142,13 +153,28 @@ static class Compactor {
                 break;
 
             var size = new FileInfo(path).Length;
+            ulong messageCount;
+            try {
+                using var segment = await SstSegment.OpenAsync(path, cancellationToken);
+                messageCount = segment.MaxOffset - segment.MinOffset + 1;
+            } catch (Exception) when (!cancellationToken.IsCancellationRequested) {
+                // Left on disk, not counted toward totalBytes below — a corrupt/locked segment
+                // must not stop this pass from still freeing whatever else it safely can.
+                continue;
+            }
+
             File.Delete(path);
-            deleted.Add(path);
+            deleted.Add(new PrunedSegment(path, messageCount));
             totalBytes -= size;
         }
 
-        return Task.FromResult<IReadOnlyList<string>>(deleted);
+        return deleted;
     }
+
+    /// <summary>
+    /// One segment <see cref="PruneOldestUntilUnderSizeAsync"/> deleted, and how many messages it held.
+    /// </summary>
+    public readonly record struct PrunedSegment(string Path, ulong MessageCount);
 }
 
 /// <summary>
@@ -171,4 +197,12 @@ static class Compactor {
 /// the production default — this exists purely so tests don't have to wait on that default to
 /// observe real, end-to-end pruning behavior.
 /// </param>
-public sealed record CompactionPolicy(TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null, TimeSpan? RetentionTickInterval = null);
+/// <param name="OnCompactionDurationMeasured">
+/// Invoked once per completed merge (<see cref="Compaction.CompactionPlan.MergeAsync"/>) with its
+/// wall-clock duration — the source for a compaction-duration metric maintained outside this
+/// project. Same one-way injection discipline as <see cref="GetAckedLowWatermarkAsync"/>:
+/// <see langword="null"/> disables it entirely, this project never references a metrics library directly.
+/// </param>
+public sealed record CompactionPolicy(
+    TimeSpan? MaxAge, long? MaxMergedSegmentBytes, Func<CancellationToken, ValueTask<ulong>>? GetAckedLowWatermarkAsync = null,
+    TimeSpan? RetentionTickInterval = null, Action<TimeSpan>? OnCompactionDurationMeasured = null);

@@ -36,6 +36,7 @@ public class ReshardEndToEndTests {
         public required ShardLog ShardLog { get; init; }
         public required AckIndex AckIndex { get; init; }
         public required AckIndexApplier Applier { get; init; }
+        public required RetentionEvaluator RetentionEvaluator { get; init; }
         public required GrpcChannel WatcherChannel { get; init; }
         public required ShardAssignmentWatcher Watcher { get; init; }
 
@@ -43,6 +44,7 @@ public class ReshardEndToEndTests {
             await Watcher.DisposeAsync();
             WatcherChannel.Dispose();
             await Applier.DisposeAsync();
+            await RetentionEvaluator.DisposeAsync();
             await AckIndex.DisposeAsync();
             await ShardLog.DisposeAsync();
             await Replica.DisposeAsync();
@@ -103,7 +105,10 @@ public class ReshardEndToEndTests {
         var shardLog = await ShardLog.OpenAsync(directory, replica.ReadCommittedAsync,
             compactionPolicy: new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null, GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(ackIndex.AllGroupsLowWatermark())));
         var applier = new AckIndexApplier(shardLog, ackIndex);
-        host.Services.GetRequiredService<MessagingGroupRegistry>().Register(groupId, shardLog, ackIndex);
+        var retentionEvaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+            ShardLog: shardLog, AckIndex: ackIndex, IsMandatory: _ => true, GetMaxRetention: () => TimeSpan.MaxValue,
+            ForwardToDeadLetterAsync: (_, _) => Task.FromResult(false), IsAdmissionPaused: () => false, IsLeader: () => replica.IsLeader));
+        host.Services.GetRequiredService<MessagingGroupRegistry>().Register(groupId, shardLog, ackIndex, retentionEvaluator);
 
         // A real watcher, pointed at the real meta host — this node's own routing table is kept
         // fresh exactly the way a production node without meta-group membership would be. A short
@@ -114,7 +119,10 @@ public class ReshardEndToEndTests {
         var watcher = new ShardAssignmentWatcher(new ShardAssignmentMeta.ShardAssignmentMetaClient(watcherChannel), host.Services.GetRequiredService<ShardAssignmentTable>(),
             reconciliationInterval: TimeSpan.FromMilliseconds(200));
 
-        return new DataGroupNode { Host = host, Replica = replica, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier, WatcherChannel = watcherChannel, Watcher = watcher };
+        return new DataGroupNode {
+            Host = host, Replica = replica, ShardLog = shardLog, AckIndex = ackIndex, Applier = applier,
+            RetentionEvaluator = retentionEvaluator, WatcherChannel = watcherChannel, Watcher = watcher,
+        };
     }
 
     static async Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) {

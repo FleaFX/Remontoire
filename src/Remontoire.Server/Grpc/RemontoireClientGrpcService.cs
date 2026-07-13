@@ -1,9 +1,12 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using Google.Protobuf;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
 using Remontoire.Client.V1;
 using Remontoire.Messaging;
+using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Sharding;
@@ -29,6 +32,12 @@ public sealed class RemontoireClientGrpcService(
     RaftReplicaRegistry raftRegistry, MessagingGroupRegistry messagingRegistry, LeaderAddressDirectory leaderAddresses,
     ShardAssignmentTable assignmentTable, MigrationAdmissionGate admissionGate)
     : RemontoireClient.RemontoireClientBase {
+    // The header key a message's own correlation-id rides under — durably stored alongside the
+    // message (the existing free-form headers mechanism), so a later Consume/Ack of that same
+    // message can recover the same value. Unified with OpenTelemetry's own trace-id (see Publish
+    // below) rather than inventing a second, parallel id scheme.
+    internal const string CorrelationIdHeaderKey = "correlation-id";
+
     /// <inheritdoc />
     public override async Task<PublishReply> Publish(PublishRequest request, ServerCallContext context) {
         if (!assignmentTable.TryGetStreamConfig(request.StreamName, out var config))
@@ -42,13 +51,20 @@ public sealed class RemontoireClientGrpcService(
         if (admissionGate.IsPaused(replica.GroupId))
             return new PublishReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } };
 
-        var appendRequest = new AppendRequest(
-            request.PartitionKey.Memory,
-            request.Headers.Select(header => new Header(header.Key.Memory, header.Value.Memory)).ToArray(),
-            request.Payload.Memory);
+        var headers = request.Headers.Select(header => new Header(header.Key.Memory, header.Value.Memory)).ToList();
+        // If the caller didn't already supply its own correlation-id, the current trace-id doubles
+        // as one for this message — every later Consume/Ack of it can then link back to this same
+        // Publish trace, even though tracing itself never forces one unbroken trace across both.
+        if (Activity.Current?.Id is { } currentTraceparent && !headers.Any(header => HeaderKeyEquals(header, CorrelationIdHeaderKey)))
+            headers.Add(new Header(Encoding.UTF8.GetBytes(CorrelationIdHeaderKey), Encoding.UTF8.GetBytes(currentTraceparent)));
+
+        var appendRequest = new AppendRequest(request.PartitionKey.Memory, headers, request.Payload.Memory);
 
         try {
             var result = await replica.ProposeAsync(appendRequest, context.CancellationToken);
+            RemontoireMetrics.IngestMessagesTotal.Add(1,
+                new KeyValuePair<string, object?>("stream", request.StreamName),
+                new KeyValuePair<string, object?>("shard", replica.GroupId));
             return new PublishReply {
                 Success = new PublishSuccess {
                     ShardId = virtualShardIndex,
@@ -90,14 +106,45 @@ public sealed class RemontoireClientGrpcService(
             // here costs no round-trip. Silently drop anything referring to a message that doesn't
             // exist yet rather than letting it advance this group's watermark past undelivered data.
             await ackIndex.ApplyLocalAsync(request.ConsumerGroup, WithinLogBounds(request.Offsets, shardLog.NextOffsetToApply), context.CancellationToken);
+            RecordAckMetrics(request, shardLog);
             return new AckReply { Success = new Empty() };
         }
 
         try {
             await replica.ProposeAsync(new Remontoire.Raft.AckRequest(request.ConsumerGroup, request.Offsets), context.CancellationToken);
+            RecordAckMetrics(request, shardLog);
             return new AckReply { Success = new Empty() };
         } catch (NotLeaderException ex) {
             return new AckReply { NotLeader = BuildNotLeader(request.StreamName, ex) };
+        }
+    }
+
+    // remontoire_ack_messages_total: no consumer_group dimension risk here — a plain counter is
+    // cheap regardless of cardinality. remontoire_ack_latency_seconds needs one ShardLog lookup per
+    // acked offset to read back the message's own ingest timestamp — never consumer_group-tagged,
+    // since a histogram (unlike a counter) keeps per-tag-combination state for the process's whole
+    // lifetime, and consumer groups are the least bounded dimension available here.
+    static void RecordAckMetrics(Remontoire.Client.V1.AckRequest request, ShardLog shardLog) {
+        RemontoireMetrics.AckMessagesTotal.Add(request.Offsets.Count,
+            new KeyValuePair<string, object?>("stream", request.StreamName),
+            new KeyValuePair<string, object?>("shard", request.ShardId.ToString()),
+            new KeyValuePair<string, object?>("consumer_group", request.ConsumerGroup));
+
+        var nowMicros = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
+        foreach (var offset in request.Offsets) {
+            if (!shardLog.TryGet(offset, out var handle))
+                continue;
+
+            using (handle)
+                // Both operands cast to long before subtracting, not after: TimestampMicros was
+                // stamped by whichever node was leader at ingest time, nowMicros by whichever node
+                // handles this Ack (possibly a different one, via a follower read) — clock skew
+                // between them can make TimestampMicros briefly exceed nowMicros, which a plain
+                // ulong subtraction would silently wrap into a multi-billion-second latency instead
+                // of clamping to zero.
+                RemontoireMetrics.AckLatencySeconds.Record(Math.Max(0L, (long)nowMicros - (long)handle.Entry.TimestampMicros) / 1_000_000.0,
+                    new KeyValuePair<string, object?>("stream", request.StreamName),
+                    new KeyValuePair<string, object?>("shard", request.ShardId.ToString()));
         }
     }
 
@@ -124,10 +171,38 @@ public sealed class RemontoireClientGrpcService(
         }
 
         var watermark = ackIndex.GetOrCreate(request.ConsumerGroup).LowWatermark; // exclusive — already the first not-yet-acked offset
-        await foreach (var handle in ReadLiveAsync(shardLog, watermark, context.CancellationToken))
-            using (handle)
+        await foreach (var handle in ReadLiveAsync(shardLog, watermark, context.CancellationToken)) {
+            using (handle) {
+                LinkToStoredCorrelationContext(handle.Entry.Headers);
                 await responseStream.WriteAsync(new ConsumeReply { Message = ToProto(handle.Entry) });
+            }
+        }
     }
+
+    // A message's own stored correlation-id (set once, at Publish time — see CorrelationIdHeaderKey
+    // above) becomes a Link, never a parent, on this Consume call's own trace: a trace that stayed
+    // open from Publish until a possibly-much-later, possibly-repeated, possibly-never-arriving
+    // Consume wouldn't match how tracing backends expect a trace's lifetime to behave, and a Link
+    // is the only shape that survives independent consumer groups each reading the same message at
+    // their own, unrelated time.
+    internal static void LinkToStoredCorrelationContext(IReadOnlyList<Header> headers) {
+        if (Activity.Current is not { } activity)
+            return;
+
+        foreach (var header in headers) {
+            if (!HeaderKeyEquals(header, CorrelationIdHeaderKey))
+                continue;
+
+            var traceparent = Encoding.UTF8.GetString(header.Value.Span);
+            if (ActivityContext.TryParse(traceparent, traceState: null, out var linkedContext))
+                activity.AddLink(new ActivityLink(linkedContext));
+
+            return;
+        }
+    }
+
+    static bool HeaderKeyEquals(Header header, string key) =>
+        Encoding.UTF8.GetByteCount(key) == header.Key.Length && Encoding.UTF8.GetString(header.Key.Span) == key;
 
     // Follower reads are safe by construction (State Machine Safety: whatever a follower has
     // already applied is identical to what the leader applied), just possibly a fraction behind

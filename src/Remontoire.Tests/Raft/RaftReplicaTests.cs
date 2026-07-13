@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FluentAssertions;
 using Google.Protobuf;
 using Remontoire.Raft.V1;
@@ -862,6 +863,112 @@ public class RaftReplicaTests {
 
             replica.Role.Should().Be(ReplicaRole.Leader, "a stale election-timer firing must never demote an established leader");
             replica.CurrentTerm.Should().Be(termAfterBecomingCandidate, "the term must not bump a second time from a stale timer firing");
+        }
+    }
+
+    // Plain diagnostic counters/timestamps, never read by any protocol decision.
+    public class Observability {
+        [Fact]
+        public async Task AppendEntriesSentTotal_increments_identically_for_a_heartbeat_tick_and_a_real_replication_call() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> candidate, term 1
+            await replica.DrainAsync();
+            replica.TryPost(new VoteResponseReceived("node-2", new VoteResponse { Term = 1, VoteGranted = true }, 1));
+            await replica.DrainAsync(); // -> leader, sends the term-opening NoOp (1st AppendEntries)
+
+            replica.AppendEntriesSentTotal["node-2"].Should().Be(1);
+
+            replica.TryPost(new HeartbeatIntervalElapsed(replica.HeartbeatTimerGeneration)); // 2nd AppendEntries — a pure heartbeat
+            await replica.DrainAsync();
+
+            replica.AppendEntriesSentTotal["node-2"].Should().Be(2, "a heartbeat and real replication both funnel through SendAppendEntriesAsync identically");
+        }
+
+        [Fact]
+        public async Task LeaderElectionsTotal_increments_once_per_successful_election() {
+            var (replica, _) = await StartAsync("node-1");
+            replica.LeaderElectionsTotal.Should().Be(0);
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // single-node group -> immediate leader
+            await replica.DrainAsync();
+
+            replica.LeaderElectionsTotal.Should().Be(1);
+        }
+
+        [Fact]
+        public async Task LastActorLoopActivity_advances_after_processing_a_message() {
+            var (replica, _) = await StartAsync("node-1");
+            var before = replica.LastActorLoopActivity;
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration));
+            await replica.DrainAsync();
+
+            // BeAfter, not BeOnOrAfter: a regression where this field never updates again after
+            // StartAsync's own initial stamp must fail this test, not pass it by coincidence.
+            replica.LastActorLoopActivity.Should().BeAfter(before);
+        }
+
+        [Fact]
+        public async Task HasActiveLeaderContact_and_LeaderKnownCommitIndex_are_set_only_on_an_accepted_AppendEntries() {
+            var (replica, _) = await StartAsync("node-1", Peer("node-2"));
+            replica.HasActiveLeaderContact.Should().BeFalse("this replica has never accepted an AppendEntries yet");
+
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> candidate, term 1, so Term = 0 below is genuinely stale
+            await replica.DrainAsync();
+
+            var staleReply = new TaskCompletionSource<AppendEntriesResponse>();
+            replica.TryPost(new AppendEntriesReceived(
+                new AppendEntriesRequest { GroupId = "group-1", Term = 0, LeaderId = "node-2", PrevLogIndex = 0, PrevLogTerm = 0, LeaderCommit = 5 }, staleReply));
+            await replica.DrainAsync();
+            (await staleReply.Task).Success.Should().BeFalse();
+            replica.HasActiveLeaderContact.Should().BeFalse("a rejected (stale-term) AppendEntries must never count as active contact");
+            replica.LeaderKnownCommitIndex.Should().Be(0);
+
+            var acceptedReply = new TaskCompletionSource<AppendEntriesResponse>();
+            replica.TryPost(new AppendEntriesReceived(
+                new AppendEntriesRequest { GroupId = "group-1", Term = 3, LeaderId = "node-2", PrevLogIndex = 0, PrevLogTerm = 0, LeaderCommit = 5 }, acceptedReply));
+            await replica.DrainAsync();
+            (await acceptedReply.Task).Success.Should().BeTrue();
+
+            replica.HasActiveLeaderContact.Should().BeTrue();
+            replica.LeaderKnownCommitIndex.Should().Be(5);
+        }
+
+        // Regression coverage for a real, codebase-specific gotcha: the actor loop runs on its own
+        // detached Task.Run, so ambient Activity.Current there reflects whatever last ran on that
+        // background thread, never the caller's own request-scoped Activity. If ProposeAsync ever
+        // stopped explicitly capturing and threading the caller's ActivityContext through the
+        // message (relying on ambient Activity.Current instead), this test would catch it: the
+        // wal-append/raft-replicate spans would come back with no parent at all.
+        [Fact]
+        public async Task ProposeAsync_threads_the_callers_ActivityContext_to_the_wal_append_and_raft_replicate_spans() {
+            var recorded = new List<Activity>();
+            using var listener = new ActivityListener {
+                ShouldListenTo = _ => true,
+                Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+                ActivityStopped = recorded.Add,
+            };
+            ActivitySource.AddActivityListener(listener);
+
+            using var callerSource = new ActivitySource("Remontoire.Tests.RaftReplica");
+            using var callerActivity = callerSource.StartActivity("caller")!;
+
+            var (replica, _) = await StartAsync("node-1"); // single-node group -> immediate leader
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration));
+            await replica.DrainAsync();
+
+            await replica.ProposeAsync(new AppendRequest(ReadOnlyMemory<byte>.Empty, [], "hello"u8.ToArray()));
+
+            // ActivityListener is registered process-wide — other, concurrently-running test
+            // classes can produce their own "wal-append"/"raft-replicate" activities from their own,
+            // unrelated ProposeAsync calls. Filtering by this test's own TraceId (a fresh, random
+            // value per StartActivity call) rules out that cross-test contamination entirely.
+            var ownTrace = recorded.Where(a => a.TraceId == callerActivity.TraceId).ToList();
+            var walAppend = ownTrace.Should().ContainSingle(a => a.OperationName == "wal-append").Which;
+            var raftReplicate = ownTrace.Should().ContainSingle(a => a.OperationName == "raft-replicate").Which;
+            walAppend.ParentSpanId.Should().Be(callerActivity.SpanId);
+            raftReplicate.ParentSpanId.Should().Be(callerActivity.SpanId);
         }
     }
 }

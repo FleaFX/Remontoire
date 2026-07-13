@@ -24,6 +24,7 @@ public class SizePruneWorkerTests {
             posted.Should().ContainSingle();
             posted.Single().DeletedPaths.Should().Equal(path);
             File.Exists(path).Should().BeFalse();
+            worker.MessagesPrunedTotal.Should().Be(5, "MaxOffset(4) - MinOffset(0) + 1");
 
             await StopAsync(cts, run);
         } finally {

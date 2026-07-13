@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Remontoire.Raft.V1;
 using Remontoire.Storage;
 
@@ -72,23 +73,28 @@ sealed record InstallSnapshotTransferFailed(string PeerId) : RaftReplicaMessage;
 /// <summary>
 /// Posted by <see cref="RaftReplica.ProposeAsync(AppendRequest, CancellationToken)"/> — an
 /// application request to replicate one record. <paramref name="Reply"/> resolves once the entry
-/// is quorum-committed, never before.
+/// is quorum-committed, never before. <paramref name="CallerContext"/> is <c>Activity.Current</c>'s
+/// context at the moment this was posted, captured explicitly because the actor loop runs on its
+/// own detached <c>Task.Run</c> — <c>AsyncLocal</c>-based ambient context does not flow across that
+/// boundary on its own, so the caller's tracing context has to be carried on the message itself.
 /// </summary>
-sealed record ProposeReceived(AppendRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
+sealed record ProposeReceived(AppendRequest Request, TaskCompletionSource<ProposeResult> Reply, ActivityContext? CallerContext = null) : RaftReplicaMessage;
 
 /// <summary>
 /// Posted by <see cref="RaftReplica.ProposeAsync(AckRequest, CancellationToken)"/> —
 /// same commit-then-resolve contract as <see cref="ProposeReceived"/>, minus the
-/// <see cref="ProposeResult.LogicalOffset"/> assignment.
+/// <see cref="ProposeResult.LogicalOffset"/> assignment. Same <see cref="CallerContext"/> capture
+/// reasoning as <see cref="ProposeReceived"/>.
 /// </summary>
-sealed record ProposeAckReceived(AckRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
+sealed record ProposeAckReceived(AckRequest Request, TaskCompletionSource<ProposeResult> Reply, ActivityContext? CallerContext = null) : RaftReplicaMessage;
 
 /// <summary>
 /// Posted by <see cref="RaftReplica.ProposeAsync(AckCheckpointRequest, CancellationToken)"/> —
 /// same commit-then-resolve contract as <see cref="ProposeReceived"/>, minus the
-/// <see cref="ProposeResult.LogicalOffset"/> assignment.
+/// <see cref="ProposeResult.LogicalOffset"/> assignment. Same <see cref="CallerContext"/> capture
+/// reasoning as <see cref="ProposeReceived"/>.
 /// </summary>
-sealed record ProposeAckCheckpointReceived(AckCheckpointRequest Request, TaskCompletionSource<ProposeResult> Reply) : RaftReplicaMessage;
+sealed record ProposeAckCheckpointReceived(AckCheckpointRequest Request, TaskCompletionSource<ProposeResult> Reply, ActivityContext? CallerContext = null) : RaftReplicaMessage;
 
 /// <summary>
 /// Posted by <see cref="RaftReplica.ProposeConfigChangeAsync"/>. <paramref name="Reply"/>

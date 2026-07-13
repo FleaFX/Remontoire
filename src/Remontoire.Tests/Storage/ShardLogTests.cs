@@ -329,6 +329,28 @@ public class ShardLogTests {
         }
 
         [Fact]
+        public async Task ForcedPruneMessagesTotal_counts_actual_messages_pruned_by_a_real_size_prune_tick() {
+            var directory = CreateTempDirectory();
+            try {
+                await using var log = await ShardLog.OpenAsync(directory, EmptyCommittedSource, flushThresholdBytes: 1,
+                    retentionPolicy: new RetentionPolicy(GetMaxTotalBytesPerVirtualShard: () => 0, SizePruneTickInterval: TimeSpan.FromMilliseconds(20)));
+
+                log.ForcedPruneMessagesTotal.Should().Be(0, "no size-prune tick has run yet");
+
+                log.TryPost(new WalRecordCommitted(SampleRecord(0)));
+                log.TryPost(new WalRecordCommitted(SampleRecord(1)));
+                await WaitForVisibleAsync(log, 1);
+
+                // No intermediate segment-count check here: the real SizePruneWorker is already
+                // ticking (every 20ms, budget zero) concurrently with these writes, so segments
+                // can already be mid-prune before this point — only the final, converged count matters.
+                (await WaitUntilAsync(() => log.ForcedPruneMessagesTotal == 2)).Should().BeTrue("both segments are over the zero-byte budget — 1 message each");
+            } finally {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+
+        [Fact]
         public async Task SizePruneCompleted_with_a_path_that_no_longer_matches_any_live_segment_is_a_harmless_no_op() {
             var directory = CreateTempDirectory();
             try {

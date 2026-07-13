@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.Logging;
 using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
@@ -22,6 +23,7 @@ public sealed partial class ShardLog : IAsyncDisposable {
     readonly RetentionPolicy? _retentionPolicy;
     readonly CancellationTokenSource _retentionCts = new();
     readonly Task? _retentionTickerLoop;
+    readonly SizePruneWorker? _sizePruneWorker;
     readonly Task? _sizePruneWorkerLoop;
 
     MemTable _memTable;
@@ -36,9 +38,12 @@ public sealed partial class ShardLog : IAsyncDisposable {
     // itself, only "something changed, look again."
     volatile TaskCompletionSource _appended = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    readonly ILogger? _logger;
+
     internal ShardLog(
         string directory, Func<CancellationToken, IAsyncEnumerable<WalRecord>> committedSource, MemTable memTable, SstSegment[] segments,
-        ulong nextOffsetToApply, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null, RetentionPolicy? retentionPolicy = null) {
+        ulong nextOffsetToApply, long flushThresholdBytes, CompactionPolicy? compactionPolicy = null, RetentionPolicy? retentionPolicy = null,
+        ILogger? logger = null) {
         _directory = directory;
         _committedSource = committedSource;
         _memTable = memTable;
@@ -47,15 +52,17 @@ public sealed partial class ShardLog : IAsyncDisposable {
         _flushThresholdBytes = flushThresholdBytes;
         _compactionPolicy = compactionPolicy;
         _retentionPolicy = retentionPolicy;
+        _logger = logger;
 
         _actorLoop = Task.Run(RunActorAsync);
         _tailingLoop = Task.Run(RunTailingLoopAsync);
-        _compactionWorkerLoop = compactionPolicy is null ? null : Task.Run(new CompactionWorker(_mailbox.Writer).RunAsync);
+        _compactionWorkerLoop = compactionPolicy is null ? null : Task.Run(new CompactionWorker(_mailbox.Writer, compactionPolicy.OnCompactionDurationMeasured).RunAsync);
         _retentionTickerLoop = compactionPolicy?.GetAckedLowWatermarkAsync is null ? null
             : Task.Run(() => RunRetentionTickerAsync(compactionPolicy.RetentionTickInterval, _retentionCts.Token));
-        _sizePruneWorkerLoop = retentionPolicy is null ? null
-            : Task.Run(() => new SizePruneWorker(directory, retentionPolicy.GetMaxTotalBytesPerVirtualShard, retentionPolicy.IsAdmissionPaused, _mailbox.Writer,
-                tickInterval: retentionPolicy.SizePruneTickInterval).RunAsync(_retentionCts.Token));
+        _sizePruneWorker = retentionPolicy is null ? null
+            : new SizePruneWorker(directory, retentionPolicy.GetMaxTotalBytesPerVirtualShard, retentionPolicy.IsAdmissionPaused, _mailbox.Writer,
+                tickInterval: retentionPolicy.SizePruneTickInterval, logger: logger);
+        _sizePruneWorkerLoop = _sizePruneWorker is null ? null : Task.Run(() => _sizePruneWorker.RunAsync(_retentionCts.Token));
     }
 
     /// <summary>
@@ -69,6 +76,14 @@ public sealed partial class ShardLog : IAsyncDisposable {
     /// as an upper bound to reject offsets that don't refer to any message that actually exists yet.
     /// </summary>
     public ulong NextOffsetToApply => Volatile.Read(ref _nextOffsetToApply);
+
+    /// <summary>
+    /// Running count of messages forcibly pruned by the size-based emergency floor — mirrors how
+    /// <see cref="Compaction.CompactionWorker"/> is wrapped without being exposed directly.
+    /// Every increase here is a guarantee-break (a message discarded regardless of ack status),
+    /// never routine, expected pruning. Zero when this log has no <see cref="RetentionPolicy"/>.
+    /// </summary>
+    public long ForcedPruneMessagesTotal => _sizePruneWorker?.MessagesPrunedTotal ?? 0;
 
     /// <summary>
     /// Shuts down in the order that guarantees every message already sitting in the mailbox is
