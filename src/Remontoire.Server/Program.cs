@@ -1,6 +1,8 @@
+using System.Net;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using OpenTelemetry.Trace;
 using Remontoire.Raft.Grpc;
 using Remontoire.Security;
@@ -15,9 +17,38 @@ var builder = WebApplication.CreateBuilder(args);
 // scope RaftReplicaHostedService opens per group onto every log line written within it.
 builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
 
-// No mTLS yet (a later phase) — peers talk plain HTTP/2, which Kestrel only serves when told to.
-builder.WebHost.ConfigureKestrel(options =>
-    options.ConfigureEndpointDefaults(listenOptions => listenOptions.Protocols = HttpProtocols.Http2));
+var raftOptions = builder.Configuration.GetSection("Raft").Get<RaftServerOptions>() ?? new RaftServerOptions();
+var secure = !raftOptions.Mtls.AllowInsecureTransport;
+var mtlsCredentials = secure ? ClusterMtlsCredentialsLoader.Load(raftOptions.Mtls) : null;
+// Server-side never knows, before validation, which specific peer is connecting — no single
+// expected subject to check here (§5.4/§5.5); RaftGrpcTransport's own, outbound-only validators
+// (constructed inside RaftReplicaHostedService) are where a specific peer's expected subject is
+// actually enforced.
+var peerCertificateValidator = mtlsCredentials is null ? null : new PeerCertificateValidator(mtlsCredentials.CaCertificate, expectedSubject: null);
+
+// Two endpoints, one process: the peer port requires a client certificate (node-to-node, §5.3),
+// the client port never does (client-to-cluster auth is JWT, §2). AllowInsecureTransport skips TLS
+// on both — dev/test only, never a silent default (§6.1).
+builder.WebHost.ConfigureKestrel(options => {
+    options.Listen(IPAddress.Any, raftOptions.PeerPort, listenOptions => {
+        listenOptions.Protocols = HttpProtocols.Http2;
+        if (secure)
+            listenOptions.UseHttps(https => {
+                https.ServerCertificateSelector = (_, _) => mtlsCredentials!.NodeCertificate;
+                https.ClientCertificateMode = ClientCertificateMode.RequireCertificate;
+                https.ClientCertificateValidation = (certificate, chain, errors) => peerCertificateValidator!.Validate(certificate, chain!, errors);
+            });
+    });
+
+    options.Listen(IPAddress.Any, raftOptions.ClientPort, listenOptions => {
+        listenOptions.Protocols = HttpProtocols.Http2;
+        if (secure)
+            listenOptions.UseHttps(https => {
+                https.ServerCertificateSelector = (_, _) => mtlsCredentials!.NodeCertificate;
+                https.ClientCertificateMode = ClientCertificateMode.NoCertificate;
+            });
+    });
+});
 
 builder.Services.Configure<RaftServerOptions>(builder.Configuration.GetSection("Raft"));
 builder.Services.AddSingleton<RaftReplicaRegistry>();
@@ -45,11 +76,14 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 builder.Services.AddSingleton<RemontoireAuthorizer>();
 
+// PeerCertificateRequiredInterceptor is defense-in-depth only (§5.1) — the real trust decision for
+// node-to-node traffic already happened at the TLS handshake above (ClientCertificateMode.RequireCertificate).
 builder.Services.AddGrpc()
     .AddServiceOptions<RemontoireClientGrpcService>(options => {
         options.Interceptors.Add<RemontoireAuthenticationInterceptor>();
         options.Interceptors.Add<RemontoireAuthorizationInterceptor>();
-    });
+    })
+    .AddServiceOptions<RaftTransportGrpcService>(options => options.Interceptors.Add<PeerCertificateRequiredInterceptor>());
 
 builder.Services.AddHealthChecks()
     .AddCheck<RaftLivenessCheck>("raft-liveness", tags: ["live"])
@@ -81,13 +115,15 @@ ObservableMetricsRegistration.Register(
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapGrpcService<RaftTransportGrpcService>();
-app.MapGrpcService<RemontoireClientGrpcService>();
+app.MapGrpcService<RaftTransportGrpcService>().RequireHost($"*:{raftOptions.PeerPort}");
+app.MapGrpcService<RemontoireClientGrpcService>().RequireHost($"*:{raftOptions.ClientPort}");
 
 // Only a process that also hosts a meta-group replica has anything to serve here — a node
-// without one has no MetaLogJournal content and nothing else would ever route to it anyway.
+// without one has no MetaLogJournal content and nothing else would ever route to it anyway. Lives
+// on the client port: read-only table-snapshot traffic, not a Raft-consensus RPC, so it only needs
+// ordinary TLS, not peer mTLS (§5.3).
 if (builder.Configuration.GetSection("Raft:MetaGroup").Exists())
-    app.MapGrpcService<ShardAssignmentMetaGrpcService>();
+    app.MapGrpcService<ShardAssignmentMetaGrpcService>().RequireHost($"*:{raftOptions.ClientPort}");
 
 app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = check => check.Tags.Contains("live") });
 app.MapHealthChecks("/healthz/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") });
