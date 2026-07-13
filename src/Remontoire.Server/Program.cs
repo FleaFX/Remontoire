@@ -46,7 +46,10 @@ builder.Services.AddAuthorization();
 builder.Services.AddSingleton<RemontoireAuthorizer>();
 
 builder.Services.AddGrpc()
-    .AddServiceOptions<RemontoireClientGrpcService>(options => options.Interceptors.Add<RemontoireAuthenticationInterceptor>());
+    .AddServiceOptions<RemontoireClientGrpcService>(options => {
+        options.Interceptors.Add<RemontoireAuthenticationInterceptor>();
+        options.Interceptors.Add<RemontoireAuthorizationInterceptor>();
+    });
 
 builder.Services.AddHealthChecks()
     .AddCheck<RaftLivenessCheck>("raft-liveness", tags: ["live"])

@@ -10,16 +10,16 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Client.V1;
-using Remontoire.Messaging;
-using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
+using Remontoire.Server;
+using Remontoire.Server.Grpc;
 using Remontoire.Sharding;
 
-namespace Remontoire.Server.Grpc;
+namespace Remontoire.Security;
 
 // Laag-4 smoke test for the interceptor + Program.cs wiring (fase 8, subtraject A, step 3) — not
-// the full authorization scenario matrix yet (CanProduce/CanConsume aren't wired into Publish/Ack/
-// Consume until step 4), just the one thing this step adds: an unauthenticated call is rejected
+// the full authorization scenario matrix yet (RemontoireAuthorizationInterceptorTests covers that
+// separately, step 4), just the one thing this step adds: an unauthenticated call is rejected
 // before it ever reaches RemontoireClientGrpcService's own logic.
 public class RemontoireAuthenticationInterceptorTests {
     static async Task<WebApplication> StartHostAsync() {

@@ -1,7 +1,7 @@
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 
-namespace Remontoire.Server.Grpc;
+namespace Remontoire.Security;
 
 /// <summary>
 /// Rejects an RPC that carries no valid, authenticated identity. The actual bearer-token
@@ -9,8 +9,7 @@ namespace Remontoire.Server.Grpc;
 /// authentication middleware before gRPC endpoint dispatch — and therefore this interceptor —
 /// ever runs; this class only checks whether that produced an authenticated identity. Registered
 /// per-service (<c>AddServiceOptions&lt;RemontoireClientGrpcService&gt;</c>), never globally —
-/// <see cref="Remontoire.Raft.Grpc.RaftTransportGrpcService"/>'s node-to-node traffic never
-/// carries a bearer token and must never be required to.
+/// node-to-node Raft transport traffic never carries a bearer token and must never be required to.
 /// </summary>
 public sealed class RemontoireAuthenticationInterceptor : Interceptor {
     public override Task<TResponse> UnaryServerHandler<TRequest, TResponse>(
