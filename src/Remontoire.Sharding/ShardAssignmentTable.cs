@@ -105,6 +105,10 @@ public sealed partial class ShardAssignmentTable {
                 ApplyPolicyRecord(record);
                 break;
 
+            case SetProduceAcl or SetConsumeAcl or SetStreamSubjectClaimType:
+                ApplyAclRecord(record);
+                break;
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case.");
         }

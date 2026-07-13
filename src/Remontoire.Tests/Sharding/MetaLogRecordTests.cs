@@ -128,6 +128,42 @@ public class MetaLogRecordTests {
         }
 
         [Fact]
+        public void Round_trips_a_SetProduceAcl_record() {
+            var record = new SetProduceAcl("client-1", "orders", true);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetConsumeAcl_record() {
+            var record = new SetConsumeAcl("client-1", "orders", "billing", false);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetStreamSubjectClaimType_record_with_a_claim_type() {
+            var record = new SetStreamSubjectClaimType("orders", "client_id");
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
+        public void Round_trips_a_SetStreamSubjectClaimType_record_with_no_claim_type() {
+            var record = new SetStreamSubjectClaimType("orders", null);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
         public void Throws_for_an_unrecognized_tag_byte() {
             var act = () => MetaLogRecord.Decode([255]);
 
