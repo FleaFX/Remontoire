@@ -14,6 +14,7 @@ using Remontoire.Messaging;
 using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
+using Remontoire.Security;
 using Remontoire.Server;
 using Remontoire.Server.Grpc;
 using Remontoire.Sharding;
@@ -117,7 +118,7 @@ public class RemontoireGrpcClusterTests {
                 ElectionTimeoutMin: TimeSpan.FromMilliseconds(150),
                 ElectionTimeoutMax: TimeSpan.FromMilliseconds(300));
 
-            var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout);
+            var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout, new ClusterMtlsOptions { AllowInsecureTransport = true });
             var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), transport, config);
             await replica.StartAsync();
             hosts[i].Services.GetRequiredService<RaftReplicaRegistry>().Register(replica);

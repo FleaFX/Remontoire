@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Raft.Grpc;
+using Remontoire.Security;
 using Remontoire.Storage;
 
 namespace Remontoire.Raft;
@@ -64,7 +65,7 @@ public class RaftGrpcClusterTests {
                     ElectionTimeoutMin: TimeSpan.FromMilliseconds(150),
                     ElectionTimeoutMax: TimeSpan.FromMilliseconds(300));
 
-                var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout);
+                var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout, new ClusterMtlsOptions { AllowInsecureTransport = true });
                 transports.Add(transport);
 
                 var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), transport, config);

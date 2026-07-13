@@ -57,11 +57,23 @@ sealed class RaftReplicaHostedService(
         foreach (var peer in allPeers)
             leaderAddresses.Register(peer.NodeId, peer.Address);
 
+        // A server-side connection doesn't know, before validation, which specific peer is
+        // dialing in — so unlike the client-side check (one expected subject per outbound
+        // channel, below), the inbound side needs the union of every configured peer's expected
+        // subject across every group this node hosts. Same distinct-by-NodeId pattern as allPeers
+        // above, for the same reason: a peer can appear in more than one group's Peers list.
+        var expectedCertificateSubjects = raftOptions.Groups.SelectMany(group => group.Peers)
+            .Concat(raftOptions.MetaGroup?.Peers ?? [])
+            .Where(peer => peer.ExpectedCertificateSubject is not null)
+            .DistinctBy(peer => peer.NodeId)
+            .ToDictionary(peer => peer.NodeId, peer => peer.ExpectedCertificateSubject!);
+
         // Every group (and the meta-group) shares the same heartbeat cadence below, so they'd all
         // resolve to the same RPC timeout regardless — computed once here, directly, rather than
         // building a throwaway RaftReplicaConfig just to read it off.
         var rpcTimeout = TimeSpan.FromMilliseconds(50) * 5;
-        _transport = new RaftGrpcTransport(allPeers, rpcTimeout);
+        _transport = new RaftGrpcTransport(allPeers, rpcTimeout, raftOptions.Mtls, expectedCertificateSubjects,
+            logger: loggerFactory.CreateLogger("Remontoire.Raft.RaftGrpcTransport"));
 
         foreach (var group in raftOptions.Groups) {
             // Every background loop started below (RaftReplica's actor, ShardLog's actor/compaction/

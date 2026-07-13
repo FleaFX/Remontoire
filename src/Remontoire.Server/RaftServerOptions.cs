@@ -1,3 +1,5 @@
+using Remontoire.Security;
+
 namespace Remontoire.Server;
 
 /// <summary>
@@ -31,6 +33,21 @@ public sealed class RaftServerOptions {
     /// default, not a value tuned against any real production disk-pressure data yet.
     /// </summary>
     public long MinFreeDiskSpaceBytes { get; set; } = 1L * 1024 * 1024 * 1024;
+
+    /// <summary>
+    /// Node-to-node mTLS configuration, or an explicit opt-out into insecure transport (dev/test only).
+    /// </summary>
+    public ClusterMtlsOptions Mtls { get; set; } = new();
+
+    /// <summary>
+    /// The port <see cref="Remontoire.Raft.Grpc.RaftTransportGrpcService"/> listens on — mTLS-required.
+    /// </summary>
+    public int PeerPort { get; set; }
+
+    /// <summary>
+    /// The port the client-facing gRPC services listen on — ordinary TLS, no client certificate.
+    /// </summary>
+    public int ClientPort { get; set; }
 }
 
 /// <summary>
@@ -95,4 +112,12 @@ public sealed class RaftPeerOptions {
     /// The peer's gRPC address.
     /// </summary>
     public string Address { get; set; } = "";
+
+    /// <summary>
+    /// The subject this peer's certificate must carry — a certificate merely signed by the
+    /// cluster CA is not enough: a compromised-but-CA-issued certificate for the wrong node would
+    /// otherwise go undetected. <see langword="null"/> means no additional subject check beyond
+    /// the CA chain itself.
+    /// </summary>
+    public string? ExpectedCertificateSubject { get; set; }
 }
