@@ -1,0 +1,238 @@
+syntax = "proto3";
+package remontoire.admin.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/empty.proto";
+
+service RemontoireAdmin {
+  rpc CreateStream(CreateStreamRequest) returns (CreateStreamReply);
+
+  rpc StartReshard(StartReshardRequest) returns (StartReshardReply);
+  rpc CopyReshardData(CopyReshardDataRequest) returns (stream CopyReshardDataProgress);
+  rpc Cutover(CutoverRequest) returns (CutoverReply);
+  rpc CompleteReshard(CompleteReshardRequest) returns (CompleteReshardReply);
+  rpc AbortReshard(AbortReshardRequest) returns (AbortReshardReply);
+
+  rpc SetConsumerGroupFlag(SetConsumerGroupFlagRequest) returns (SetConsumerGroupFlagReply);
+  rpc SetStreamPolicy(SetStreamPolicyRequest) returns (SetStreamPolicyReply);
+  rpc ManageAcl(ManageAclRequest) returns (ManageAclReply);
+
+  rpc ListMetaLogRecords(ListMetaLogRecordsRequest) returns (stream MetaLogRecordView);
+}
+
+// Generalized from remontoire_client.proto's own, per-stream NotLeader (see that file's own
+// remarks) — an admin RPC has no partition key/stream concept for some operations (ManageAcl), and
+// a redirect target may be a group other than the meta-group (CopyReshardData).
+message NotLeader {
+  string group_id = 1;
+  optional string leader_address = 2;
+}
+
+message CreateStreamRequest {
+  string stream_name = 1;
+  int32 virtual_shard_count = 2;
+  RoutingAlgorithmProto routing_algorithm = 3;
+  repeated PhysicalGroupDescriptorProto initial_groups = 4;
+  repeated VirtualShardAssignmentProto initial_assignments = 5; // must cover every index 0..virtual_shard_count-1 exactly once
+}
+
+enum RoutingAlgorithmProto {
+  ROUTING_ALGORITHM_UNSPECIFIED = 0;
+  XX_HASH3_V1 = 1; // mirrors Remontoire.Sharding.RoutingAlgorithm.XxHash3V1
+}
+
+// Renamed from the bare "PhysicalGroupDescriptor" in the product-level sketch: that exact name
+// already exists as a public readonly record struct in Remontoire.Sharding, and RemontoireAdminGrpcService
+// needs both namespaces in scope at once.
+message PhysicalGroupDescriptorProto {
+  string group_id = 1;
+  repeated ShardGroupMemberProto members = 2;
+}
+
+message ShardGroupMemberProto {
+  string node_id = 1;
+  string address = 2;
+}
+
+// Renamed for the same reason as PhysicalGroupDescriptorProto above.
+message VirtualShardAssignmentProto {
+  int32 virtual_shard_index = 1;
+  string group_id = 2; // must appear in initial_groups
+}
+
+message CreateStreamReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message StartReshardRequest {
+  string migration_id = 1; // client-generated GUID, echoed back in every later step
+  string stream_name = 2;
+  int32 virtual_shard_index = 3;
+  string from_group_id = 4;
+  string to_group_id = 5;
+}
+
+message StartReshardReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message CopyReshardDataRequest {
+  string migration_id = 1;
+  string from_group_id = 2;
+  string to_group_id = 3;
+  uint64 from_offset = 4; // inclusive resume point — 0 on a fresh migration, or the last-seen ProgressUpdate.next_offset on reconnect
+}
+
+message CopyReshardDataProgress {
+  oneof result {
+    ProgressUpdate progress = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message ProgressUpdate {
+  uint64 next_offset = 1; // exactly ReshardOrchestrator.CopyRecordsAsync's own return value
+  bool caught_up = 2;     // true once a round makes no further progress — the operator's cue to call Cutover
+}
+
+message CutoverRequest {
+  string migration_id = 1;
+  string stream_name = 2;
+  int32 virtual_shard_index = 3;
+  string from_group_id = 4;
+  string to_group_id = 5;
+  google.protobuf.Duration timeout = 6; // bounds the internal pause->propose->observe->resume sequence
+}
+
+message CutoverReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+    CutoverTimedOut timed_out = 3; // the pause was resumed before the cutover was locally observed
+  }
+}
+
+message CutoverTimedOut {}
+
+message CompleteReshardRequest {
+  string migration_id = 1;
+  string stream_name = 2;
+  int32 virtual_shard_index = 3;
+}
+
+message CompleteReshardReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message AbortReshardRequest {
+  string migration_id = 1;
+  string stream_name = 2;
+  int32 virtual_shard_index = 3;
+}
+
+message AbortReshardReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message SetConsumerGroupFlagRequest {
+  string stream_name = 1;
+  string consumer_group = 2;
+  oneof setting {
+    AckModeProto ack_mode = 3;
+    bool mandatory = 4;
+  }
+}
+
+enum AckModeProto {
+  ACK_MODE_UNSPECIFIED = 0;
+  STRICT = 1;
+  CHECKPOINT = 2;
+}
+
+message SetConsumerGroupFlagReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message SetStreamPolicyRequest {
+  string stream_name = 1;
+  optional RetentionPolicy retention = 2;
+  optional CheckpointInterval checkpoint = 3; // at least one of the two must be set
+}
+
+message RetentionPolicy {
+  google.protobuf.Duration audit_retention = 1;
+  google.protobuf.Duration max_retention = 2;
+  optional int64 max_size_bytes_per_virtual_shard = 3;
+}
+
+message CheckpointInterval {
+  optional google.protobuf.Duration interval = 1;
+  optional int32 offset_count = 2;
+}
+
+message SetStreamPolicyReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message ManageAclRequest {
+  oneof change {
+    ProduceAclChange produce_acl = 1;
+    ConsumeAclChange consume_acl = 2;
+    SubjectClaimTypeChange subject_claim_type = 3;
+  }
+}
+
+message ProduceAclChange {
+  string subject = 1;
+  string stream_name = 2;
+  bool allowed = 3;
+}
+
+message ConsumeAclChange {
+  string subject = 1;
+  string stream_name = 2;
+  string consumer_group = 3;
+  bool allowed = 4;
+}
+
+message SubjectClaimTypeChange {
+  string stream_name = 1;
+  optional string claim_type = 2; // absent clears the override, falls back to the cluster-wide default
+}
+
+message ManageAclReply {
+  oneof result {
+    google.protobuf.Empty success = 1;
+    NotLeader not_leader = 2;
+  }
+}
+
+message ListMetaLogRecordsRequest {
+  uint64 from_version = 1; // inclusive, same convention as remontoire_meta.proto's WatchRequest
+}
+
+message MetaLogRecordView {
+  uint64 version = 1;
+  string record_type = 2;          // the C# record's own type name, e.g. "MigrationStarted", "SetProduceAcl"
+  map<string, string> fields = 3;  // e.g. {"StreamName": "orders-inbound", "VirtualShardIndex": "3"}
+  uint64 timestamp_micros = 4;     // when this command was committed
+  string proposed_by = 5;          // empty for records committed before this field existed
+}

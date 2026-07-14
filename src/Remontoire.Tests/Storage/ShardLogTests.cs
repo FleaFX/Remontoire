@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using FluentAssertions;
+using Remontoire.Server;
 using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;
@@ -813,17 +814,8 @@ public class ShardLogTests {
         throw new TimeoutException($"Segment count never reached {expected}.");
     }
 
-    static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) {
-        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
-        while (DateTime.UtcNow < deadline) {
-            if (condition())
-                return true;
-
-            await Task.Delay(10);
-        }
-
-        return condition();
-    }
+    static Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) =>
+        ConditionPoller.WaitUntilAsync(condition, timeout ?? TimeSpan.FromSeconds(5), TimeSpan.FromMilliseconds(10));
 
     static WalRecord SampleRecord(ulong offset, string payload = "hello world") =>
         new(WalRecordType.Append, RaftTerm: 0, RaftIndex: 0, offset, TimestampMicros: 42, Encoding.UTF8.GetBytes("order-42"), [], Encoding.UTF8.GetBytes(payload));

@@ -81,13 +81,6 @@ public class ObservabilityEndToEndTests {
         }
     }
 
-    static async Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline) {
-            if (condition())
-                return true;
-            await Task.Delay(20);
-        }
-        return condition();
-    }
+    static Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) =>
+        ConditionPoller.WaitUntilAsync(condition, timeout, TimeSpan.FromMilliseconds(20));
 }

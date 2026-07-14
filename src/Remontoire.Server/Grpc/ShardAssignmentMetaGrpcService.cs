@@ -13,7 +13,7 @@ namespace Remontoire.Server.Grpc;
 public sealed class ShardAssignmentMetaGrpcService(MetaLogJournal journal) : ShardAssignmentMeta.ShardAssignmentMetaBase {
     /// <inheritdoc />
     public override async Task Watch(WatchRequest request, IServerStreamWriter<MetaLogRecordProto> responseStream, ServerCallContext context) {
-        await foreach (var (version, payload) in journal.WatchAsync(request.FromVersion, context.CancellationToken))
+        await foreach (var (version, payload, _, _) in journal.WatchAsync(request.FromVersion, context.CancellationToken))
             await responseStream.WriteAsync(ToProto(version, payload));
     }
 

@@ -6,7 +6,7 @@ namespace Remontoire.Security;
 
 /// <summary>
 /// Authorization decisions for an authenticated caller — a coarse, cluster-wide role check for
-/// the (not yet existing) admin surface, and fine-grained, per-stream produce/consume checks
+/// the admin surface, and fine-grained, per-stream produce/consume checks
 /// against <see cref="ShardAssignmentTable"/>'s ACL register for the data plane. The two never
 /// substitute for each other: <see cref="IsOperator"/> is never consulted by <see cref="CanProduce"/>/
 /// <see cref="CanConsume"/> — an operator who needs data-plane access needs an explicit ACL grant

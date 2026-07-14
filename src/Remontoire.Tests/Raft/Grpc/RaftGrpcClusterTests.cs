@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Raft.Grpc;
 using Remontoire.Security;
+using Remontoire.Server;
 using Remontoire.Storage;
 using Remontoire.Tests;
 
@@ -22,15 +23,8 @@ public class RaftGrpcClusterTests {
     static AppendRequest SampleRequest(string key = "key") =>
         new(System.Text.Encoding.UTF8.GetBytes(key), [], "payload"u8.ToArray());
 
-    static async Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline) {
-            if (condition())
-                return true;
-            await Task.Delay(20);
-        }
-        return condition();
-    }
+    static Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) =>
+        ConditionPoller.WaitUntilAsync(condition, timeout, TimeSpan.FromMilliseconds(20));
 
     static async Task<WebApplication> StartHostAsync() {
         var builder = WebApplication.CreateBuilder();

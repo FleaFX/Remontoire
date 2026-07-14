@@ -17,8 +17,8 @@ public class MetaLogJournalTests {
         [Fact]
         public void Returns_every_appended_record_in_order_with_the_latest_version() {
             var journal = new MetaLogJournal();
-            journal.Append(1, "first"u8.ToArray());
-            journal.Append(2, "second"u8.ToArray());
+            journal.Append(1, "first"u8.ToArray(), 0, []);
+            journal.Append(2, "second"u8.ToArray(), 0, []);
 
             var (version, records) = journal.Snapshot();
 
@@ -39,11 +39,11 @@ public class MetaLogJournalTests {
             // bound. Confirmed via a real CI failure: version 0 (CreateStream) was silently, always
             // skipped this way while every later version applied normally.
             var journal = new MetaLogJournal();
-            journal.Append(0, "first"u8.ToArray());
+            journal.Append(0, "first"u8.ToArray(), 0, []);
 
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2)); // must not hang if this regresses
             var seen = new List<ulong>();
-            await foreach (var (version, _) in journal.WatchAsync(0, cts.Token)) {
+            await foreach (var (version, _, _, _) in journal.WatchAsync(0, cts.Token)) {
                 seen.Add(version);
                 break;
             }
@@ -54,12 +54,12 @@ public class MetaLogJournalTests {
         [Fact]
         public async Task Yields_records_already_appended_before_the_watch_started() {
             var journal = new MetaLogJournal();
-            journal.Append(1, "first"u8.ToArray());
-            journal.Append(2, "second"u8.ToArray());
+            journal.Append(1, "first"u8.ToArray(), 0, []);
+            journal.Append(2, "second"u8.ToArray(), 0, []);
 
             using var cts = new CancellationTokenSource();
             var seen = new List<ulong>();
-            await foreach (var (version, _) in journal.WatchAsync(0, cts.Token)) {
+            await foreach (var (version, _, _, _) in journal.WatchAsync(0, cts.Token)) {
                 seen.Add(version);
                 if (seen.Count == 2)
                     break;
@@ -71,12 +71,12 @@ public class MetaLogJournalTests {
         [Fact]
         public async Task Skips_records_strictly_before_the_requested_from_version_but_includes_it() {
             var journal = new MetaLogJournal();
-            journal.Append(1, "first"u8.ToArray());
-            journal.Append(2, "second"u8.ToArray());
-            journal.Append(3, "third"u8.ToArray());
+            journal.Append(1, "first"u8.ToArray(), 0, []);
+            journal.Append(2, "second"u8.ToArray(), 0, []);
+            journal.Append(3, "third"u8.ToArray(), 0, []);
 
             var seen = new List<ulong>();
-            await foreach (var (version, _) in journal.WatchAsync(2, CancellationToken.None)) {
+            await foreach (var (version, _, _, _) in journal.WatchAsync(2, CancellationToken.None)) {
                 seen.Add(version);
                 if (seen.Count == 2)
                     break;
@@ -94,7 +94,7 @@ public class MetaLogJournalTests {
             var moveNext = enumerator.MoveNextAsync();
 
             moveNext.IsCompleted.Should().BeFalse("nothing has been appended yet");
-            journal.Append(1, "late"u8.ToArray());
+            journal.Append(1, "late"u8.ToArray(), 0, []);
 
             (await moveNext).Should().BeTrue();
             enumerator.Current.Version.Should().Be(1);

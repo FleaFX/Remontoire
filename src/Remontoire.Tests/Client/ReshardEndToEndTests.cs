@@ -124,15 +124,8 @@ public class ReshardEndToEndTests {
         };
     }
 
-    static async Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline) {
-            if (condition())
-                return true;
-            await Task.Delay(20);
-        }
-        return condition();
-    }
+    static Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) =>
+        ConditionPoller.WaitUntilAsync(condition, timeout, TimeSpan.FromMilliseconds(20));
 
     [Fact]
     public async Task An_operator_can_live_reshard_a_stream_without_losing_messages_or_downtime() {

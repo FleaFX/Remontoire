@@ -2,6 +2,7 @@ using System.Diagnostics;
 using FluentAssertions;
 using Google.Protobuf;
 using Remontoire.Raft.V1;
+using Remontoire.Server;
 using Remontoire.Storage;
 using Remontoire.Storage.Serialization;
 
@@ -37,15 +38,8 @@ public class RaftReplicaTests {
     // DrainAsync only guarantees the actor loop's own message processing, not a background
     // task's completion. Layer 2's SimulatedCluster (virtual time, controlled delivery) removes
     // the need for this; until then, a short bounded poll is the pragmatic tool.
-    static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) {
-        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(2));
-        while (DateTime.UtcNow < deadline) {
-            if (condition())
-                return true;
-            await Task.Delay(5);
-        }
-        return condition();
-    }
+    static Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) =>
+        ConditionPoller.WaitUntilAsync(condition, timeout ?? TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(5));
 
     public class HandleVoteRequestReceivedAsync {
         [Fact]

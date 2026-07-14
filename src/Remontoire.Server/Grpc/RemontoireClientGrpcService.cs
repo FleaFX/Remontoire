@@ -244,9 +244,16 @@ public sealed class RemontoireClientGrpcService(
 
     // The redirect target's resolved address, not a bare node ID — the client cannot do this
     // translation itself (RaftReplica.LeaderHint is a node ID, the right concept inside the group
-    // itself, not a network address). Null stays null: "no hint, an election is in progress."
-    NotLeader BuildNotLeader(string streamName, NotLeaderException ex) =>
-        new() { StreamName = streamName, LeaderAddress = ex.LeaderHint is { } nodeId ? leaderAddresses.TryGet(nodeId)?.ToString() : null };
+    // itself, not a network address). LeaderAddress stays unset (never assigned null directly):
+    // "no hint, an election is in progress." An "optional string" field's generated setter still
+    // rejects a literal null via ProtoPreconditions.CheckNotNull — only leaving the property
+    // untouched keeps it correctly absent.
+    NotLeader BuildNotLeader(string streamName, NotLeaderException ex) {
+        var notLeader = new NotLeader { StreamName = streamName };
+        if (ex.LeaderHint is { } nodeId && leaderAddresses.TryGet(nodeId) is { } address)
+            notLeader.LeaderAddress = address.ToString();
+        return notLeader;
+    }
 
     // Checkpoint-mode Ack's only defense against a client forging offsets far ahead of what was
     // actually delivered — extracted as its own static method so the filtering rule is directly
@@ -277,14 +284,15 @@ public sealed class RemontoireClientGrpcService(
     }
 
     NotLeader BuildGroupRedirect(string streamName, string groupId) {
-        Uri? address = null;
+        var notLeader = new NotLeader { StreamName = streamName };
         if (assignmentTable.TryGetGroup(groupId, out var group))
             foreach (var member in group.Members) {
-                address = leaderAddresses.TryGet(member.NodeId);
-                if (address is not null)
-                    break;
+                if (leaderAddresses.TryGet(member.NodeId) is not { } address)
+                    continue;
+                notLeader.LeaderAddress = address.ToString();
+                break;
             }
 
-        return new NotLeader { StreamName = streamName, LeaderAddress = address?.ToString() };
+        return notLeader;
     }
 }

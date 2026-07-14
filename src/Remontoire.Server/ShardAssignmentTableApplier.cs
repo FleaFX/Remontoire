@@ -34,7 +34,7 @@ public sealed class ShardAssignmentTableApplier : IAsyncDisposable {
                 if (record.RecordType != WalRecordType.Append)
                     continue;
 
-                journal?.Append(record.LogicalOffset, record.Payload.ToArray());
+                journal?.Append(record.LogicalOffset, record.Payload.ToArray(), record.TimestampMicros, record.Headers);
                 table.Apply(MetaLogRecord.Decode(record.Payload.Span));
             }
         } catch (OperationCanceledException) {

@@ -1,27 +1,28 @@
 using System.Runtime.CompilerServices;
+using Remontoire.Storage;
 
 namespace Remontoire.Server;
 
 /// <summary>
-/// Buffers every committed meta-log record (version + encoded payload) this node has seen, and
-/// fans it out to any number of concurrent <see cref="WatchAsync"/> readers — unlike the
-/// single-reader committed-record stream it's fed from, several independent network subscribers
-/// (each an in-progress <c>Watch</c> RPC call) need the same records at once. Admin-command
-/// volume is tiny compared to message volume, so keeping the full history in memory forever,
-/// with no pruning, is the deliberate, simple choice here.
+/// Buffers every committed meta-log record (version + encoded payload + commit timestamp + wire
+/// headers) this node has seen, and fans it out to any number of concurrent <see cref="WatchAsync"/>
+/// readers — unlike the single-reader committed-record stream it's fed from, several independent
+/// network subscribers (each an in-progress <c>Watch</c> RPC call) need the same records at once.
+/// Admin-command volume is tiny compared to message volume, so keeping the full history in memory
+/// forever, with no pruning, is the deliberate, simple choice here.
 /// </summary>
 public sealed class MetaLogJournal {
     readonly object _gate = new();
-    readonly List<(ulong Version, byte[] Payload)> _records = [];
+    readonly List<(ulong Version, byte[] Payload, ulong TimestampMicros, IReadOnlyList<Header> Headers)> _records = [];
     volatile TaskCompletionSource _appended = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>
     /// Records one more committed entry and wakes every current <see cref="WatchAsync"/> waiter.
     /// </summary>
-    public void Append(ulong version, byte[] payload) {
+    public void Append(ulong version, byte[] payload, ulong timestampMicros, IReadOnlyList<Header> headers) {
         TaskCompletionSource previouslyAppended;
         lock (_gate) {
-            _records.Add((version, payload));
+            _records.Add((version, payload, timestampMicros, headers));
             previouslyAppended = _appended;
             _appended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }
@@ -32,7 +33,7 @@ public sealed class MetaLogJournal {
     /// <summary>
     /// The full history so far, as of this call, plus the version it reflects (0 if empty).
     /// </summary>
-    public (ulong Version, IReadOnlyList<(ulong Version, byte[] Payload)> Records) Snapshot() {
+    public (ulong Version, IReadOnlyList<(ulong Version, byte[] Payload, ulong TimestampMicros, IReadOnlyList<Header> Headers)> Records) Snapshot() {
         lock (_gate)
             return (_records.Count == 0 ? 0 : _records[^1].Version, _records.ToArray());
     }
@@ -46,11 +47,11 @@ public sealed class MetaLogJournal {
     /// version 0 from one asking "from the very beginning," both passing 0, and would silently,
     /// permanently skip that first record for the latter.
     /// </summary>
-    public async IAsyncEnumerable<(ulong Version, byte[] Payload)> WatchAsync(
+    public async IAsyncEnumerable<(ulong Version, byte[] Payload, ulong TimestampMicros, IReadOnlyList<Header> Headers)> WatchAsync(
         ulong fromVersionInclusive, [EnumeratorCancellation] CancellationToken cancellationToken = default) {
         while (true) {
             TaskCompletionSource signal;
-            (ulong Version, byte[] Payload)[] batch;
+            (ulong Version, byte[] Payload, ulong TimestampMicros, IReadOnlyList<Header> Headers)[] batch;
             lock (_gate) {
                 signal = _appended;
                 batch = _records.Where(record => record.Version >= fromVersionInclusive).ToArray();

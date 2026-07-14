@@ -105,6 +105,10 @@ builder.Services.AddGrpc()
         options.Interceptors.Add<RemontoireAuthenticationInterceptor>();
         options.Interceptors.Add<RemontoireAuthorizationInterceptor>();
     })
+    .AddServiceOptions<RemontoireAdminGrpcService>(options => {
+        options.Interceptors.Add<RemontoireAuthenticationInterceptor>();
+        options.Interceptors.Add<RemontoireAdminAuthorizationInterceptor>();
+    })
     .AddServiceOptions<RaftTransportGrpcService>(options => options.Interceptors.Add<PeerCertificateRequiredInterceptor>());
 
 builder.Services.AddHealthChecks()
@@ -144,8 +148,10 @@ app.MapGrpcService<RemontoireClientGrpcService>().RequireHost($"*:{raftOptions.C
 // without one has no MetaLogJournal content and nothing else would ever route to it anyway. Lives
 // on the client port: read-only table-snapshot traffic, not a Raft-consensus RPC, so it only needs
 // ordinary TLS, not peer mTLS (§5.3).
-if (builder.Configuration.GetSection("Raft:MetaGroup").Exists())
+if (builder.Configuration.GetSection("Raft:MetaGroup").Exists()) {
     app.MapGrpcService<ShardAssignmentMetaGrpcService>().RequireHost($"*:{raftOptions.ClientPort}");
+    app.MapGrpcService<RemontoireAdminGrpcService>().RequireHost($"*:{raftOptions.ClientPort}");
+}
 
 app.MapHealthChecks("/healthz/live", new HealthCheckOptions { Predicate = check => check.Tags.Contains("live") });
 app.MapHealthChecks("/healthz/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") });
