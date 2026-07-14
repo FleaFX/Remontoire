@@ -41,6 +41,10 @@ public sealed class RemontoireAdminGrpcService(
 
         var routingAlgorithm = MapRoutingAlgorithm(request.RoutingAlgorithm);
 
+        if (!CoversEveryIndexExactlyOnce(request.InitialAssignments.Select(assignment => assignment.VirtualShardIndex), request.VirtualShardCount))
+            throw new RpcException(new Status(StatusCode.InvalidArgument,
+                $"initial_assignments must cover every index 0..{request.VirtualShardCount - 1} exactly once."));
+
         try {
             await metaReplica.ProposeAsync(
                 ToAppendRequest(new CreateStream(request.StreamName, request.VirtualShardCount, routingAlgorithm), context), context.CancellationToken);
@@ -71,7 +75,7 @@ public sealed class RemontoireAdminGrpcService(
         if (!TryGetMetaReplica(out var metaReplica))
             throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
 
-        var migrationId = new MigrationId(Guid.Parse(request.MigrationId));
+        var migrationId = ParseMigrationId(request.MigrationId);
         try {
             await orchestrator.ProposeMigrationStartedAsync(
                 metaReplica, migrationId, request.StreamName, request.VirtualShardIndex, request.FromGroupId, request.ToGroupId, context.CancellationToken);
@@ -86,7 +90,7 @@ public sealed class RemontoireAdminGrpcService(
         if (!TryGetMetaReplica(out var metaReplica))
             throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
 
-        var migrationId = new MigrationId(Guid.Parse(request.MigrationId));
+        var migrationId = ParseMigrationId(request.MigrationId);
         try {
             await orchestrator.ProposeMigrationCompletedAsync(metaReplica, migrationId, request.StreamName, request.VirtualShardIndex, context.CancellationToken);
             return new CompleteReshardReply { Success = new Empty() };
@@ -100,7 +104,7 @@ public sealed class RemontoireAdminGrpcService(
         if (!TryGetMetaReplica(out var metaReplica))
             throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
 
-        var migrationId = new MigrationId(Guid.Parse(request.MigrationId));
+        var migrationId = ParseMigrationId(request.MigrationId);
         try {
             await orchestrator.ProposeMigrationAbortedAsync(metaReplica, migrationId, request.StreamName, request.VirtualShardIndex, context.CancellationToken);
             return new AbortReshardReply { Success = new Empty() };
@@ -115,6 +119,10 @@ public sealed class RemontoireAdminGrpcService(
     // above), so ListMetaLogRecords shows an empty proposed_by for every migration-lifecycle record,
     // permanently, not just until some later step fills it in.
 
+    // request.MigrationId is accepted on the wire (for the caller's own correlation across the
+    // reshard step sequence) but deliberately not read here — CopyRecordsAsync only needs
+    // from_group_id/to_group_id/from_offset, and only one migration is ever expected to be moving
+    // data between a given FROM/TO pair at a time.
     /// <inheritdoc />
     public override async Task CopyReshardData(CopyReshardDataRequest request, IServerStreamWriter<CopyReshardDataProgress> responseStream, ServerCallContext context) {
         var fromOffset = request.FromOffset;
@@ -157,7 +165,7 @@ public sealed class RemontoireAdminGrpcService(
         if (!messagingRegistry.TryGet(request.FromGroupId, out _))
             return new CutoverReply { NotLeader = BuildGroupRedirect(request.FromGroupId) };
 
-        var migrationId = new MigrationId(Guid.Parse(request.MigrationId));
+        var migrationId = ParseMigrationId(request.MigrationId);
         var timeout = request.Timeout.ToTimeSpan();
 
         using var pauseScope = orchestrator.PauseAdmission(request.FromGroupId);
@@ -351,6 +359,14 @@ public sealed class RemontoireAdminGrpcService(
         AckModeProto.Checkpoint => AckMode.Checkpoint,
         _ => throw new RpcException(new Status(StatusCode.InvalidArgument, $"'{mode}' is not a valid ack mode.")),
     };
+
+    internal static MigrationId ParseMigrationId(string value) =>
+        Guid.TryParse(value, out var guid) ? new MigrationId(guid) : throw new RpcException(new Status(StatusCode.InvalidArgument, $"'{value}' is not a valid migration_id."));
+
+    internal static bool CoversEveryIndexExactlyOnce(IEnumerable<int> indices, int virtualShardCount) {
+        var distinct = indices.ToHashSet();
+        return distinct.Count == virtualShardCount && distinct.SetEquals(Enumerable.Range(0, virtualShardCount));
+    }
 
     // Shared by every meta-proposing RPC: attaches the calling subject (the cluster-wide default
     // claim, not the per-stream ACL override RemontoireAuthorizer.Subject resolves) as a

@@ -71,6 +71,44 @@ public class RemontoireAdminGrpcServiceTests {
         }
     }
 
+    public class ParseMigrationId {
+        [Fact]
+        public void Parses_a_well_formed_guid_string() {
+            var guid = Guid.NewGuid();
+
+            RemontoireAdminGrpcService.ParseMigrationId(guid.ToString()).Value.Should().Be(guid);
+        }
+
+        [Fact]
+        public void Rejects_a_malformed_value_as_an_invalid_argument_rather_than_an_unhandled_FormatException() {
+            var act = () => RemontoireAdminGrpcService.ParseMigrationId("not-a-guid");
+
+            act.Should().Throw<RpcException>().Which.Status.StatusCode.Should().Be(StatusCode.InvalidArgument);
+        }
+    }
+
+    public class CoversEveryIndexExactlyOnce {
+        [Fact]
+        public void Returns_true_when_every_index_is_present_exactly_once() {
+            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1, 2], virtualShardCount: 3).Should().BeTrue();
+        }
+
+        [Fact]
+        public void Returns_false_when_an_index_is_missing() {
+            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1], virtualShardCount: 3).Should().BeFalse();
+        }
+
+        [Fact]
+        public void Returns_false_when_an_index_is_duplicated_masking_a_missing_one() {
+            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1, 1], virtualShardCount: 3).Should().BeFalse();
+        }
+
+        [Fact]
+        public void Returns_false_when_an_index_is_out_of_range() {
+            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1, 5], virtualShardCount: 3).Should().BeFalse();
+        }
+    }
+
     public class Describe {
         [Fact]
         public void Describes_a_CreateStream_record() {

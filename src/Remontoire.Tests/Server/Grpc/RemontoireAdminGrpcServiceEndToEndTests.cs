@@ -8,7 +8,6 @@ using Grpc.Net.Client;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
@@ -23,10 +22,10 @@ using Remontoire.Tests;
 
 namespace Remontoire.Server.Grpc;
 
-// Laag-4 exit-criterion coverage for the admin surface (implementation/9_control-plane-admin-api-design.md
-// §13.3) — every earlier step tested only extracted, pure logic, since the RPC methods themselves need a
-// real ServerCallContext (no fake precedent in this codebase, see RemontoireClientGrpcServiceTests's own
-// remarks). This is where that deferred coverage lands: real Kestrel host, real JWT, a real single-node
+// Real-network exit-criterion coverage for the admin surface — every earlier step tested only
+// extracted, pure logic, since the RPC methods themselves need a real ServerCallContext (no fake
+// precedent in this codebase, see RemontoireClientGrpcServiceTests's own remarks). This is where
+// that deferred coverage lands: real Kestrel host, real JWT, a real single-node
 // meta-group plus two real single-node data groups (group-1/group-2), all in-process.
 [Collection("RealNetwork")]
 public class RemontoireAdminGrpcServiceEndToEndTests {
@@ -78,10 +77,10 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options => {
                 options.RequireHttpsMetadata = false;
-                // Load-bearing (implementation/8_security-design.md §2.4): without this, ASP.NET
-                // Core silently rewrites well-known claim types like "role" into long XML-schema
-                // URIs, and RemontoireAuthorizer.HasRole's claim.Type == "role" check would then
-                // never match — IsOperator would always be false, no matter what the token carries.
+                // Load-bearing, not a style choice: without this, ASP.NET Core silently rewrites
+                // well-known claim types like "role" into long XML-schema URIs, and
+                // RemontoireAuthorizer.HasRole's claim.Type == "role" check would then never
+                // match — IsOperator would always be false, no matter what the token carries.
                 options.MapInboundClaims = false;
                 options.TokenValidationParameters = new TokenValidationParameters {
                     ValidateIssuer = false, ValidateAudience = false, IssuerSigningKey = SigningKey,
