@@ -369,21 +369,31 @@ public sealed class RemontoireAdminGrpcService(
     // Mirrors RemontoireClientGrpcService.BuildNotLeader, generalized from a stream-scoped to a
     // group-scoped NotLeader — every meta-proposing RPC redirects to the meta-group itself, since
     // ex.GroupId is already "__meta__" whenever metaReplica.ProposeAsync is the one that threw.
-    NotLeader BuildNotLeader(NotLeaderException ex) =>
-        new() { GroupId = ex.GroupId, LeaderAddress = ex.LeaderHint is { } nodeId ? leaderAddresses.TryGet(nodeId)?.ToString() : null };
+    //
+    // Never assign LeaderAddress = null directly: an "optional string" field's generated setter
+    // still rejects null via ProtoPreconditions.CheckNotNull (only the separate ClearLeaderAddress
+    // accepts a truly absent value) — leaving the property untouched is the correct way to keep it
+    // unset when no address is known.
+    NotLeader BuildNotLeader(NotLeaderException ex) {
+        var notLeader = new NotLeader { GroupId = ex.GroupId };
+        if (ex.LeaderHint is { } nodeId && leaderAddresses.TryGet(nodeId) is { } address)
+            notLeader.LeaderAddress = address.ToString();
+        return notLeader;
+    }
 
     // Mirrors RemontoireClientGrpcService.BuildGroupRedirect — used where no NotLeaderException was
     // ever thrown (the local precondition failed before any ProposeAsync call was even attempted,
-    // e.g. Cutover's own FROM-group-not-hosted-here guard).
+    // e.g. Cutover's own FROM-group-not-hosted-here guard). Same null-avoidance as BuildNotLeader.
     NotLeader BuildGroupRedirect(string groupId) {
-        Uri? address = null;
+        var notLeader = new NotLeader { GroupId = groupId };
         if (assignmentTable.TryGetGroup(groupId, out var group))
             foreach (var member in group.Members) {
-                address = leaderAddresses.TryGet(member.NodeId);
-                if (address is not null)
-                    break;
+                if (leaderAddresses.TryGet(member.NodeId) is not { } address)
+                    continue;
+                notLeader.LeaderAddress = address.ToString();
+                break;
             }
 
-        return new NotLeader { GroupId = groupId, LeaderAddress = address?.ToString() };
+        return notLeader;
     }
 }
