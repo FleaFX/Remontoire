@@ -253,6 +253,81 @@ public sealed class RemontoireAdminGrpcService(
         }
     }
 
+    /// <inheritdoc />
+    public override async Task ListMetaLogRecords(ListMetaLogRecordsRequest request, IServerStreamWriter<MetaLogRecordView> responseStream, ServerCallContext context) {
+        await foreach (var (version, payload, timestampMicros, headers) in journal.WatchAsync(request.FromVersion, context.CancellationToken)) {
+            var record = MetaLogRecord.Decode(payload);
+            var (recordType, fields) = Describe(record);
+
+            var view = new MetaLogRecordView {
+                Version = version, RecordType = recordType, TimestampMicros = timestampMicros,
+                ProposedBy = FindProposedBy(headers) ?? "",
+            };
+            view.Fields.Add(fields);
+            await responseStream.WriteAsync(view);
+        }
+    }
+
+    // Mirrors MetaLogRecord.WriteBody's own switch shape, read-only — one case per MetaLogRecord,
+    // grows the same way that switch does whenever a new record type is added.
+    internal static (string RecordType, Dictionary<string, string> Fields) Describe(MetaLogRecord record) => record switch {
+        CreateStream r => (nameof(CreateStream), new Dictionary<string, string> {
+            ["StreamName"] = r.StreamName, ["VirtualShardCount"] = r.VirtualShardCount.ToString(), ["RoutingAlgorithm"] = r.RoutingAlgorithm.ToString(),
+        }),
+        RegisterGroup r => (nameof(RegisterGroup), new Dictionary<string, string> {
+            ["GroupId"] = r.GroupId, ["Members"] = string.Join(", ", r.Members.Select(member => $"{member.NodeId}@{member.Address}")),
+        }),
+        MigrationStarted r => (nameof(MigrationStarted), new Dictionary<string, string> {
+            ["MigrationId"] = r.MigrationId.Value.ToString(), ["StreamName"] = r.StreamName, ["VirtualShardIndex"] = r.VirtualShardIndex.ToString(),
+            ["FromGroupId"] = r.FromGroupId, ["ToGroupId"] = r.ToGroupId,
+        }),
+        MigrationAborted r => (nameof(MigrationAborted), new Dictionary<string, string> {
+            ["MigrationId"] = r.MigrationId.Value.ToString(), ["StreamName"] = r.StreamName, ["VirtualShardIndex"] = r.VirtualShardIndex.ToString(),
+        }),
+        Cutover r => (nameof(Cutover), new Dictionary<string, string> {
+            ["MigrationId"] = r.MigrationId.Value.ToString(), ["StreamName"] = r.StreamName, ["VirtualShardIndex"] = r.VirtualShardIndex.ToString(), ["ToGroupId"] = r.ToGroupId,
+        }),
+        MigrationCompleted r => (nameof(MigrationCompleted), new Dictionary<string, string> {
+            ["MigrationId"] = r.MigrationId.Value.ToString(), ["StreamName"] = r.StreamName, ["VirtualShardIndex"] = r.VirtualShardIndex.ToString(),
+        }),
+        SetConsumerGroupAckMode r => (nameof(SetConsumerGroupAckMode), new Dictionary<string, string> {
+            ["StreamName"] = r.StreamName, ["ConsumerGroup"] = r.ConsumerGroup, ["Mode"] = r.Mode.ToString(),
+        }),
+        SetConsumerGroupMandatory r => (nameof(SetConsumerGroupMandatory), new Dictionary<string, string> {
+            ["StreamName"] = r.StreamName, ["ConsumerGroup"] = r.ConsumerGroup, ["Mandatory"] = r.Mandatory.ToString(),
+        }),
+        SetStreamRetentionPolicy r => (nameof(SetStreamRetentionPolicy), new Dictionary<string, string> {
+            ["StreamName"] = r.StreamName, ["AuditRetention"] = r.AuditRetention.ToString(), ["MaxRetention"] = r.MaxRetention.ToString(),
+            ["MaxSizeBytesPerVirtualShard"] = r.MaxSizeBytesPerVirtualShard?.ToString() ?? "",
+        }),
+        SetStreamCheckpointInterval r => (nameof(SetStreamCheckpointInterval), new Dictionary<string, string> {
+            ["StreamName"] = r.StreamName, ["Interval"] = r.Interval?.ToString() ?? "", ["OffsetCount"] = r.OffsetCount?.ToString() ?? "",
+        }),
+        SetProduceAcl r => (nameof(SetProduceAcl), new Dictionary<string, string> {
+            ["Subject"] = r.Subject, ["StreamName"] = r.StreamName, ["Allowed"] = r.Allowed.ToString(),
+        }),
+        SetConsumeAcl r => (nameof(SetConsumeAcl), new Dictionary<string, string> {
+            ["Subject"] = r.Subject, ["StreamName"] = r.StreamName, ["ConsumerGroup"] = r.ConsumerGroup, ["Allowed"] = r.Allowed.ToString(),
+        }),
+        SetStreamSubjectClaimType r => (nameof(SetStreamSubjectClaimType), new Dictionary<string, string> {
+            ["StreamName"] = r.StreamName, ["ClaimType"] = r.ClaimType ?? "",
+        }),
+        _ => throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case."),
+    };
+
+    // A small, deliberate duplicate of RemontoireClientGrpcService.HeaderKeyEquals's own
+    // byte-comparison idiom rather than an extracted shared helper — that method is private to its
+    // own class, and one extra call site here doesn't justify restructuring either class just to
+    // share four lines.
+    internal static string? FindProposedBy(IReadOnlyList<Header> headers) {
+        foreach (var header in headers) {
+            if (Encoding.UTF8.GetByteCount(ProposedByHeaderKey) != header.Key.Length || Encoding.UTF8.GetString(header.Key.Span) != ProposedByHeaderKey)
+                continue;
+            return Encoding.UTF8.GetString(header.Value.Span);
+        }
+        return null;
+    }
+
     // Deterministic, not Guid.NewGuid(): a retried CreateStream call must reproduce the exact same
     // MigrationId per (stream, virtual shard) so ShardAssignmentTable.Apply's own "same migration
     // already started" / "same migration already cut over" idempotency recognizes a retry as a
