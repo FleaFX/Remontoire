@@ -49,4 +49,23 @@ public class RemontoireAdminGrpcServiceTests {
             act.Should().Throw<RpcException>().Which.Status.StatusCode.Should().Be(StatusCode.InvalidArgument);
         }
     }
+
+    public class MapAckMode {
+        [Fact]
+        public void Maps_Strict_to_its_C_sharp_counterpart() {
+            RemontoireAdminGrpcService.MapAckMode(AckModeProto.Strict).Should().Be(AckMode.Strict);
+        }
+
+        [Fact]
+        public void Maps_Checkpoint_to_its_C_sharp_counterpart() {
+            RemontoireAdminGrpcService.MapAckMode(AckModeProto.Checkpoint).Should().Be(AckMode.Checkpoint);
+        }
+
+        [Fact]
+        public void Rejects_unspecified_as_an_invalid_argument_rather_than_defaulting_silently() {
+            var act = () => RemontoireAdminGrpcService.MapAckMode(AckModeProto.AckModeUnspecified);
+
+            act.Should().Throw<RpcException>().Which.Status.StatusCode.Should().Be(StatusCode.InvalidArgument);
+        }
+    }
 }

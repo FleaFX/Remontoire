@@ -181,6 +181,78 @@ public sealed class RemontoireAdminGrpcService(
         return observed ? new CutoverReply { Success = new Empty() } : new CutoverReply { TimedOut = new CutoverTimedOut() };
     }
 
+    /// <inheritdoc />
+    public override async Task<SetConsumerGroupFlagReply> SetConsumerGroupFlag(SetConsumerGroupFlagRequest request, ServerCallContext context) {
+        if (!TryGetMetaReplica(out var metaReplica))
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
+
+        MetaLogRecord record = request.SettingCase switch {
+            SetConsumerGroupFlagRequest.SettingOneofCase.AckMode =>
+                new SetConsumerGroupAckMode(request.StreamName, request.ConsumerGroup, MapAckMode(request.AckMode)),
+            SetConsumerGroupFlagRequest.SettingOneofCase.Mandatory =>
+                new SetConsumerGroupMandatory(request.StreamName, request.ConsumerGroup, request.Mandatory),
+            _ => throw new RpcException(new Status(StatusCode.InvalidArgument, "Exactly one of ack_mode/mandatory must be set.")),
+        };
+
+        try {
+            await metaReplica.ProposeAsync(ToAppendRequest(record, context), context.CancellationToken);
+            return new SetConsumerGroupFlagReply { Success = new Empty() };
+        } catch (NotLeaderException ex) {
+            return new SetConsumerGroupFlagReply { NotLeader = BuildNotLeader(ex) };
+        }
+    }
+
+    /// <inheritdoc />
+    public override async Task<SetStreamPolicyReply> SetStreamPolicy(SetStreamPolicyRequest request, ServerCallContext context) {
+        if (!TryGetMetaReplica(out var metaReplica))
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
+
+        if (request.Retention is null && request.Checkpoint is null)
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "At least one of retention/checkpoint must be set."));
+
+        try {
+            if (request.Retention is { } retention)
+                await metaReplica.ProposeAsync(
+                    ToAppendRequest(new SetStreamRetentionPolicy(
+                        request.StreamName, retention.AuditRetention.ToTimeSpan(), retention.MaxRetention.ToTimeSpan(),
+                        retention.HasMaxSizeBytesPerVirtualShard ? retention.MaxSizeBytesPerVirtualShard : null), context),
+                    context.CancellationToken);
+
+            if (request.Checkpoint is { } checkpoint)
+                await metaReplica.ProposeAsync(
+                    ToAppendRequest(new SetStreamCheckpointInterval(
+                        request.StreamName, checkpoint.Interval?.ToTimeSpan(), checkpoint.HasOffsetCount ? checkpoint.OffsetCount : null), context),
+                    context.CancellationToken);
+
+            return new SetStreamPolicyReply { Success = new Empty() };
+        } catch (NotLeaderException ex) {
+            return new SetStreamPolicyReply { NotLeader = BuildNotLeader(ex) };
+        }
+    }
+
+    /// <inheritdoc />
+    public override async Task<ManageAclReply> ManageAcl(ManageAclRequest request, ServerCallContext context) {
+        if (!TryGetMetaReplica(out var metaReplica))
+            throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
+
+        MetaLogRecord record = request.ChangeCase switch {
+            ManageAclRequest.ChangeOneofCase.ProduceAcl =>
+                new SetProduceAcl(request.ProduceAcl.Subject, request.ProduceAcl.StreamName, request.ProduceAcl.Allowed),
+            ManageAclRequest.ChangeOneofCase.ConsumeAcl =>
+                new SetConsumeAcl(request.ConsumeAcl.Subject, request.ConsumeAcl.StreamName, request.ConsumeAcl.ConsumerGroup, request.ConsumeAcl.Allowed),
+            ManageAclRequest.ChangeOneofCase.SubjectClaimType =>
+                new SetStreamSubjectClaimType(request.SubjectClaimType.StreamName, request.SubjectClaimType.HasClaimType ? request.SubjectClaimType.ClaimType : null),
+            _ => throw new RpcException(new Status(StatusCode.InvalidArgument, "Exactly one of produce_acl/consume_acl/subject_claim_type must be set.")),
+        };
+
+        try {
+            await metaReplica.ProposeAsync(ToAppendRequest(record, context), context.CancellationToken);
+            return new ManageAclReply { Success = new Empty() };
+        } catch (NotLeaderException ex) {
+            return new ManageAclReply { NotLeader = BuildNotLeader(ex) };
+        }
+    }
+
     // Deterministic, not Guid.NewGuid(): a retried CreateStream call must reproduce the exact same
     // MigrationId per (stream, virtual shard) so ShardAssignmentTable.Apply's own "same migration
     // already started" / "same migration already cut over" idempotency recognizes a retry as a
@@ -197,6 +269,12 @@ public sealed class RemontoireAdminGrpcService(
     internal static RoutingAlgorithm MapRoutingAlgorithm(RoutingAlgorithmProto algorithm) => algorithm switch {
         RoutingAlgorithmProto.XxHash3V1 => RoutingAlgorithm.XxHash3V1,
         _ => throw new RpcException(new Status(StatusCode.InvalidArgument, $"'{algorithm}' is not a valid routing algorithm.")),
+    };
+
+    internal static AckMode MapAckMode(AckModeProto mode) => mode switch {
+        AckModeProto.Strict => AckMode.Strict,
+        AckModeProto.Checkpoint => AckMode.Checkpoint,
+        _ => throw new RpcException(new Status(StatusCode.InvalidArgument, $"'{mode}' is not a valid ack mode.")),
     };
 
     // Shared by every meta-proposing RPC: attaches the calling subject (the cluster-wide default
