@@ -37,15 +37,8 @@ public class RemontoireGrpcClusterTests {
     // CreateStream/RegisterGroup/Cutover, the same commands a real control plane would commit.
     const string StreamName = GroupId;
 
-    static async Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) {
-        var deadline = DateTime.UtcNow + timeout;
-        while (DateTime.UtcNow < deadline) {
-            if (condition())
-                return true;
-            await Task.Delay(20);
-        }
-        return condition();
-    }
+    static Task<bool> RunUntilAsync(Func<bool> condition, TimeSpan timeout) =>
+        ConditionPoller.WaitUntilAsync(condition, timeout, TimeSpan.FromMilliseconds(20));
 
     static readonly TimeSpan FastTickInterval = TimeSpan.FromMilliseconds(200);
 

@@ -121,13 +121,6 @@ public class ObservableMetricsRegistrationTests {
         }
     }
 
-    static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) {
-        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(2));
-        while (DateTime.UtcNow < deadline) {
-            if (condition())
-                return true;
-            await Task.Delay(5);
-        }
-        return condition();
-    }
+    static Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan? timeout = null) =>
+        ConditionPoller.WaitUntilAsync(condition, timeout ?? TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(5));
 }
