@@ -27,9 +27,6 @@
     <Project Path="Remontoire.Client/Remontoire.Client.csproj">
       <BuildDependency Project="Remontoire.Contracts/Remontoire.Contracts.csproj" />
     </Project>
-    <Project Path="Remontoire.Dashboard/Remontoire.Dashboard.csproj">
-      <BuildDependency Project="Remontoire.Client/Remontoire.Client.csproj" />
-    </Project>
   </Folder>
   <Folder Name="/Solution Items/">
     <File Path="../.editorconfig" />

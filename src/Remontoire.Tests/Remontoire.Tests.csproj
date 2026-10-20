@@ -40,7 +40,6 @@
     <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" />
     <ProjectReference Include="..\Remontoire.Client\Remontoire.Client.csproj" />
     <ProjectReference Include="..\Remontoire.Server\Remontoire.Server.csproj" />
-    <ProjectReference Include="..\Remontoire.Dashboard\Remontoire.Dashboard.csproj" />
   </ItemGroup>
 
   <ItemGroup>

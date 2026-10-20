@@ -71,17 +71,43 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     // _caValidator itself is safely shared: it's just logic plus an immutable CA certificate, not
     // tied to any one channel's lifetime.
     GrpcChannel CreateChannel(Uri address) {
-        if (_caValidator is null)
-            return GrpcChannel.ForAddress(address);
+        var channelOptions = new GrpcChannelOptions();
 
-        var handler = new SocketsHttpHandler {
-            SslOptions = new SslClientAuthenticationOptions {
-                RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
-                    certificate is X509Certificate2 candidate && chain is not null && _caValidator.Validate(candidate, chain, errors),
-            },
-        };
-        return GrpcChannel.ForAddress(address, new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true });
+        if (_caValidator is not null) {
+            channelOptions.HttpHandler = new SocketsHttpHandler {
+                SslOptions = new SslClientAuthenticationOptions {
+                    RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
+                        certificate is X509Certificate2 candidate && chain is not null && _caValidator.Validate(candidate, chain, errors),
+                },
+            };
+            channelOptions.DisposeHttpClient = true;
+        }
+
+        var callCredentials = BuildCallCredentials(_options.GetAccessTokenAsync);
+        if (callCredentials is not null) {
+            var transportCredentials = address.Scheme == Uri.UriSchemeHttps ? new SslCredentials() : ChannelCredentials.Insecure;
+            channelOptions.Credentials = ChannelCredentials.Create(transportCredentials, callCredentials);
+
+            // grpc-dotnet refuses CallCredentials on a plain http:// channel unless this is set
+            // explicitly — relevant only when AllowInsecureTransport and a configured token hook
+            // coincide (an unusual, but real, dev/test combination: an insecure transport that
+            // still wants to prove caller identity via a bearer token).
+            if (address.Scheme != Uri.UriSchemeHttps)
+                channelOptions.UnsafeUseInsecureChannelCallCredentials = true;
+        }
+
+        return _caValidator is null && callCredentials is null
+            ? GrpcChannel.ForAddress(address)
+            : GrpcChannel.ForAddress(address, channelOptions);
     }
+
+    static CallCredentials? BuildCallCredentials(Func<CancellationToken, Task<string>>? getAccessTokenAsync) =>
+        getAccessTokenAsync is null
+            ? null
+            : CallCredentials.FromInterceptor(async (_, metadata) => {
+                var token = await getAccessTokenAsync(CancellationToken.None);
+                metadata.Add("Authorization", $"Bearer {token}");
+            });
 
     /// <inheritdoc />
     public async Task<PublishResult> PublishAsync(string streamName, string partitionKey, ReadOnlyMemory<byte> payload, IReadOnlyDictionary<string, string>? headers = null, CancellationToken cancellationToken = default) {

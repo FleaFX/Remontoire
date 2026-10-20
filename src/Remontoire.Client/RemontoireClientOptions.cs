@@ -21,10 +21,17 @@ namespace Remontoire.Client;
 /// mTLS uses). <see langword="null"/> falls back to the platform's default trust store, correct
 /// only when the cluster's client-facing certificate is issued by a real, publicly trusted CA.
 /// </param>
+/// <param name="GetAccessTokenAsync">
+/// Optional hook attaching a bearer token to every outbound call, via <see cref="Grpc.Core.CallCredentials.FromInterceptor"/>.
+/// <see langword="null"/> (the default) sends no token at all — the only behavior before this
+/// parameter existed. Acquiring/refreshing the token itself is entirely this delegate's own
+/// concern; this connection only ever calls it once per outbound call.
+/// </param>
 public sealed record RemontoireClientOptions(
     IReadOnlyList<Uri> MetaGroupSeedAddresses,
     int MaxRedirectAttempts = 5,
     TimeSpan RedirectRetryDelay = default,
     bool AllowInsecureTransport = false,
-    string? ClusterCaCertificatePath = null
+    string? ClusterCaCertificatePath = null,
+    Func<CancellationToken, Task<string>>? GetAccessTokenAsync = null
 );
