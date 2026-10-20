@@ -24,12 +24,15 @@ sealed class DiskSpaceReadinessCheck(IOptions<RaftServerOptions> options) : IHea
         var driveRoots = dataDirectories.Select(directory => Path.GetPathRoot(Path.GetFullPath(directory)))
             .Where(root => !string.IsNullOrEmpty(root)).Distinct(StringComparer.OrdinalIgnoreCase);
 
+        var failures = new List<string>();
         foreach (var root in driveRoots) {
             var drive = new DriveInfo(root!);
             if (drive.AvailableFreeSpace < raftOptions.MinFreeDiskSpaceBytes)
-                return Task.FromResult(HealthCheckResult.Unhealthy($"{root}: free disk space ({drive.AvailableFreeSpace} bytes) below threshold ({raftOptions.MinFreeDiskSpaceBytes} bytes)."));
+                failures.Add($"{root}: free disk space ({drive.AvailableFreeSpace} bytes) below threshold ({raftOptions.MinFreeDiskSpaceBytes} bytes).");
         }
 
-        return Task.FromResult(HealthCheckResult.Healthy());
+        return Task.FromResult(failures.Count == 0
+            ? HealthCheckResult.Healthy()
+            : HealthCheckResult.Unhealthy(string.Join("; ", failures)));
     }
 }

@@ -12,6 +12,7 @@ namespace Remontoire.Server.HealthChecks;
 sealed class RaftLivenessCheck(RaftReplicaRegistry registry) : IHealthCheck {
     public Task<HealthCheckResult> CheckHealthAsync(HealthCheckContext context, CancellationToken cancellationToken = default) {
         var now = DateTimeOffset.UtcNow;
+        var failures = new List<string>();
 
         foreach (var replica in registry.All) {
             // A multiple of the group's own election-timeout window — no new number invented,
@@ -19,12 +20,14 @@ sealed class RaftLivenessCheck(RaftReplicaRegistry registry) : IHealthCheck {
             var threshold = replica.ElectionTimeoutMax * 10;
 
             if (now - replica.LastActorLoopActivity > threshold)
-                return Task.FromResult(HealthCheckResult.Unhealthy($"{replica.GroupId}: actor loop appears stuck."));
+                failures.Add($"{replica.GroupId}: actor loop appears stuck.");
 
             if (replica.WalFlushInProgressSince is { } since && now - since > threshold)
-                return Task.FromResult(HealthCheckResult.Unhealthy($"{replica.GroupId}: WAL flush appears stuck."));
+                failures.Add($"{replica.GroupId}: WAL flush appears stuck.");
         }
 
-        return Task.FromResult(HealthCheckResult.Healthy());
+        return Task.FromResult(failures.Count == 0
+            ? HealthCheckResult.Healthy()
+            : HealthCheckResult.Unhealthy(string.Join("; ", failures)));
     }
 }
