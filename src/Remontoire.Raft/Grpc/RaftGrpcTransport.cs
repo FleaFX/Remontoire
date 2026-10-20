@@ -1,11 +1,7 @@
-using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
-using Microsoft.Extensions.Logging;
 using Remontoire.Raft.V1;
-using Remontoire.Security;
 
 namespace Remontoire.Raft.Grpc;
 
@@ -24,41 +20,18 @@ public sealed class RaftGrpcTransport : IRaftTransport, IDisposable {
 
     /// <param name="peers">The reachable peer nodes.</param>
     /// <param name="rpcTimeout">Deadline applied to every outbound RPC, no exceptions.</param>
-    /// <param name="mtls">
-    /// Cluster mTLS configuration — either real certificates to present/validate, or an explicit
-    /// opt-out into insecure transport (<see cref="ClusterMtlsOptions.AllowInsecureTransport"/>,
-    /// dev/test only). Required, no default: a caller must make one of the two choices explicitly,
-    /// there is no silent third option.
-    /// </param>
-    /// <param name="expectedCertificateSubjects">
-    /// Each peer's expected certificate subject, keyed by <see cref="RaftGroupMember.NodeId"/> —
-    /// dialing peer X checks precisely X's own expected subject. <see langword="null"/> or a
-    /// missing entry means no additional subject check beyond the CA chain itself.
+    /// <param name="configureHandler">
+    /// Optional hook to configure each peer channel's <see cref="SocketsHttpHandler"/>, called once
+    /// per peer on a fresh handler after the keep-alive settings are applied — for example
+    /// <see cref="SocketsHttpHandler.SslOptions"/> to present a node certificate and trust a private
+    /// CA. <see langword="null"/> leaves TLS to each peer address's scheme and the platform's trust store.
     /// </param>
     /// <param name="interceptors">Client interceptors applied to every channel — empty by default.</param>
-    /// <param name="logger">
-    /// Used to log, at <see cref="LogLevel.Critical"/>, every time this transport runs unencrypted
-    /// because <see cref="ClusterMtlsOptions.AllowInsecureTransport"/> was explicitly set — never
-    /// silent, never once-only.
-    /// </param>
     public RaftGrpcTransport(
-        IReadOnlyList<RaftGroupMember> peers, TimeSpan rpcTimeout, ClusterMtlsOptions mtls,
-        IReadOnlyDictionary<string, string>? expectedCertificateSubjects = null,
-        IReadOnlyList<Interceptor>? interceptors = null, ILogger? logger = null) {
+        IReadOnlyList<RaftGroupMember> peers, TimeSpan rpcTimeout,
+        Action<SocketsHttpHandler>? configureHandler = null, IReadOnlyList<Interceptor>? interceptors = null) {
         _rpcTimeout = rpcTimeout;
         interceptors ??= [];
-
-        ClusterMtlsCredentials? credentials = null;
-        if (mtls.AllowInsecureTransport) {
-            // Without mTLS, peer addresses are plain http:// — .NET's HTTP/2 client otherwise
-            // refuses cleartext HTTP/2 outright. Set per-instance (never as an unconditional
-            // static switch) and logged loudly every time, so an accidentally-insecure deployment
-            // fails loud rather than silently succeeding.
-            logger?.LogCritical("AllowInsecureTransport is set — Raft peer traffic runs unencrypted, without mTLS. Never use this outside development/test.");
-            AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
-        } else {
-            credentials = ClusterMtlsCredentialsLoader.Load(mtls);
-        }
 
         _channels = new Dictionary<string, GrpcChannel>(peers.Count);
         _clients = new Dictionary<string, RaftTransport.RaftTransportClient>(peers.Count);
@@ -74,18 +47,7 @@ public sealed class RaftGrpcTransport : IRaftTransport, IDisposable {
                     KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
                     KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
                 };
-
-                if (credentials is not null) {
-                    // Dialing this one specific peer — unlike the server side, this check is
-                    // precise: exactly this peer's own expected subject, not the whole cluster's.
-                    var expectedSubject = expectedCertificateSubjects?.GetValueOrDefault(peer.NodeId);
-                    var validator = new PeerCertificateValidator(credentials.CaCertificate, expectedSubject is null ? null : [expectedSubject]);
-                    handler.SslOptions = new SslClientAuthenticationOptions {
-                        ClientCertificates = [credentials.NodeCertificate],
-                        RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
-                            certificate is X509Certificate2 candidate && chain is not null && validator.Validate(candidate, chain, errors),
-                    };
-                }
+                configureHandler?.Invoke(handler);
 
                 var channel = GrpcChannel.ForAddress(peer.Address, new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true });
                 _channels[peer.NodeId] = channel;

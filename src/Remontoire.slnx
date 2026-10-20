@@ -16,10 +16,8 @@
       <BuildDependency Project="Remontoire.Raft/Remontoire.Raft.csproj" />
       <BuildDependency Project="Remontoire.Sharding/Remontoire.Sharding.csproj" />
       <BuildDependency Project="Remontoire.Messaging/Remontoire.Messaging.csproj" />
-      <BuildDependency Project="Remontoire.Security/Remontoire.Security.csproj" />
       <BuildDependency Project="Remontoire.Observability/Remontoire.Observability.csproj" />
     </Project>
-    <Project Path="Remontoire.Security/Remontoire.Security.csproj" />
     <Project Path="Remontoire.Observability/Remontoire.Observability.csproj" />
   </Folder>
   <Folder Name="/Client/">

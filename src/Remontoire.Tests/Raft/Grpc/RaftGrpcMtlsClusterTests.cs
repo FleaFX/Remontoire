@@ -3,7 +3,6 @@ using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using FluentAssertions;
 using Grpc.Core;
-using Grpc.Net.Client;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -11,15 +10,14 @@ using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Raft.V1;
-using Remontoire.Security;
+using Remontoire.Tests;
 
 namespace Remontoire.Raft.Grpc;
 
-// Laag-4, the literal node-mTLS half of the fase-8 exit criterion: "node-naar-node-verkeer zonder
-// geldig cluster-certificaat wordt geweigerd." A real Kestrel host with
-// ClientCertificateMode.RequireCertificate, validated by the actual production
-// PeerCertificateValidator (not a reimplementation) — not the PeerCertificateRequiredInterceptor,
-// which is defense-in-depth only (§5.1); this test proves the TLS handshake itself is the real gate.
+// The host's node-to-node TLS configuration, end to end: each Kestrel host requires a client
+// certificate and validates it against the host's own CA, while the transport hook presents a
+// node certificate and trusts that same CA. The TLS handshake is the real gate — traffic without
+// a valid cluster certificate never reaches anything application-level.
 [Collection("RealNetwork")]
 public class RaftGrpcMtlsClusterTests {
     static async Task<WebApplication> StartServerAsync(X509Certificate2 caPublic, X509Certificate2 serverCertificate) {
@@ -28,14 +26,13 @@ public class RaftGrpcMtlsClusterTests {
         builder.Services.AddSingleton<RaftReplicaRegistry>();
         builder.Services.AddGrpc();
 
-        var validator = new PeerCertificateValidator(caPublic, expectedSubjects: null);
         builder.WebHost.ConfigureKestrel(options =>
             options.Listen(IPAddress.Loopback, 0, listenOptions => {
                 listenOptions.Protocols = HttpProtocols.Http2;
                 listenOptions.UseHttps(https => {
                     https.ServerCertificate = serverCertificate;
                     https.ClientCertificateMode = ClientCertificateMode.RequireCertificate;
-                    https.ClientCertificateValidation = (certificate, chain, errors) => validator.Validate(certificate, chain!, errors);
+                    https.ClientCertificateValidation = (certificate, chain, _) => DevClusterCertificateFactory.IsSignedBy(caPublic, certificate, chain!);
                 });
             }));
 
@@ -45,17 +42,12 @@ public class RaftGrpcMtlsClusterTests {
         return app;
     }
 
-    static GrpcChannel CreateClientChannel(Uri address, X509Certificate2 caPublic, X509Certificate2? clientCertificate) {
-        var validator = new PeerCertificateValidator(caPublic, expectedSubjects: null);
-        var handler = new SocketsHttpHandler {
-            SslOptions = new SslClientAuthenticationOptions {
-                ClientCertificates = clientCertificate is null ? [] : [clientCertificate],
-                RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
-                    certificate is X509Certificate2 candidate && chain is not null && validator.Validate(candidate, chain, errors),
-            },
+    static Action<SocketsHttpHandler> PresentAndTrust(X509Certificate2 caPublic, X509Certificate2? clientCertificate) =>
+        handler => handler.SslOptions = new SslClientAuthenticationOptions {
+            ClientCertificates = clientCertificate is null ? [] : [clientCertificate],
+            RemoteCertificateValidationCallback = (_, certificate, chain, _) =>
+                certificate is X509Certificate2 candidate && chain is not null && DevClusterCertificateFactory.IsSignedBy(caPublic, candidate, chain),
         };
-        return GrpcChannel.ForAddress(address, new GrpcChannelOptions { HttpHandler = handler, DisposeHttpClient = true });
-    }
 
     [Fact]
     public async Task A_CA_signed_client_certificate_completes_an_RPC() {
@@ -63,10 +55,9 @@ public class RaftGrpcMtlsClusterTests {
         var nodeCertificate = DevClusterCertificateFactory.CreateLeaf(caWithKey, "CN=node-1");
 
         await using var server = await StartServerAsync(caPublic, nodeCertificate);
-        using var channel = CreateClientChannel(new Uri(server.Urls.First()), caPublic, nodeCertificate);
-        var client = new RaftTransport.RaftTransportClient(channel);
+        using var transport = new RaftGrpcTransport([new RaftGroupMember("node-1", new Uri(server.Urls.First()))], TimeSpan.FromSeconds(5), PresentAndTrust(caPublic, nodeCertificate));
 
-        var act = () => client.RequestVoteAsync(new VoteRequest { GroupId = "group-1", Term = 1, CandidateId = "node-2" }).ResponseAsync;
+        var act = async () => await transport.RequestVoteAsync("node-1", new VoteRequest { GroupId = "group-1", Term = 1, CandidateId = "node-2" });
 
         // The TLS handshake succeeded — the call reached RaftTransportGrpcService's own logic,
         // which has no group registered in this minimal host.
@@ -82,10 +73,9 @@ public class RaftGrpcMtlsClusterTests {
         var rogueCertificate = DevClusterCertificateFactory.CreateLeaf(rogueCaWithKey, "CN=node-2");
 
         await using var server = await StartServerAsync(caPublic, nodeCertificate);
-        using var channel = CreateClientChannel(new Uri(server.Urls.First()), caPublic, rogueCertificate);
-        var client = new RaftTransport.RaftTransportClient(channel);
+        using var transport = new RaftGrpcTransport([new RaftGroupMember("node-1", new Uri(server.Urls.First()))], TimeSpan.FromSeconds(5), PresentAndTrust(caPublic, rogueCertificate));
 
-        var act = () => client.RequestVoteAsync(new VoteRequest { GroupId = "group-1", Term = 1, CandidateId = "node-2" }).ResponseAsync;
+        var act = async () => await transport.RequestVoteAsync("node-1", new VoteRequest { GroupId = "group-1", Term = 1, CandidateId = "node-2" });
 
         var exception = await act.Should().ThrowAsync<RpcException>();
         exception.Which.StatusCode.Should().Be(StatusCode.Unavailable,
@@ -98,13 +88,28 @@ public class RaftGrpcMtlsClusterTests {
         var nodeCertificate = DevClusterCertificateFactory.CreateLeaf(caWithKey, "CN=node-1");
 
         await using var server = await StartServerAsync(caPublic, nodeCertificate);
-        using var channel = CreateClientChannel(new Uri(server.Urls.First()), caPublic, clientCertificate: null);
-        var client = new RaftTransport.RaftTransportClient(channel);
+        using var transport = new RaftGrpcTransport([new RaftGroupMember("node-1", new Uri(server.Urls.First()))], TimeSpan.FromSeconds(5), PresentAndTrust(caPublic, clientCertificate: null));
 
-        var act = () => client.RequestVoteAsync(new VoteRequest { GroupId = "group-1", Term = 1, CandidateId = "node-2" }).ResponseAsync;
+        var act = async () => await transport.RequestVoteAsync("node-1", new VoteRequest { GroupId = "group-1", Term = 1, CandidateId = "node-2" });
 
         var exception = await act.Should().ThrowAsync<RpcException>();
         exception.Which.StatusCode.Should().Be(StatusCode.Unavailable,
-            "node-to-node traffic without a valid cluster certificate must be rejected — the literal fase-8 exit criterion");
+            "node-to-node traffic without a valid cluster certificate is rejected by the host's Kestrel configuration");
+    }
+
+    [Fact]
+    public async Task Three_nodes_with_host_configured_mTLS_elect_a_leader_and_commit_a_proposal() {
+        var (caPublic, caWithKey) = DevClusterCertificateFactory.CreateCa();
+        var certificates = new[] {
+            DevClusterCertificateFactory.CreateLeaf(caWithKey, "CN=node-1"),
+            DevClusterCertificateFactory.CreateLeaf(caWithKey, "CN=node-2"),
+            DevClusterCertificateFactory.CreateLeaf(caWithKey, "CN=node-3"),
+        };
+
+        var hosts = new WebApplication[3];
+        for (var i = 0; i < hosts.Length; i++)
+            hosts[i] = await StartServerAsync(caPublic, certificates[i]);
+
+        await RaftGrpcClusterTests.ElectAndCommitAsync(hosts, i => PresentAndTrust(caPublic, certificates[i]));
     }
 }

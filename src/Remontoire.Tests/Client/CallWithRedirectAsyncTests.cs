@@ -13,8 +13,7 @@ public class CallWithRedirectAsyncTests {
         new(new RemontoireClientOptions(
             MetaGroupSeedAddresses: [MemberAddress],
             MaxRedirectAttempts: maxRedirectAttempts,
-            RedirectRetryDelay: TimeSpan.Zero,
-            AllowInsecureTransport: true));
+            RedirectRetryDelay: TimeSpan.Zero));
 
     static bool NeverShardMigrating(string reply) => false;
 

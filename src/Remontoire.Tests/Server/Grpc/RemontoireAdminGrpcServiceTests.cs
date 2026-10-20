@@ -236,40 +236,6 @@ public class RemontoireAdminGrpcServiceTests {
             fields["OffsetCount"].Should().BeEmpty();
         }
 
-        [Fact]
-        public void Describes_a_SetProduceAcl_record() {
-            var (recordType, fields) = RemontoireAdminGrpcService.Describe(new SetProduceAcl("client-1", "orders", true));
-
-            recordType.Should().Be("SetProduceAcl");
-            fields.Should().Equal(new Dictionary<string, string> {
-                ["Subject"] = "client-1", ["StreamName"] = "orders", ["Allowed"] = "True",
-            });
-        }
-
-        [Fact]
-        public void Describes_a_SetConsumeAcl_record() {
-            var (recordType, fields) = RemontoireAdminGrpcService.Describe(new SetConsumeAcl("client-1", "orders", "billing", false));
-
-            recordType.Should().Be("SetConsumeAcl");
-            fields.Should().Equal(new Dictionary<string, string> {
-                ["Subject"] = "client-1", ["StreamName"] = "orders", ["ConsumerGroup"] = "billing", ["Allowed"] = "False",
-            });
-        }
-
-        [Fact]
-        public void Describes_a_SetStreamSubjectClaimType_record_with_a_claim_type() {
-            var (recordType, fields) = RemontoireAdminGrpcService.Describe(new SetStreamSubjectClaimType("orders", "client_id"));
-
-            recordType.Should().Be("SetStreamSubjectClaimType");
-            fields.Should().Equal(new Dictionary<string, string> { ["StreamName"] = "orders", ["ClaimType"] = "client_id" });
-        }
-
-        [Fact]
-        public void Describes_a_SetStreamSubjectClaimType_record_with_no_claim_type() {
-            var (_, fields) = RemontoireAdminGrpcService.Describe(new SetStreamSubjectClaimType("orders", null));
-
-            fields["ClaimType"].Should().BeEmpty();
-        }
     }
 
     public class FindProposedBy {

@@ -1,16 +1,13 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
-namespace Remontoire.Security;
+namespace Remontoire.Tests;
 
 /// <summary>
 /// Generates a throwaway CA and CA-signed leaf certificates entirely in-process, using pure BCL
-/// <see cref="CertificateRequest"/> — no NuGet package, no external tool. Test-only: lives in
-/// <c>Remontoire.Tests</c>, not the shipped <c>Remontoire.Security</c> package, since nothing in
-/// production ever calls it — fase 8 deliberately does not build or run a real CA service (§5.6);
-/// an operator supplies real, already-issued certificates via <see cref="ClusterMtlsOptions"/>
-/// instead. This CA's private key exists only in memory for as long as the caller holds it, with
-/// no revocation, rotation, or audit trail whatsoever — never use outside tests.
+/// <see cref="CertificateRequest"/> — no NuGet package, no external tool. Test-only: it plays the
+/// host's PKI in the TLS tests. This CA's private key exists only in memory for as long as the
+/// caller holds it, with no revocation, rotation, or audit trail whatsoever — never use outside tests.
 /// </summary>
 static class DevClusterCertificateFactory {
     static readonly TimeSpan NotBeforeSkew = TimeSpan.FromMinutes(5); // tolerate minor clock skew between this process and whoever validates the cert
@@ -18,8 +15,8 @@ static class DevClusterCertificateFactory {
 
     /// <summary>
     /// Creates a self-signed CA certificate. Returns both the public-only certificate (the trust
-    /// root a <see cref="PeerCertificateValidator"/> is constructed with) and the same certificate
-    /// with its private key attached (needed to sign a leaf via <see cref="CreateLeaf"/>).
+    /// root passed to <see cref="IsSignedBy"/>) and the same certificate with its private key
+    /// attached (needed to sign a leaf via <see cref="CreateLeaf"/>).
     /// </summary>
     public static (X509Certificate2 Public, X509Certificate2 WithPrivateKey) CreateCa(string subjectName = "CN=Remontoire Dev Cluster CA") {
         using var key = RSA.Create(2048);
@@ -68,5 +65,19 @@ static class DevClusterCertificateFactory {
 
         // Same re-export/reimport reliability concern as CreateCa above.
         return X509CertificateLoader.LoadPkcs12(withPrivateKey.Export(X509ContentType.Pkcs12), password: null);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="candidate"/> chains to <paramref name="ca"/>, built against that one
+    /// custom root instead of the platform's trust store — the host-side trust decision the TLS
+    /// tests plug into Kestrel and into the transport's handler. Ignores the name check: test
+    /// certificates are issued for node names, not for the loopback address they are dialed on.
+    /// </summary>
+    public static bool IsSignedBy(X509Certificate2 ca, X509Certificate2 candidate, X509Chain chain) {
+        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        chain.ChainPolicy.CustomTrustStore.Clear();
+        chain.ChainPolicy.CustomTrustStore.Add(ca);
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        return chain.Build(candidate);
     }
 }

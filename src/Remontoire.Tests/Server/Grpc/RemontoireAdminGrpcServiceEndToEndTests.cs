@@ -15,7 +15,6 @@ using Remontoire.Admin.V1;
 using Remontoire.Messaging;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
-using Remontoire.Security;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 using Remontoire.Tests;
@@ -25,8 +24,9 @@ namespace Remontoire.Server.Grpc;
 // Real-network exit-criterion coverage for the admin surface — every earlier step tested only
 // extracted, pure logic, since the RPC methods themselves need a real ServerCallContext (no fake
 // precedent in this codebase, see RemontoireClientGrpcServiceTests's own remarks). This is where
-// that deferred coverage lands: real Kestrel host, real JWT, a real single-node
-// meta-group plus two real single-node data groups (group-1/group-2), all in-process.
+// that deferred coverage lands: real Kestrel host, real JWT, authorized by the host with
+// RequireAuthorization on the mapped endpoint, a real single-node meta-group plus two real
+// single-node data groups (group-1/group-2), all in-process.
 [Collection("RealNetwork")]
 public class RemontoireAdminGrpcServiceEndToEndTests {
     const string StreamName = "orders";
@@ -78,17 +78,15 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
             .AddJwtBearer(options => {
                 options.RequireHttpsMetadata = false;
                 // Load-bearing, not a style choice: without this, ASP.NET Core silently rewrites
-                // well-known claim types like "role" into long XML-schema URIs, and
-                // RemontoireAuthorizer.HasRole's claim.Type == "role" check would then never
-                // match — IsOperator would always be false, no matter what the token carries.
+                // well-known claim types like "role" into long XML-schema URIs, and the "operator"
+                // policy's claim check would then never match, no matter what the token carries.
                 options.MapInboundClaims = false;
                 options.TokenValidationParameters = new TokenValidationParameters {
                     ValidateIssuer = false, ValidateAudience = false, IssuerSigningKey = SigningKey,
+                    NameClaimType = "client_id",
                 };
             });
-        builder.Services.AddAuthorization();
-        builder.Services.Configure<RemontoireSecurityOptions>(_ => { });
-        builder.Services.AddSingleton<RemontoireAuthorizer>();
+        builder.Services.AddAuthorization(options => options.AddPolicy("operator", policy => policy.RequireClaim("role", "operator")));
 
         var raftRegistry = new RaftReplicaRegistry();
         var messagingRegistry = new MessagingGroupRegistry();
@@ -119,16 +117,12 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
         messagingRegistry.Register(GroupTwo, groupTwoMessaging.ShardLog, groupTwoMessaging.AckIndex, groupTwoMessaging.RetentionEvaluator);
         var groupTwoApplier = new AckIndexApplier(groupTwoMessaging.ShardLog, groupTwoMessaging.AckIndex);
 
-        builder.Services.AddGrpc()
-            .AddServiceOptions<RemontoireAdminGrpcService>(options => {
-                options.Interceptors.Add<RemontoireAuthenticationInterceptor>();
-                options.Interceptors.Add<RemontoireAdminAuthorizationInterceptor>();
-            });
+        builder.Services.AddGrpc();
 
         var app = builder.Build();
         app.UseAuthentication();
         app.UseAuthorization();
-        app.MapGrpcService<RemontoireAdminGrpcService>();
+        app.MapGrpcService<RemontoireAdminGrpcService>().RequireAuthorization("operator");
         await app.StartAsync();
 
         return new Harness {
@@ -191,7 +185,7 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
 
     public class AuthorizationGating {
         [Fact]
-        public async Task CreateStream_with_no_token_is_rejected_as_Unauthenticated_before_authorization_ever_runs() {
+        public async Task CreateStream_with_no_token_is_rejected_as_Unauthenticated() {
             await using var harness = await StartHostAsync();
             using var channel = GrpcChannel.ForAddress(harness.Host.Urls.First());
             var client = new RemontoireAdmin.RemontoireAdminClient(channel);
@@ -200,7 +194,7 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
 
             var exception = await act.Should().ThrowAsync<RpcException>();
             exception.Which.StatusCode.Should().Be(StatusCode.Unauthenticated,
-                "the authentication interceptor is registered before the admin authorization one and must short-circuit first");
+                "the host's authorization middleware challenges an anonymous call (HTTP 401)");
         }
 
         [Fact]
@@ -257,7 +251,7 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
 
     public class FullExitCriterion {
         [Fact]
-        public async Task Bootstraps_a_stream_reshards_it_sets_policy_and_ACL_and_shows_it_all_in_the_audit_trail() {
+        public async Task Bootstraps_a_stream_reshards_it_sets_policy_and_shows_it_all_in_the_audit_trail() {
             await using var harness = await StartHostAsync();
             using var channel = GrpcChannel.ForAddress(harness.Host.Urls.First());
             var client = new RemontoireAdmin.RemontoireAdminClient(channel);
@@ -300,19 +294,13 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
             (await ConditionPoller.WaitUntilAsync(
                 () => harness.Table.GetConsumerGroupPolicy(StreamName, "billing").Mode == AckMode.Checkpoint, TimeSpan.FromSeconds(5))).Should().BeTrue();
 
-            (await client.ManageAclAsync(new ManageAclRequest {
-                ProduceAcl = new ProduceAclChange { Subject = "client-1", StreamName = StreamName, Allowed = true },
-            }, header)).ResultCase.Should().Be(ManageAclReply.ResultOneofCase.Success);
-            (await ConditionPoller.WaitUntilAsync(() => harness.Table.CanProduce("client-1", StreamName), TimeSpan.FromSeconds(5))).Should().BeTrue();
-
             // CreateStream(1) -> RegisterGroup(1) -> MigrationStarted+Cutover(2, bootstrap) -> MigrationStarted(1, StartReshard)
-            // -> Cutover(1, the real one) -> MigrationCompleted(1) -> SetConsumerGroupAckMode(1) -> SetProduceAcl(1) = 9.
+            // -> Cutover(1, the real one) -> MigrationCompleted(1) -> SetConsumerGroupAckMode(1) = 8.
             using var listCall = client.ListMetaLogRecords(new ListMetaLogRecordsRequest { FromVersion = 0 }, header);
-            var records = await ReadRecordsAsync(listCall, count: 9);
+            var records = await ReadRecordsAsync(listCall, count: 8);
 
             records.Should().Contain(r => r.RecordType == "CreateStream" && r.ProposedBy == "operator-1",
-                "CreateStream proposes via ToAppendRequest, which sets proposed-by from the authenticated subject");
-            records.Should().Contain(r => r.RecordType == "SetProduceAcl" && r.ProposedBy == "operator-1");
+                "CreateStream proposes via ToAppendRequest, which sets proposed-by from User.Identity.Name (NameClaimType client_id)");
             records.Should().Contain(r => r.RecordType == "MigrationStarted" && r.ProposedBy == "",
                 "StartReshard/CreateStream's own bootstrap MigrationStarted both propose via ReshardOrchestrator/a shared record type — neither ever sets a proposed-by header");
             records.Should().Contain(r => r.RecordType == "MigrationCompleted" && r.ProposedBy == "");

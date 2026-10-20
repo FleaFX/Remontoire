@@ -2,23 +2,22 @@ using System.Security.Cryptography;
 using System.Text;
 using Google.Protobuf.WellKnownTypes;
 using Grpc.Core;
-using Microsoft.Extensions.Options;
 using Remontoire.Admin.V1;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
-using Remontoire.Security;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 
 namespace Remontoire.Server.Grpc;
 
 /// <summary>
-/// The administrative, operator-only RPCs (<c>CreateStream</c>, the reshard lifecycle,
-/// consumer-group/stream policy, ACL management, and the meta-log audit trail) — every one of
+/// The administrative RPCs (<c>CreateStream</c>, the reshard lifecycle, consumer-group/stream
+/// policy, and the meta-log audit trail) — every one of
 /// them ultimately proposes against the meta-group replica this node hosts (resolved via
 /// <see cref="TryGetMetaReplica"/>), the same replica <see cref="ShardAssignmentTableApplier"/>
 /// and <see cref="ReshardOrchestrator"/> already use directly. Only ever mapped on a process that
-/// also hosts a meta-group replica.
+/// also hosts a meta-group replica. Who may call them is the host's decision, on the mapped
+/// endpoint (for example <c>RequireAuthorization</c>).
 /// </summary>
 public sealed class RemontoireAdminGrpcService(
     RaftReplicaRegistry raftRegistry,
@@ -26,8 +25,7 @@ public sealed class RemontoireAdminGrpcService(
     LeaderAddressDirectory leaderAddresses,
     ShardAssignmentTable assignmentTable,
     MetaLogJournal journal,
-    ReshardOrchestrator orchestrator,
-    IOptions<RemontoireSecurityOptions> securityOptions
+    ReshardOrchestrator orchestrator
 ) : RemontoireAdmin.RemontoireAdminBase {
     // The meta-group's own, well-known group id — the same literal RaftReplicaHostedService uses
     // everywhere it establishes the meta-group replica.
@@ -239,29 +237,6 @@ public sealed class RemontoireAdminGrpcService(
     }
 
     /// <inheritdoc />
-    public override async Task<ManageAclReply> ManageAcl(ManageAclRequest request, ServerCallContext context) {
-        if (!TryGetMetaReplica(out var metaReplica))
-            throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
-
-        MetaLogRecord record = request.ChangeCase switch {
-            ManageAclRequest.ChangeOneofCase.ProduceAcl =>
-                new SetProduceAcl(request.ProduceAcl.Subject, request.ProduceAcl.StreamName, request.ProduceAcl.Allowed),
-            ManageAclRequest.ChangeOneofCase.ConsumeAcl =>
-                new SetConsumeAcl(request.ConsumeAcl.Subject, request.ConsumeAcl.StreamName, request.ConsumeAcl.ConsumerGroup, request.ConsumeAcl.Allowed),
-            ManageAclRequest.ChangeOneofCase.SubjectClaimType =>
-                new SetStreamSubjectClaimType(request.SubjectClaimType.StreamName, request.SubjectClaimType.HasClaimType ? request.SubjectClaimType.ClaimType : null),
-            _ => throw new RpcException(new Status(StatusCode.InvalidArgument, "Exactly one of produce_acl/consume_acl/subject_claim_type must be set.")),
-        };
-
-        try {
-            await metaReplica.ProposeAsync(ToAppendRequest(record, context), context.CancellationToken);
-            return new ManageAclReply { Success = new Empty() };
-        } catch (NotLeaderException ex) {
-            return new ManageAclReply { NotLeader = BuildNotLeader(ex) };
-        }
-    }
-
-    /// <inheritdoc />
     public override async Task ListMetaLogRecords(ListMetaLogRecordsRequest request, IServerStreamWriter<MetaLogRecordView> responseStream, ServerCallContext context) {
         await foreach (var (version, payload, timestampMicros, headers) in journal.WatchAsync(request.FromVersion, context.CancellationToken)) {
             var record = MetaLogRecord.Decode(payload);
@@ -311,15 +286,6 @@ public sealed class RemontoireAdminGrpcService(
         SetStreamCheckpointInterval r => (nameof(SetStreamCheckpointInterval), new Dictionary<string, string> {
             ["StreamName"] = r.StreamName, ["Interval"] = r.Interval?.ToString() ?? "", ["OffsetCount"] = r.OffsetCount?.ToString() ?? "",
         }),
-        SetProduceAcl r => (nameof(SetProduceAcl), new Dictionary<string, string> {
-            ["Subject"] = r.Subject, ["StreamName"] = r.StreamName, ["Allowed"] = r.Allowed.ToString(),
-        }),
-        SetConsumeAcl r => (nameof(SetConsumeAcl), new Dictionary<string, string> {
-            ["Subject"] = r.Subject, ["StreamName"] = r.StreamName, ["ConsumerGroup"] = r.ConsumerGroup, ["Allowed"] = r.Allowed.ToString(),
-        }),
-        SetStreamSubjectClaimType r => (nameof(SetStreamSubjectClaimType), new Dictionary<string, string> {
-            ["StreamName"] = r.StreamName, ["ClaimType"] = r.ClaimType ?? "",
-        }),
         _ => throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case."),
     };
 
@@ -368,12 +334,13 @@ public sealed class RemontoireAdminGrpcService(
         return distinct.Count == virtualShardCount && distinct.SetEquals(Enumerable.Range(0, virtualShardCount));
     }
 
-    // Shared by every meta-proposing RPC: attaches the calling subject (the cluster-wide default
-    // claim, not the per-stream ACL override RemontoireAuthorizer.Subject resolves) as a
+    // Shared by every meta-proposing RPC: attaches the caller's name as the host's authentication
+    // resolved it (User.Identity.Name, so the host picks the claim through its NameClaimType) as a
     // "proposed-by" header, reusing AppendRequest.Headers exactly the way
-    // RemontoireClientGrpcService.Publish already reuses it for a correlation id.
+    // RemontoireClientGrpcService.Publish already reuses it for a correlation id. An anonymous
+    // call carries no header.
     AppendRequest ToAppendRequest(MetaLogRecord record, ServerCallContext context) {
-        var subject = context.GetHttpContext().User.FindFirst(securityOptions.Value.SubjectClaimType)?.Value;
+        var subject = context.GetHttpContext().User.Identity?.Name;
         IReadOnlyList<Header> headers = subject is null
             ? []
             : [new Header(Encoding.UTF8.GetBytes(ProposedByHeaderKey), Encoding.UTF8.GetBytes(subject))];

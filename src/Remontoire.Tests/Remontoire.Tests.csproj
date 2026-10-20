@@ -16,6 +16,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="FluentAssertions" Version="8.10.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.8" />
     <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.8" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.7.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
@@ -36,7 +37,6 @@
     <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" />
     <ProjectReference Include="..\Remontoire.Sharding\Remontoire.Sharding.csproj" />
     <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" />
-    <ProjectReference Include="..\Remontoire.Security\Remontoire.Security.csproj" />
     <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" />
     <ProjectReference Include="..\Remontoire.Client\Remontoire.Client.csproj" />
     <ProjectReference Include="..\Remontoire.Server\Remontoire.Server.csproj" />

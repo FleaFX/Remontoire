@@ -5,7 +5,6 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Raft.Grpc;
-using Remontoire.Security;
 using Remontoire.Server;
 using Remontoire.Storage;
 using Remontoire.Tests;
@@ -43,6 +42,13 @@ public class RaftGrpcClusterTests {
     [Fact]
     public async Task Three_real_grpc_hosts_elect_a_leader_and_commit_a_proposal() {
         var hosts = await Task.WhenAll(StartHostAsync(), StartHostAsync(), StartHostAsync());
+        await ElectAndCommitAsync(hosts, _ => null);
+    }
+
+    // Shared by the plain and the mTLS cluster tests: wires one replica per host, with transports
+    // configured by configureHandler(i) for node i, and proves election plus replication. Disposes
+    // the hosts.
+    internal static async Task ElectAndCommitAsync(WebApplication[] hosts, Func<int, Action<SocketsHttpHandler>?> configureHandler) {
         var replicas = new List<RaftReplica>();
         var transports = new List<RaftGrpcTransport>();
 
@@ -59,7 +65,7 @@ public class RaftGrpcClusterTests {
                     ElectionTimeoutMin: TimeSpan.FromMilliseconds(150),
                     ElectionTimeoutMax: TimeSpan.FromMilliseconds(300));
 
-                var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout, new ClusterMtlsOptions { AllowInsecureTransport = true });
+                var transport = new RaftGrpcTransport(peers, config.ResolvedRpcTimeout, configureHandler(i));
                 transports.Add(transport);
 
                 var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), transport, config);
