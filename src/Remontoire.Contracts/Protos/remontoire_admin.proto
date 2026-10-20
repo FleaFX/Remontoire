@@ -15,14 +15,12 @@ service RemontoireAdmin {
 
   rpc SetConsumerGroupFlag(SetConsumerGroupFlagRequest) returns (SetConsumerGroupFlagReply);
   rpc SetStreamPolicy(SetStreamPolicyRequest) returns (SetStreamPolicyReply);
-  rpc ManageAcl(ManageAclRequest) returns (ManageAclReply);
 
   rpc ListMetaLogRecords(ListMetaLogRecordsRequest) returns (stream MetaLogRecordView);
 }
 
 // Generalized from remontoire_client.proto's own, per-stream NotLeader (see that file's own
-// remarks) — an admin RPC has no partition key/stream concept for some operations (ManageAcl), and
-// a redirect target may be a group other than the meta-group (CopyReshardData).
+// remarks) — a redirect target may be a group other than the meta-group (CopyReshardData).
 message NotLeader {
   string group_id = 1;
   optional string leader_address = 2;
@@ -192,46 +190,13 @@ message SetStreamPolicyReply {
   }
 }
 
-message ManageAclRequest {
-  oneof change {
-    ProduceAclChange produce_acl = 1;
-    ConsumeAclChange consume_acl = 2;
-    SubjectClaimTypeChange subject_claim_type = 3;
-  }
-}
-
-message ProduceAclChange {
-  string subject = 1;
-  string stream_name = 2;
-  bool allowed = 3;
-}
-
-message ConsumeAclChange {
-  string subject = 1;
-  string stream_name = 2;
-  string consumer_group = 3;
-  bool allowed = 4;
-}
-
-message SubjectClaimTypeChange {
-  string stream_name = 1;
-  optional string claim_type = 2; // absent clears the override, falls back to the cluster-wide default
-}
-
-message ManageAclReply {
-  oneof result {
-    google.protobuf.Empty success = 1;
-    NotLeader not_leader = 2;
-  }
-}
-
 message ListMetaLogRecordsRequest {
   uint64 from_version = 1; // inclusive, same convention as remontoire_meta.proto's WatchRequest
 }
 
 message MetaLogRecordView {
   uint64 version = 1;
-  string record_type = 2;          // the C# record's own type name, e.g. "MigrationStarted", "SetProduceAcl"
+  string record_type = 2;          // the C# record's own type name, e.g. "MigrationStarted", "CreateStream"
   map<string, string> fields = 3;  // e.g. {"StreamName": "orders-inbound", "VirtualShardIndex": "3"}
   uint64 timestamp_micros = 4;     // when this command was committed
   string proposed_by = 5;          // empty for records committed before this field existed

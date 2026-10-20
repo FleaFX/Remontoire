@@ -12,7 +12,6 @@
     <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" />
     <ProjectReference Include="..\Remontoire.Sharding\Remontoire.Sharding.csproj" />
     <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" />
-    <ProjectReference Include="..\Remontoire.Security\Remontoire.Security.csproj" />
     <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" />
   </ItemGroup>
 
@@ -24,7 +23,6 @@
 
   <ItemGroup>
     <PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.8" />
     <PackageReference Include="OpenTelemetry.Exporter.Console" Version="1.16.0" />
     <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.16.0" />
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.16.0" />
