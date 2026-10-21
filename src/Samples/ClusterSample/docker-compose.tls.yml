@@ -1,0 +1,20 @@
+# Overlay: TLS with a client certificate on the peer port. Generate ./certs first (see README).
+services:
+  node-1:
+    environment:
+      REMONTOIRE_PEER_CERTIFICATE: /certs/node-1.pfx
+      REMONTOIRE_PEER_CA: /certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+  node-2:
+    environment:
+      REMONTOIRE_PEER_CERTIFICATE: /certs/node-2.pfx
+      REMONTOIRE_PEER_CA: /certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro
+  node-3:
+    environment:
+      REMONTOIRE_PEER_CERTIFICATE: /certs/node-3.pfx
+      REMONTOIRE_PEER_CA: /certs/ca.crt
+    volumes:
+      - ./certs:/certs:ro

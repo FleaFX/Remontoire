@@ -1,0 +1,44 @@
+services:
+  node-1:
+    build: { context: .., dockerfile: ClusterSample/Dockerfile }
+    environment:
+      REMONTOIRE_NODE_ID: node-1
+      REMONTOIRE_NODES: node-1,node-2,node-3
+    ports:
+      - "6001:6000"   # host:container, client port
+    volumes:
+      - node1-data:/app/data
+    networks:
+      - remontoire-cluster
+
+  node-2:
+    build: { context: .., dockerfile: ClusterSample/Dockerfile }
+    environment:
+      REMONTOIRE_NODE_ID: node-2
+      REMONTOIRE_NODES: node-1,node-2,node-3
+    ports:
+      - "6002:6000"
+    volumes:
+      - node2-data:/app/data
+    networks:
+      - remontoire-cluster
+
+  node-3:
+    build: { context: .., dockerfile: ClusterSample/Dockerfile }
+    environment:
+      REMONTOIRE_NODE_ID: node-3
+      REMONTOIRE_NODES: node-1,node-2,node-3
+    ports:
+      - "6003:6000"
+    volumes:
+      - node3-data:/app/data
+    networks:
+      - remontoire-cluster
+
+networks:
+  remontoire-cluster:
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

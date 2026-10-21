@@ -22,3 +22,9 @@ jobs:
 
       - name: Test
         run: dotnet test src/Remontoire.slnx --configuration Release --no-build
+
+      - name: Pack
+        run: dotnet pack src/Remontoire.slnx --configuration Release --no-build --output src/Samples/LocalPackages
+
+      - name: Build sample against the packages
+        run: dotnet build src/Samples/ClusterSample/ClusterSample.csproj --configuration Release
