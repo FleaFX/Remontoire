@@ -27,13 +27,6 @@ public sealed class RemontoireClusterOptions {
     public List<string> MetaGroupSeedAddresses { get; set; } = [];
 
     /// <summary>
-    /// Below this many free bytes on any hosted group's (or the meta-group's) data directory,
-    /// readiness fails (<c>DiskSpaceReadinessCheck</c>). Starting point: 1 GiB — a reasonable
-    /// default, not a value tuned against any real production disk-pressure data yet.
-    /// </summary>
-    public long MinFreeDiskSpaceBytes { get; set; } = 1L * 1024 * 1024 * 1024;
-
-    /// <summary>
     /// Optional hook to configure the <see cref="SocketsHttpHandler"/> of every channel this node
     /// opens — the Raft channels to its peers (after the transport's keep-alive settings) and the
     /// channel to the meta-group seed — called once per channel on a fresh handler. For example

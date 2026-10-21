@@ -22,11 +22,9 @@ namespace Remontoire.Cluster;
 /// from <see cref="RemontoireClusterOptions.MetaGroupSeedAddresses"/> otherwise.
 /// </remarks>
 sealed class RaftReplicaHostedService(
-    IOptions<RemontoireClusterOptions> options, RaftReplicaRegistry registry, MessagingGroupRegistry messagingRegistry,
-    LeaderAddressDirectory leaderAddresses, ShardAssignmentTable assignmentTable, MetaLogJournal metaLogJournal,
-    MigrationAdmissionGate admissionGate, ILoggerFactory loggerFactory)
+    IOptions<RemontoireClusterOptions> options, RemontoireNode node, LeaderAddressDirectory leaderAddresses,
+    ShardAssignmentTable assignmentTable, ILoggerFactory loggerFactory)
     : IHostedService {
-    RemontoireNode? _node;
     RaftGrpcTransport? _transport;
     ShardAssignmentWatcher? _tableWatcher;
     GrpcChannel? _watcherChannel;
@@ -34,8 +32,6 @@ sealed class RaftReplicaHostedService(
     /// <inheritdoc />
     public async Task StartAsync(CancellationToken cancellationToken) {
         var raftOptions = options.Value;
-        var node = new RemontoireNode(registry, messagingRegistry, assignmentTable, metaLogJournal, admissionGate, loggerFactory);
-        _node = node;
 
         var groupPeers = raftOptions.Groups.Select(group => group.Peers.Select(peer => new RaftGroupMember(peer.NodeId, new Uri(peer.Address))));
         var metaPeers = raftOptions.MetaGroup?.Peers.Select(peer => new RaftGroupMember(peer.NodeId, new Uri(peer.Address))).ToArray() ?? [];
@@ -65,6 +61,8 @@ sealed class RaftReplicaHostedService(
             var client = new ShardAssignmentMeta.ShardAssignmentMetaClient(_watcherChannel);
             _tableWatcher = new ShardAssignmentWatcher(client, assignmentTable, logger: loggerFactory.CreateLogger("Remontoire.Sharding.ShardAssignmentWatcher"));
         }
+
+        node.MarkStarted();
     }
 
     /// <inheritdoc />
@@ -73,8 +71,7 @@ sealed class RaftReplicaHostedService(
             await _tableWatcher.DisposeAsync();
         _watcherChannel?.Dispose();
 
-        if (_node is not null)
-            await _node.StopAsync();
+        await node.StopAsync();
 
         _transport?.Dispose();
     }

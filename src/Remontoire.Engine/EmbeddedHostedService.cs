@@ -16,11 +16,10 @@ namespace Remontoire.Engine;
 /// </summary>
 sealed class EmbeddedHostedService(
     RemontoireEngineOptions options,
+    RemontoireNode node,
     RaftReplicaRegistry registry,
-    MessagingGroupRegistry messagingRegistry,
     ShardAssignmentTable assignmentTable,
     MetaLogJournal metaLogJournal,
-    MigrationAdmissionGate admissionGate,
     ILoggerFactory loggerFactory
 ) : IHostedService {
     /// <summary>
@@ -33,7 +32,6 @@ sealed class EmbeddedHostedService(
     static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(30);
 
     readonly CancellationTokenSource _cts = new();
-    RemontoireNode? _node;
     Task? _groupOpener;
 
     /// <summary>
@@ -45,20 +43,17 @@ sealed class EmbeddedHostedService(
 
     /// <inheritdoc />
     public async Task StartAsync(CancellationToken cancellationToken) {
-        var node = new RemontoireNode(registry, messagingRegistry, assignmentTable, metaLogJournal, admissionGate, loggerFactory) {
-            RetentionTickInterval = options.RetentionTickInterval,
-        };
-        _node = node;
-
+        node.RetentionTickInterval = options.RetentionTickInterval;
         await node.OpenMetaGroupAsync(SingleNodeConfig(RemontoireNode.MetaGroupId), Path.Combine(options.DataDirectory, "meta"),
             NoPeersRaftTransport.Instance, cancellationToken);
-        _groupOpener = Task.Run(() => OpenGroupsAsync(node, _cts.Token));
+        _groupOpener = Task.Run(() => OpenGroupsAsync(_cts.Token));
 
-        if (!await ConditionPoller.WaitUntilAsync(() => node.IsMetaCaughtUp && AllAssignedGroupsCaughtUp(node), StartTimeout,
+        if (!await ConditionPoller.WaitUntilAsync(() => node.IsMetaCaughtUp && AllAssignedGroupsCaughtUp(), StartTimeout,
                 cancellationToken: cancellationToken))
             throw new TimeoutException($"Remontoire did not catch up within {StartTimeout.TotalSeconds} seconds; see the log.");
 
         await RegisterClientAddressAsync(cancellationToken);
+        node.MarkStarted();
     }
 
     /// <inheritdoc />
@@ -66,13 +61,12 @@ sealed class EmbeddedHostedService(
         await _cts.CancelAsync();
         if (_groupOpener is not null)
             await _groupOpener;
-        if (_node is not null)
-            await _node.StopAsync();
+        await node.StopAsync();
         _cts.Dispose();
     }
 
     // The journal's only reader here, so groups open one at a time and never twice.
-    async Task OpenGroupsAsync(RemontoireNode node, CancellationToken cancellationToken) {
+    async Task OpenGroupsAsync(CancellationToken cancellationToken) {
         var logger = loggerFactory.CreateLogger<EmbeddedHostedService>();
         try {
             await foreach (var (_, payload, _, _) in metaLogJournal.WatchAsync(0, cancellationToken)) {
@@ -99,7 +93,7 @@ sealed class EmbeddedHostedService(
         }
     }
 
-    bool AllAssignedGroupsCaughtUp(RemontoireNode node) =>
+    bool AllAssignedGroupsCaughtUp() =>
         assignmentTable.EnumerateAssignments().All(assignment => node.IsCaughtUp(assignment.GroupId));
 
     // The address is no part of a stream's identity: registering the current one at every start lets

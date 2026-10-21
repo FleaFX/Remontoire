@@ -111,7 +111,7 @@ public sealed partial class RaftReplica {
             } catch (Exception ex) {
                 // A dropped or timed-out RPC needs no reaction: the election either completes on
                 // other votes, or the already re-armed election timer starts the next round.
-                logger?.LogDebug(ex, "Vote request to {PeerId} failed in {ShardGroupId}", peerId, GroupId);
+                logger?.LogDebug(ex, "Vote request to {PeerId} failed in {GroupId}", peerId, GroupId);
             }
         }, cancellationToken);
     }

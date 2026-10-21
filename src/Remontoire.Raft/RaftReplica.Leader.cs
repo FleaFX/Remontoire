@@ -15,7 +15,7 @@ public sealed partial class RaftReplica {
     /// </summary>
     async Task BecomeLeaderAsync() {
         Interlocked.Increment(ref _leaderElectionsTotal);
-        logger?.LogInformation("Became leader of {ShardGroupId} in term {CurrentTerm}.", GroupId, _currentTerm);
+        logger?.LogInformation("Became leader of {GroupId} in term {CurrentTerm}.", GroupId, _currentTerm);
         _role = ReplicaRole.Leader;
         Volatile.Write(ref _leaderHint, replicaConfig.NodeId);
         _electionTimerGeneration++; // a leader has no election timeout — invalidate without re-arming
@@ -86,7 +86,7 @@ public sealed partial class RaftReplica {
             } catch (Exception ex) {
                 // A failed RPC needs no reaction here: the next heartbeat tick retries from the
                 // same nextIndex, and the RPC deadline guarantees this task ends.
-                logger?.LogDebug(ex, "AppendEntries to {PeerId} failed in {ShardGroupId}", peerId, GroupId);
+                logger?.LogDebug(ex, "AppendEntries to {PeerId} failed in {GroupId}", peerId, GroupId);
             }
         }, cancellationToken);
     }

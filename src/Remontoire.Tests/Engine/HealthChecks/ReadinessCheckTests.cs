@@ -4,14 +4,14 @@ using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Raft.V1;
 
-namespace Remontoire.Cluster.HealthChecks;
+namespace Remontoire.Engine.HealthChecks;
 
-public class RaftReadinessCheckTests {
+public class ReadinessCheckTests {
     [Fact]
     public async Task Unhealthy_when_no_group_is_hosted_at_all() {
-        var check = new RaftReadinessCheck(new RaftReplicaRegistry());
+        var check = new ReadinessCheck(() => true, new RaftReplicaRegistry());
 
-        var result = await check.CheckHealthAsync(new HealthCheckContext());
+        var result = await check.CheckHealthAsync(Context(check));
 
         result.Status.Should().Be(HealthStatus.Unhealthy);
     }
@@ -21,9 +21,22 @@ public class RaftReadinessCheckTests {
         var registry = new RaftReplicaRegistry();
         await using var replica = await StartSingleNodeLeaderAsync("group-1", "node-1");
         registry.Register(replica);
-        var check = new RaftReadinessCheck(registry);
+        var check = new ReadinessCheck(() => true, registry);
 
-        (await check.CheckHealthAsync(new HealthCheckContext())).Status.Should().Be(HealthStatus.Healthy);
+        (await check.CheckHealthAsync(Context(check))).Status.Should().Be(HealthStatus.Healthy);
+    }
+
+    [Fact]
+    public async Task Unhealthy_before_the_node_has_started_even_when_a_group_leads() {
+        var registry = new RaftReplicaRegistry();
+        await using var replica = await StartSingleNodeLeaderAsync("group-1", "node-1");
+        registry.Register(replica);
+        var check = new ReadinessCheck(() => false, registry);
+
+        var result = await check.CheckHealthAsync(Context(check));
+
+        result.Status.Should().Be(HealthStatus.Unhealthy);
+        result.Description.Should().Be("The node has not started, or is stopping.");
     }
 
     [Fact]
@@ -34,9 +47,9 @@ public class RaftReadinessCheckTests {
         await using var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), new RecordingRaftTransport(), config);
         await replica.StartAsync(); // stays a plain follower — no election, no AppendEntries ever received
         registry.Register(replica);
-        var check = new RaftReadinessCheck(registry);
+        var check = new ReadinessCheck(() => true, registry);
 
-        (await check.CheckHealthAsync(new HealthCheckContext())).Status.Should().Be(HealthStatus.Unhealthy);
+        (await check.CheckHealthAsync(Context(check))).Status.Should().Be(HealthStatus.Unhealthy);
     }
 
     // The core OR-aggregation regression test: one stuck group must never drag a node with an
@@ -62,8 +75,8 @@ public class RaftReadinessCheckTests {
         (await reply.Task).Success.Should().BeTrue("sanity check on the setup");
         registry.Register(contactedReplica);
 
-        var check = new RaftReadinessCheck(registry);
-        (await check.CheckHealthAsync(new HealthCheckContext())).Status.Should().Be(HealthStatus.Healthy);
+        var check = new ReadinessCheck(() => true, registry);
+        (await check.CheckHealthAsync(Context(check))).Status.Should().Be(HealthStatus.Healthy);
     }
 
     static async Task<RaftReplica> StartSingleNodeLeaderAsync(string groupId, string nodeId) {
@@ -75,4 +88,7 @@ public class RaftReadinessCheckTests {
         await replica.DrainAsync();
         return replica;
     }
+
+    static HealthCheckContext Context(IHealthCheck check) =>
+        new() { Registration = new HealthCheckRegistration("test", check, HealthStatus.Unhealthy, null) };
 }

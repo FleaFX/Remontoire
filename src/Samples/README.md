@@ -25,6 +25,9 @@ the host. Start it with `docker compose up --build` from `src/Samples/ClusterSam
 `docker compose down` (`--volumes` also wipes the data). A leader announces itself in the logs as
 `Became leader of group-1` and `Became leader of __meta__`. Redirects and the group members use the
 host names of the compose network (`node-1`…), so a client should run inside that network too.
+Health lives on port 8080, plain HTTP/1.1 (`/health/live` and `/health/ready`), reachable inside
+the compose network: the client and peer ports speak HTTP/2 only, which an HTTP/1.1 probe cannot
+talk to.
 
 ## TLS on the peer port
 
@@ -52,3 +55,9 @@ app started. A restart doesn't hand out acked greetings again. Start it with `do
 `src/Samples/EmbeddedSample`; the data lives in `data/` (setting `Remontoire:DataDirectory`).
 `EmbeddedSample.Tests` hosts the app in a `WebApplicationFactory`:
 `dotnet test src/Samples/EmbeddedSample.Tests`.
+
+The app itself owns its observability: `GET /health/live` and `GET /health/ready` report its
+health checks, `GET /metrics` serves Prometheus metrics, and spans go out over OTLP once
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. It traces its requests too, so each publish span is the child
+of the request that published it. The sample test checks the readiness endpoint, the published
+metrics and the exported publish/receive spans.

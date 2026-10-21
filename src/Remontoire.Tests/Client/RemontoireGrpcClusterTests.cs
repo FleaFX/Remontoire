@@ -12,7 +12,6 @@ using Microsoft.Extensions.Logging;
 using Remontoire.Client.V1;
 using Remontoire.Engine;
 using Remontoire.Messaging;
-using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Cluster;
@@ -87,6 +86,7 @@ public class RemontoireGrpcClusterTests {
         builder.Services.AddSingleton<ShardAssignmentTable>();
         builder.Services.AddSingleton<MetaLogJournal>();
         builder.Services.AddSingleton<MigrationAdmissionGate>();
+        builder.Services.AddSingleton<RemontoireMetrics>();
         builder.Services.AddSingleton<MessagingOperations>();
 
         var app = builder.Build();
@@ -350,7 +350,7 @@ public class RemontoireGrpcClusterTests {
     // ActivityListener is listening process-wide — without this, Activity.Current stays null
     // inside Publish's handler even over a real request, and no correlation-id ever gets injected.
     [Fact]
-    public async Task Publish_without_a_caller_supplied_correlation_header_stores_the_current_trace_id_as_the_header() {
+    public async Task Publish_without_a_caller_supplied_traceparent_stores_the_current_trace_context() {
         using var listener = new ActivityListener {
             ShouldListenTo = _ => true,
             Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
@@ -373,19 +373,20 @@ public class RemontoireGrpcClusterTests {
             }
 
             messages.Should().HaveCount(1);
-            messages[0].Headers.Should().ContainKey("correlation-id");
+            messages[0].Headers.Should().NotContainKey("correlation-id");
             // W3C traceparent shape ("00-{32 hex}-{16 hex}-{2 hex}"), the exact string
             // Activity.Current?.Id already produces — not just any non-empty value.
-            messages[0].Headers["correlation-id"].Should().MatchRegex("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$");
+            messages[0].Headers["traceparent"].Should().MatchRegex("^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$");
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);
         }
     }
 
     // This whole test class is [Collection("RealNetwork")] (DisableParallelization) — the only
-    // other tests exercising RemontoireClientGrpcService.Publish/Ack (and therefore
-    // RemontoireMetrics's shared, process-wide Meter) live in the same collection, so nothing else
-    // can post a measurement while this listener is attached.
+    // other tests exercising RemontoireClientGrpcService.Publish/Ack live in the same collection,
+    // so nothing else can post a measurement while this listener is attached. Each of the three
+    // hosts owns its own meter named Remontoire, so the filter below matches them by name, and
+    // only the leader records.
     [Fact]
     public async Task Publish_and_Ack_record_the_expected_metrics() {
         var directoryRoot = CreateTempDirectory();
@@ -399,16 +400,16 @@ public class RemontoireGrpcClusterTests {
 
             using var listener = new MeterListener {
                 InstrumentPublished = (instrument, meterListener) => {
-                    if (instrument.Meter.Name == RemontoireMetrics.Meter.Name)
+                    if (instrument.Meter.Name == RemontoireMetrics.MeterName)
                         meterListener.EnableMeasurementEvents(instrument);
                 },
             };
             listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) => {
-                if (instrument.Name == "remontoire_ingest_messages_total") ingestMeasurements.Add((value, tags.ToArray()));
-                if (instrument.Name == "remontoire_ack_messages_total") ackMeasurements.Add((value, tags.ToArray()));
+                if (instrument.Name == "remontoire.messages.published") ingestMeasurements.Add((value, tags.ToArray()));
+                if (instrument.Name == "remontoire.messages.acked") ackMeasurements.Add((value, tags.ToArray()));
             });
             listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) => {
-                if (instrument.Name == "remontoire_ack_latency_seconds") latencyMeasurements.Add((value, tags.ToArray()));
+                if (instrument.Name == "remontoire.ack.latency") latencyMeasurements.Add((value, tags.ToArray()));
             });
             listener.Start();
 
@@ -418,7 +419,7 @@ public class RemontoireGrpcClusterTests {
             ingestMeasurements.Should().ContainSingle();
             ingestMeasurements[0].Value.Should().Be(1);
             ingestMeasurements[0].Tags.Should().Contain(new KeyValuePair<string, object?>("stream", StreamName));
-            ingestMeasurements[0].Tags.Should().Contain(new KeyValuePair<string, object?>("shard", GroupId));
+            ingestMeasurements[0].Tags.Should().Contain(new KeyValuePair<string, object?>("group", GroupId));
 
             var messages = new List<RemontoireMessage>();
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -736,15 +737,12 @@ public class RemontoireGrpcClusterTests {
 
             // The same scenario, reconstructed purely via a metric — never by reading
             // RetentionEvaluator.DeadLetterMessagesTotal (above) directly.
-            var raftRegistry = leader.Host.Services.GetRequiredService<RaftReplicaRegistry>();
-            var messagingRegistry = leader.Host.Services.GetRequiredService<MessagingGroupRegistry>();
-            var leaderAssignmentTable = leader.Host.Services.GetRequiredService<ShardAssignmentTable>();
-            ObservableMetricsRegistration.Register(raftRegistry, messagingRegistry, leaderAssignmentTable);
+            var metrics = leader.Host.Services.GetRequiredService<RemontoireMetrics>();
 
             var measurements = new List<(string Name, object Value, KeyValuePair<string, object?>[] Tags)>();
             using var listener = new MeterListener {
                 InstrumentPublished = (instrument, meterListener) => {
-                    if (instrument.Meter.Name == RemontoireMetrics.Meter.Name)
+                    if (ReferenceEquals(instrument.Meter, metrics.Meter))
                         meterListener.EnableMeasurementEvents(instrument);
                 },
             };
@@ -753,10 +751,10 @@ public class RemontoireGrpcClusterTests {
             listener.Start();
             listener.RecordObservableInstruments();
 
-            measurements.Should().ContainSingle(m => m.Name == "remontoire_dead_letter_messages_total" && (long)m.Value == 1);
-            measurements.Where(m => m.Name == "remontoire_pruning_blocked_by_group" && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "mandatory-group")))
+            measurements.Should().ContainSingle(m => m.Name == "remontoire.messages.dead_lettered" && (long)m.Value == 1);
+            measurements.Where(m => m.Name == "remontoire.consumer_group.blocking_pruning" && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "mandatory-group")))
                 .Should().ContainSingle(m => (long)m.Value == 1, "the stuck mandatory group must show up as the one blocking pruning");
-            measurements.Where(m => m.Name == "remontoire_oldest_unacked_message_age_seconds" && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "mandatory-group")))
+            measurements.Where(m => m.Name == "remontoire.consumer_group.oldest_unacked_age" && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "mandatory-group")))
                 .Should().ContainSingle(m => (double)m.Value >= 0);
         } finally {
             await DisposeAllAsync(nodes, directoryRoot);

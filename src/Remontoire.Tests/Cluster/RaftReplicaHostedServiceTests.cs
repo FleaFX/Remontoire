@@ -17,10 +17,12 @@ public class RaftReplicaHostedServiceTests {
             try {
                 var registry = new RaftReplicaRegistry();
                 var messagingRegistry = new MessagingGroupRegistry();
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }] }),
-                    registry, messagingRegistry, new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -42,6 +44,7 @@ public class RaftReplicaHostedServiceTests {
             try {
                 var registry = new RaftReplicaRegistry();
                 var messagingRegistry = new MessagingGroupRegistry();
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [
@@ -49,7 +52,8 @@ public class RaftReplicaHostedServiceTests {
                             new RaftGroupOptions { GroupId = "group-2", NodeId = "node-1", DataDirectory = directoryB },
                         ],
                     }),
-                    registry, messagingRegistry, new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -73,12 +77,14 @@ public class RaftReplicaHostedServiceTests {
             try {
                 var registry = new RaftReplicaRegistry();
                 var messagingRegistry = new MessagingGroupRegistry();
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
-                    registry, messagingRegistry, new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -103,13 +109,15 @@ public class RaftReplicaHostedServiceTests {
             var metaDirectory = CreateTempDirectory();
             try {
                 var registry = new RaftReplicaRegistry();
+                var messagingRegistry = new MessagingGroupRegistry();
                 var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
-                    registry, new MessagingGroupRegistry(), new LeaderAddressDirectory(), table, new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -135,6 +143,8 @@ public class RaftReplicaHostedServiceTests {
             var metaDirectory = CreateTempDirectory();
             try {
                 var registry = new RaftReplicaRegistry();
+                var messagingRegistry = new MessagingGroupRegistry();
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [
@@ -148,7 +158,8 @@ public class RaftReplicaHostedServiceTests {
                             Peers = [new RaftPeerOptions { NodeId = "node-2", Address = "http://localhost:61001" }],
                         },
                     }),
-                    registry, new MessagingGroupRegistry(), new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 var act = async () => await service.StartAsync(CancellationToken.None);
 
@@ -164,12 +175,14 @@ public class RaftReplicaHostedServiceTests {
         public async Task Does_not_throw_when_bootstrapping_a_watcher_from_meta_group_seed_addresses() {
             var dataDirectory = CreateTempDirectory();
             try {
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroupSeedAddresses = ["http://localhost:61002"],
                     }),
-                    new RaftReplicaRegistry(), new MessagingGroupRegistry(), new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 var act = async () => await service.StartAsync(CancellationToken.None);
 
@@ -185,6 +198,7 @@ public class RaftReplicaHostedServiceTests {
             var dataDirectory = CreateTempDirectory();
             try {
                 var leaderAddresses = new LeaderAddressDirectory();
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions {
@@ -192,7 +206,8 @@ public class RaftReplicaHostedServiceTests {
                             Peers = [new RaftPeerOptions { NodeId = "node-2", Address = "http://127.0.0.1:1", ClientAddress = "http://127.0.0.1:2" }],
                         }],
                     }),
-                    new RaftReplicaRegistry(), new MessagingGroupRegistry(), leaderAddresses, new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    leaderAddresses, table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -210,6 +225,7 @@ public class RaftReplicaHostedServiceTests {
             var dataDirectory = CreateTempDirectory();
             try {
                 var leaderAddresses = new LeaderAddressDirectory();
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions {
@@ -217,7 +233,8 @@ public class RaftReplicaHostedServiceTests {
                             Peers = [new RaftPeerOptions { NodeId = "node-2", Address = "http://127.0.0.1:1" }],
                         }],
                     }),
-                    new RaftReplicaRegistry(), new MessagingGroupRegistry(), leaderAddresses, new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    leaderAddresses, table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -233,12 +250,14 @@ public class RaftReplicaHostedServiceTests {
         [Fact]
         public async Task Calls_ConfigureHttpHandler_for_the_meta_group_seed_channel() {
             var handlers = new List<SocketsHttpHandler>();
+            var table = new ShardAssignmentTable();
             var service = new RaftReplicaHostedService(
                 Options.Create(new RemontoireClusterOptions {
                     MetaGroupSeedAddresses = ["http://127.0.0.1:1"],
                     ConfigureHttpHandler = handlers.Add,
                 }),
-                new RaftReplicaRegistry(), new MessagingGroupRegistry(), new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
             await service.StartAsync(CancellationToken.None);
             try {
@@ -262,13 +281,14 @@ public class RaftReplicaHostedServiceTests {
             var dataDirectory = CreateTempDirectory();
             var metaDirectory = CreateTempDirectory();
             try {
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
-                    new RaftReplicaRegistry(), new MessagingGroupRegistry(), new LeaderAddressDirectory(), new ShardAssignmentTable(),
-                    new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 await service.StopAsync(CancellationToken.None);
@@ -293,7 +313,8 @@ public class RaftReplicaHostedServiceTests {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
-                    registry, messagingRegistry, new LeaderAddressDirectory(), table, new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -341,12 +362,15 @@ public class RaftReplicaHostedServiceTests {
             var metaDirectory = CreateTempDirectory();
             try {
                 var registry = new RaftReplicaRegistry();
+                var messagingRegistry = new MessagingGroupRegistry();
+                var table = new ShardAssignmentTable();
                 var service = new RaftReplicaHostedService(
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }],
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
-                    registry, new MessagingGroupRegistry(), new LeaderAddressDirectory(), new ShardAssignmentTable(), new MetaLogJournal(), new MigrationAdmissionGate(), NullLoggerFactory.Instance);
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
 
                 await service.StartAsync(CancellationToken.None);
                 await service.StopAsync(CancellationToken.None);

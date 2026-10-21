@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using Remontoire.Messaging;
-using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Sharding;
@@ -27,6 +26,7 @@ namespace Remontoire.Engine;
 /// <param name="assignmentTable">The table the meta-group feeds, and the source of every stream's policies.</param>
 /// <param name="metaLogJournal">Receives every committed meta-log record, for the shard-assignment feed.</param>
 /// <param name="admissionGate">Which groups pause admission during a reshard's cutover.</param>
+/// <param name="metrics">Records the WAL fsync and segment compaction durations.</param>
 /// <param name="loggerFactory">Creates the loggers of every component.</param>
 public sealed class RemontoireNode(
     RaftReplicaRegistry registry,
@@ -34,6 +34,7 @@ public sealed class RemontoireNode(
     ShardAssignmentTable assignmentTable,
     MetaLogJournal metaLogJournal,
     MigrationAdmissionGate admissionGate,
+    RemontoireMetrics metrics,
     ILoggerFactory loggerFactory
 ) {
     /// <summary>
@@ -52,9 +53,11 @@ public sealed class RemontoireNode(
     readonly ConcurrentDictionary<string, AckIndexApplier> _ackIndexAppliers = new();
     readonly ConcurrentDictionary<string, AckCheckpointer> _ackCheckpointers = new();
     readonly ConcurrentDictionary<string, RetentionEvaluator> _retentionEvaluators = new();
+    readonly ConcurrentDictionary<string, string> _dataDirectories = new();
     WalRaftLog? _metaLog;
     RaftReplica? _metaReplica;
     ShardAssignmentTableApplier? _metaTableApplier;
+    volatile bool _isStarted;
 
     /// <summary>
     /// How often each data group's <see cref="RetentionEvaluator"/> runs; <see langword="null"/>
@@ -89,6 +92,22 @@ public sealed class RemontoireNode(
         _metaReplica is { IsLeader: true } replica && _metaTableApplier is { } applier && applier.AppliedIndex >= replica.CommitIndex;
 
     /// <summary>
+    /// Whether the hosting service finished starting this node and hasn't begun stopping it. An
+    /// embedded node starts only once every group has caught up.
+    /// </summary>
+    public bool IsStarted => _isStarted;
+
+    /// <summary>
+    /// The data directory of every group opened here, the meta-group's included.
+    /// </summary>
+    public IReadOnlyCollection<string> DataDirectories => _dataDirectories.Values.ToArray();
+
+    /// <summary>
+    /// Marks this node started; the hosting service calls it at the end of its own start.
+    /// </summary>
+    public void MarkStarted() => _isStarted = true;
+
+    /// <summary>
     /// Opens one data group in <paramref name="dataDirectory"/> (creating it if necessary), starts its
     /// replica, and registers it.
     /// </summary>
@@ -102,20 +121,20 @@ public sealed class RemontoireNode(
         // Every background loop started below (RaftReplica's actor, ShardLog's actor/compaction/
         // size-prune workers, AckCheckpointer, RetentionEvaluator) is a Task.Run — each captures
         // this scope's ambient ExecutionContext at its own Task.Run call, so it keeps carrying
-        // NodeId/ShardGroupId on every log line for its whole lifetime, entirely independent of
+        // NodeId/GroupId on every log line for its whole lifetime, entirely independent of
         // this scope disposing when this method returns.
-        using var groupScope = loggerFactory.CreateLogger(nameof(RemontoireNode)).BeginScope(new Dictionary<string, object> {
-            ["NodeId"] = config.NodeId, ["ShardGroupId"] = groupId,
+        using var groupScope = loggerFactory.CreateLogger<RemontoireNode>().BeginScope(new Dictionary<string, object> {
+            ["NodeId"] = config.NodeId, ["GroupId"] = groupId,
         });
 
+        _dataDirectories[groupId] = dataDirectory;
         var log = await WalRaftLog.OpenAsync(dataDirectory,
-            onFsyncDurationMeasured: duration => RemontoireMetrics.WalFsyncDurationSeconds.Record(duration.TotalSeconds,
-                new KeyValuePair<string, object?>("shard", groupId)),
+            onFsyncDurationMeasured: duration => metrics.RecordWalFsync(groupId, duration),
             cancellationToken: cancellationToken);
         _logs[groupId] = log; // tracked immediately — StopAsync must be able to reach it even if a later step here throws
         var stateStore = new FileRaftStateStore(dataDirectory);
 
-        var replica = new RaftReplica(stateStore, log, transport, config, logger: loggerFactory.CreateLogger($"Remontoire.Raft.RaftReplica[{groupId}]"));
+        var replica = new RaftReplica(stateStore, log, transport, config, logger: loggerFactory.CreateLogger("Remontoire.Raft.RaftReplica"));
         await replica.StartAsync(cancellationToken);
         registry.Register(replica);
         _replicas[groupId] = replica;
@@ -131,8 +150,7 @@ public sealed class RemontoireNode(
         // below is long since populated.
         var compactionPolicy = new CompactionPolicy(MaxAge: null, MaxMergedSegmentBytes: null,
             GetAckedLowWatermarkAsync: _ => new ValueTask<ulong>(_retentionEvaluators[groupId].SafeToPruneWatermark),
-            OnCompactionDurationMeasured: duration => RemontoireMetrics.SegmentCompactionDurationSeconds.Record(duration.TotalSeconds,
-                new KeyValuePair<string, object?>("shard", groupId)));
+            OnCompactionDurationMeasured: duration => metrics.RecordSegmentCompaction(groupId, duration));
 
         // Re-resolved every tick rather than fixed at construction — see ResolveStreamNameForGroup's
         // own remarks: this group's assignment may not be known yet at this point (the meta-group or
@@ -145,7 +163,7 @@ public sealed class RemontoireNode(
 
         var shardLog = await ShardLog.OpenAsync(dataDirectory, replica.ReadCommittedAsync,
             compactionPolicy: compactionPolicy, retentionPolicy: retentionPolicy,
-            logger: loggerFactory.CreateLogger($"Remontoire.Storage.ShardLog[{groupId}]"), cancellationToken: cancellationToken);
+            logger: loggerFactory.CreateLogger("Remontoire.Storage.ShardLog"), cancellationToken: cancellationToken);
         _shardLogs[groupId] = shardLog;
 
         var ackIndexApplier = new AckIndexApplier(shardLog, ackIndex);
@@ -161,7 +179,7 @@ public sealed class RemontoireNode(
                 ? (assignmentTable.GetRetentionPolicy(streamName).CheckpointInterval, assignmentTable.GetRetentionPolicy(streamName).CheckpointOffsetCount)
                 : (null, null),
             IsAdmissionPaused: () => admissionGate.IsPaused(groupId),
-            Logger: loggerFactory.CreateLogger($"Remontoire.Messaging.AckCheckpointer[{groupId}]")));
+            Logger: loggerFactory.CreateLogger("Remontoire.Messaging.AckCheckpointer")));
 
         var retentionEvaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
             ShardLog: shardLog, AckIndex: ackIndex,
@@ -172,7 +190,7 @@ public sealed class RemontoireNode(
             IsAdmissionPaused: () => admissionGate.IsPaused(groupId),
             IsLeader: () => replica.IsLeader,
             TickInterval: RetentionTickInterval,
-            Logger: loggerFactory.CreateLogger($"Remontoire.Messaging.RetentionEvaluator[{groupId}]")));
+            Logger: loggerFactory.CreateLogger("Remontoire.Messaging.RetentionEvaluator")));
         _retentionEvaluators[groupId] = retentionEvaluator;
 
         messagingRegistry.Register(groupId, shardLog, ackIndex, retentionEvaluator);
@@ -188,14 +206,17 @@ public sealed class RemontoireNode(
     /// <param name="transport">How the replica reaches its peers.</param>
     /// <param name="cancellationToken">Cancels opening.</param>
     public async Task OpenMetaGroupAsync(RaftReplicaConfig config, string dataDirectory, IRaftTransport transport, CancellationToken cancellationToken = default) {
-        using var metaScope = loggerFactory.CreateLogger(nameof(RemontoireNode)).BeginScope(new Dictionary<string, object> {
-            ["NodeId"] = config.NodeId, ["ShardGroupId"] = MetaGroupId,
+        using var metaScope = loggerFactory.CreateLogger<RemontoireNode>().BeginScope(new Dictionary<string, object> {
+            ["NodeId"] = config.NodeId, ["GroupId"] = MetaGroupId,
         });
 
-        _metaLog = await WalRaftLog.OpenAsync(dataDirectory, cancellationToken: cancellationToken);
+        _dataDirectories[MetaGroupId] = dataDirectory;
+        _metaLog = await WalRaftLog.OpenAsync(dataDirectory,
+            onFsyncDurationMeasured: duration => metrics.RecordWalFsync(MetaGroupId, duration),
+            cancellationToken: cancellationToken);
         var metaStateStore = new FileRaftStateStore(dataDirectory);
 
-        _metaReplica = new RaftReplica(metaStateStore, _metaLog, transport, config, logger: loggerFactory.CreateLogger($"Remontoire.Raft.RaftReplica[{MetaGroupId}]"));
+        _metaReplica = new RaftReplica(metaStateStore, _metaLog, transport, config, logger: loggerFactory.CreateLogger("Remontoire.Raft.RaftReplica"));
         await _metaReplica.StartAsync(cancellationToken);
         registry.Register(_metaReplica);
 
@@ -203,10 +224,12 @@ public sealed class RemontoireNode(
     }
 
     /// <summary>
-    /// Stops and closes everything opened here, the meta-group first, each data group in dependency
-    /// order, and unregisters it.
+    /// Marks this node no longer started, then stops and closes everything opened here, the
+    /// meta-group first, each data group in dependency order, and unregisters it.
     /// </summary>
     public async Task StopAsync() {
+        _isStarted = false;
+
         if (_metaTableApplier is not null)
             await _metaTableApplier.DisposeAsync();
 

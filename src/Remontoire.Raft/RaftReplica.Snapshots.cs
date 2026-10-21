@@ -128,7 +128,7 @@ public sealed partial class RaftReplica {
                     peerId, term, lastIncludedIndex, lastIncludedTerm, nextLogicalOffset, groupId, nodeId, chunkSizeBytes, cancellationToken);
                 _channel.Writer.TryWrite(new InstallSnapshotResponseReceived(peerId, response, term, lastIncludedIndex));
             } catch (Exception ex) {
-                logger?.LogDebug(ex, "InstallSnapshot to {PeerId} failed in {ShardGroupId}", peerId, GroupId);
+                logger?.LogDebug(ex, "InstallSnapshot to {PeerId} failed in {GroupId}", peerId, GroupId);
                 _channel.Writer.TryWrite(new InstallSnapshotTransferFailed(peerId));
             }
         }, cancellationToken);
@@ -264,7 +264,7 @@ public sealed partial class RaftReplica {
                 await prepareSnapshot(nextLogicalOffset, cancellationToken);
                 _channel.Writer.TryWrite(new SnapshotPrepared(lastIncludedIndex, lastIncludedTerm, nextLogicalOffset));
             } catch (Exception ex) {
-                logger?.LogWarning(ex, "Snapshot preparation failed in {ShardGroupId}", GroupId);
+                logger?.LogWarning(ex, "Snapshot preparation failed in {GroupId}", GroupId);
                 _channel.Writer.TryWrite(new SnapshotPreparationFailed());
             }
         }, cancellationToken);

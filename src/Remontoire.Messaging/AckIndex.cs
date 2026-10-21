@@ -125,7 +125,7 @@ public sealed class AckIndex : IAsyncDisposable {
     /// <summary>
     /// Which mandatory consumer group is currently furthest behind, and its committed watermark —
     /// the group <see cref="MandatoryGroupsLowWatermark"/>'s minimum came from, surfaced by name
-    /// for the <c>remontoire_pruning_blocked_by_group</c> metric. <see langword="null"/> when no
+    /// for the <c>remontoire.consumer_group.blocking_pruning</c> metric. <see langword="null"/> when no
     /// mandatory group is registered.
     /// </summary>
     public (string ConsumerGroup, ulong CommittedWatermark)? SlowestMandatoryGroup(Func<string, bool> isMandatory) {

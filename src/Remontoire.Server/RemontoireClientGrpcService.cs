@@ -69,7 +69,7 @@ public sealed class RemontoireClientGrpcService(
             return new AckReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } };
 
         try {
-            await operations.AckAsync(request.StreamName, request.ShardId, request.ConsumerGroup, request.Offsets, replica, shardLog, ackIndex, context.CancellationToken);
+            await operations.AckAsync(request.StreamName, request.ConsumerGroup, request.Offsets, replica, shardLog, ackIndex, context.CancellationToken);
             return new AckReply { Success = new Empty() };
         } catch (NotLeaderException ex) {
             return new AckReply { NotLeader = BuildNotLeader(request.StreamName, ex) };
@@ -100,7 +100,7 @@ public sealed class RemontoireClientGrpcService(
 
         await foreach (var handle in MessagingOperations.ConsumeAsync(shardLog, ackIndex, request.ConsumerGroup, context.CancellationToken)) {
             using (handle) {
-                MessagingOperations.LinkToStoredCorrelationContext(handle.Entry.Headers);
+                using var receive = MessagingOperations.StartReceiveActivity(request.StreamName, request.ConsumerGroup, handle.Entry.Headers);
                 await responseStream.WriteAsync(new ConsumeReply { Message = ToProto(handle.Entry) });
             }
         }
