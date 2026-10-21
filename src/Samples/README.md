@@ -43,3 +43,12 @@ for node in node-1 node-2 node-3; do
   openssl pkcs12 -export -out $node.pfx -inkey $node.key -in $node.crt -passout pass:
 done
 ```
+
+## EmbeddedSample
+
+A web app with Remontoire embedded: `POST /greetings?name=Ada` publishes a greeting, a background
+consumer handles and acks each one, and `GET /greetings` lists the greetings handled since the
+app started. A restart doesn't hand out acked greetings again. Start it with `dotnet run` from
+`src/Samples/EmbeddedSample`; the data lives in `data/` (setting `Remontoire:DataDirectory`).
+`EmbeddedSample.Tests` hosts the app in a `WebApplicationFactory`:
+`dotnet test src/Samples/EmbeddedSample.Tests`.
