@@ -5,7 +5,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Raft.Grpc;
-using Remontoire.Server;
+using Remontoire.Cluster;
 using Remontoire.Storage;
 using Remontoire.Tests;
 

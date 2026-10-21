@@ -14,8 +14,8 @@ using Remontoire.Messaging;
 using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
-using Remontoire.Server;
-using Remontoire.Server.Grpc;
+using Remontoire.Cluster;
+using Remontoire.Cluster.Grpc;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 using Remontoire.Tests;
@@ -227,10 +227,11 @@ public class RemontoireGrpcClusterTests {
     }
 
     static RemontoireConnection Connect(IEnumerable<Node> nodes) =>
-        new(new RemontoireClientOptions(
-            MetaGroupSeedAddresses: [new Uri(nodes.First().Host.Urls.First())],
-            MaxRedirectAttempts: 10,
-            RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
+        new(new RemontoireClientOptions {
+            MetaGroupSeedAddresses = [new Uri(nodes.First().Host.Urls.First())],
+            MaxRedirectAttempts = 10,
+            RedirectRetryDelay = TimeSpan.FromMilliseconds(50),
+        });
 
     // Overwrites GroupId's membership, as seen from node's own table, down to node's own address
     // only — reproducing "this connection has never heard of any other member" now that a client

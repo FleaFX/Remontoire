@@ -4,7 +4,7 @@ namespace Remontoire.Observability;
 
 /// <summary>
 /// The single <see cref="Meter"/> instance and the full set of instrument definitions for this
-/// product. Recording code lives elsewhere (<c>Remontoire.Server</c>, the only layer with DI
+/// product. Recording code lives elsewhere (<c>Remontoire.Cluster</c>, the only layer with DI
 /// visibility onto the registries/tables the values come from) — this type only ever declares
 /// instruments, never observes state or wires a callback itself.
 /// </summary>
@@ -24,7 +24,7 @@ public static class RemontoireMetrics {
         Meter.CreateHistogram<double>("remontoire_segment_compaction_duration_seconds", unit: "s");
 
     // State-snapshot — ObservableGauge/ObservableCounter registration itself happens once in
-    // Program.cs (the callbacks need DI-resolved registries); this type only names them.
+    // ObservableMetricsRegistration (the callbacks need DI-resolved registries); this type only names them.
     // remontoire_raft_append_entries_sent_total belongs here, not above: it's read off
     // RaftReplica.AppendEntriesSentTotal (a per-peer dictionary already maintained on the actor),
     // scraped via a callback over RaftReplicaRegistry.All — never recorded inline.

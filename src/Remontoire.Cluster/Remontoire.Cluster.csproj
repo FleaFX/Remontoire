@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>$(AssemblyName)</PackageId>
+    <Title>Remontoire.Cluster</Title>
+    <Description>Raft-replicated, sharded Remontoire cluster node: data groups, the meta group, resharding and the gRPC endpoints, hosted by an ASP.NET Core application.</Description>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
+    <PackageReference Include="Grpc.Net.Client" Version="2.80.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Remontoire\Remontoire.csproj" />
+    <ProjectReference Include="..\Remontoire.Grpc\Remontoire.Grpc.csproj" />
+    <ProjectReference Include="..\Remontoire.Storage\Remontoire.Storage.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Remontoire.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <!-- Bundle the private implementation assemblies into the package's lib folder: they are not
+       packages of their own, so a package dependency on them would not resolve. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificBuildOutput>$(TargetsForTfmSpecificBuildOutput);GetPrivateAssembliesForPack</TargetsForTfmSpecificBuildOutput>
+  </PropertyGroup>
+  <Target Name="GetPrivateAssembliesForPack" Returns="@(BuildOutputInPackage)">
+    <ItemGroup>
+      <BuildOutputInPackage Include="$(OutputPath)Remontoire.Storage.dll" Condition="Exists('$(OutputPath)Remontoire.Storage.dll')" />
+      <BuildOutputInPackage Include="$(OutputPath)Remontoire.Raft.dll" Condition="Exists('$(OutputPath)Remontoire.Raft.dll')" />
+      <BuildOutputInPackage Include="$(OutputPath)Remontoire.Messaging.dll" Condition="Exists('$(OutputPath)Remontoire.Messaging.dll')" />
+      <BuildOutputInPackage Include="$(OutputPath)Remontoire.Observability.dll" Condition="Exists('$(OutputPath)Remontoire.Observability.dll')" />
+    </ItemGroup>
+  </Target>
+
+</Project>

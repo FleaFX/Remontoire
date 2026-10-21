@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>$(AssemblyName)</PackageId>
+    <Title>Remontoire.Grpc</Title>
+    <Description>Wire protocol of Remontoire: the gRPC contracts, partition-key routing and the shard-assignment table shared by Remontoire.Client and Remontoire.Cluster. This is a low-level package; consume Remontoire.Client or Remontoire.Cluster instead.</Description>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.35.1" />
+    <PackageReference Include="Grpc.Core.Api" Version="2.80.0" />
+    <PackageReference Include="Grpc.Tools" Version="2.82.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Remontoire.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="Protos/remontoire_client.proto" GrpcServices="Both" />
+    <Protobuf Include="Protos/remontoire_meta.proto" GrpcServices="Both" />
+    <Protobuf Include="Protos/remontoire_admin.proto" GrpcServices="Both" />
+  </ItemGroup>
+
+</Project>

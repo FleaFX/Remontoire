@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using FluentAssertions;
-using Remontoire.Server;
+using Remontoire.Cluster;
 using Remontoire.Storage.Compaction;
 
 namespace Remontoire.Storage;

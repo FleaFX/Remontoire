@@ -62,3 +62,7 @@ TestResult.xml
 nunit-*.xml
 
 diag.host.*.log
+
+# Samples: packages packed from this repository, and generated certificates
+src/Samples/LocalPackages/
+src/Samples/ClusterSample/certs/
