@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>$(AssemblyName)</PackageId>
+    <Title>Remontoire.Server</Title>
+    <Description>gRPC endpoints of a Remontoire node, embedded or a cluster node: publish, consume and ack, the shard-assignment feed, and administration, mapped by an ASP.NET Core application.</Description>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Remontoire\Remontoire.csproj" />
+    <ProjectReference Include="..\Remontoire.Grpc\Remontoire.Grpc.csproj" />
+    <ProjectReference Include="..\Remontoire.Engine\Remontoire.Engine.csproj" />
+    <!-- Delivered by the Remontoire.Engine package; referenced here only to compile against. -->
+    <ProjectReference Include="..\Remontoire.Storage\Remontoire.Storage.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" PrivateAssets="all" />
+    <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>Remontoire.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

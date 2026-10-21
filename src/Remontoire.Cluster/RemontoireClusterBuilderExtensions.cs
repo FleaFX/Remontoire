@@ -1,7 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
-using Remontoire.Raft.Grpc;
-using Remontoire.Sharding;
+using Remontoire.Engine;
 
 namespace Remontoire.Cluster;
 
@@ -11,8 +10,9 @@ namespace Remontoire.Cluster;
 public static class RemontoireClusterBuilderExtensions {
     /// <summary>
     /// Registers a cluster node: every data group and the meta-group replica configured in
-    /// <see cref="RemontoireClusterOptions"/>, started and stopped with the host, and the gRPC
-    /// services the methods of <see cref="RemontoireClusterEndpointRouteBuilderExtensions"/> map.
+    /// <see cref="RemontoireClusterOptions"/>, started and stopped with the host, and the Raft
+    /// endpoint <see cref="RemontoireClusterEndpointRouteBuilderExtensions.MapRemontoireCluster"/>
+    /// maps. Add <c>AddServer()</c> from <c>Remontoire.Server</c> for the client and admin endpoints.
     /// </summary>
     /// <param name="builder">The builder returned by <c>AddRemontoire()</c>.</param>
     /// <param name="configure">A delegate that configures the <see cref="RemontoireClusterOptions"/>.</param>
@@ -30,14 +30,8 @@ public static class RemontoireClusterBuilderExtensions {
                 nameof(configure));
 
         var services = builder.Services;
+        NodeServices.Add(services, hostsMetaGroupReplica: options.MetaGroup is not null);
         services.AddSingleton(Options.Create(options));
-        services.AddSingleton<RaftReplicaRegistry>();
-        services.AddSingleton<MessagingGroupRegistry>();
-        services.AddSingleton<LeaderAddressDirectory>();
-        services.AddSingleton<ShardAssignmentTable>();
-        services.AddSingleton<MetaLogJournal>();
-        services.AddSingleton<MigrationAdmissionGate>();
-        services.AddSingleton<ReshardOrchestrator>();
         services.AddHostedService<RaftReplicaHostedService>();
         services.AddGrpc();
         return builder;

@@ -10,12 +10,13 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Client.V1;
+using Remontoire.Engine;
 using Remontoire.Messaging;
 using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Cluster;
-using Remontoire.Cluster.Grpc;
+using Remontoire.Server;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 using Remontoire.Tests;
@@ -86,6 +87,7 @@ public class RemontoireGrpcClusterTests {
         builder.Services.AddSingleton<ShardAssignmentTable>();
         builder.Services.AddSingleton<MetaLogJournal>();
         builder.Services.AddSingleton<MigrationAdmissionGate>();
+        builder.Services.AddSingleton<MessagingOperations>();
 
         var app = builder.Build();
         app.MapGrpcService<RaftTransportGrpcService>();

@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using FluentAssertions;
 using Remontoire.Cluster;
+using Remontoire.Engine;
 using Remontoire.Storage;
 
 namespace Remontoire.Messaging;
@@ -37,6 +38,23 @@ public class AckIndexApplierTests {
             shardLog.TryPost(new WalRecordCommitted(AckRecord("group-1", 0)));
 
             (await WaitUntilAsync(() => ackIndex.GetOrCreate("group-1").IsAcked(0))).Should().BeTrue();
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AppliedIndex_follows_every_record_including_ones_the_ack_index_ignores() {
+        var directory = CreateTempDirectory();
+        try {
+            await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+            var ackIndex = new AckIndex();
+            await using var applier = new AckIndexApplier(shardLog, ackIndex);
+
+            shardLog.TryPost(new WalRecordCommitted(new WalRecord(WalRecordType.NoOp, RaftTerm: 1, RaftIndex: 7, LogicalOffset: 0,
+                TimestampMicros: 0, ReadOnlyMemory<byte>.Empty, [], ReadOnlyMemory<byte>.Empty)));
+
+            (await WaitUntilAsync(() => applier.AppliedIndex == 7)).Should().BeTrue();
         } finally {
             Directory.Delete(directory, recursive: true);
         }
