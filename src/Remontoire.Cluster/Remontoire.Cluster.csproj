@@ -27,7 +27,6 @@
     <ProjectReference Include="..\Remontoire.Storage\Remontoire.Storage.csproj" PrivateAssets="all" />
     <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" PrivateAssets="all" />
     <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" PrivateAssets="all" />
-    <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,17 +1,38 @@
 using System.Collections.Concurrent;
 using System.Text;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
 using Remontoire;
 using Remontoire.Engine;
 
 // Remontoire embedded in a web app: POST /greetings?name=… publishes a greeting, a background
 // consumer handles and acks each one, and GET /greetings lists the greetings handled since start.
 // The data lives in the setting Remontoire:DataDirectory ("data" by default).
+// The host owns observability: health at /health/live and /health/ready, Prometheus metrics at
+// /metrics, and traces over OTLP once OTEL_EXPORTER_OTLP_ENDPOINT is set. Requests are traced as
+// well: a publish span is the child of its request, and an untraced request would drop it.
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRemontoire().AddEmbedded(options => options.DataDirectory = builder.Configuration["Remontoire:DataDirectory"] ?? "data");
 builder.Services.AddSingleton<HandledGreetings>();
 builder.Services.AddHostedService<GreetingConsumer>();
 
+builder.Services.AddHealthChecks()
+    .AddRemontoireLiveness()
+    .AddRemontoireReadiness()
+    .AddRemontoireDiskSpace();
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics => metrics.AddMeter("Remontoire").AddPrometheusExporter())
+    .WithTracing(tracing => {
+        tracing.AddSource("Remontoire").AddAspNetCoreInstrumentation();
+        if (builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"] is not null)
+            tracing.AddOtlpExporter();
+    });
+
 var app = builder.Build();
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = check => check.Tags.Contains("live") });
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") });
+app.MapPrometheusScrapingEndpoint();
 app.MapPost("/greetings", async (string name, IRemontoireProducer producer) => {
     var result = await producer.PublishAsync(GreetingConsumer.StreamName, partitionKey: name, Encoding.UTF8.GetBytes(name));
     return Results.Accepted(value: new { result.Offset });

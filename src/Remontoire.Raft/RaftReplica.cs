@@ -163,7 +163,7 @@ public sealed partial class RaftReplica(
             } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
                 break;
             } catch (Exception ex) {
-                logger?.LogError(ex, "Unhandled error processing {MessageType} in {ShardGroupId}", message.GetType().Name, GroupId);
+                logger?.LogError(ex, "Unhandled error processing {MessageType} in {GroupId}", message.GetType().Name, GroupId);
             }
         }
     }

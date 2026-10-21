@@ -85,7 +85,7 @@ sealed partial class EmbeddedRemontoire(
         await foreach (var handle in MessagingOperations.ConsumeAsync(shardLog, ackIndex, consumerGroup, cancellationToken)) {
             RemontoireMessage message;
             using (handle) {
-                MessagingOperations.LinkToStoredCorrelationContext(handle.Entry.Headers);
+                using var receive = MessagingOperations.StartReceiveActivity(streamName, consumerGroup, handle.Entry.Headers);
                 message = ToMessage(handle.Entry);
             }
 
@@ -97,7 +97,7 @@ sealed partial class EmbeddedRemontoire(
     public async Task AckAsync(string streamName, string consumerGroup, int shardId, long offset, CancellationToken cancellationToken = default) {
         StreamConfig(streamName);
         var (replica, shardLog, ackIndex) = Resolve(streamName, virtualShardIndex: 0);
-        await operations.AckAsync(streamName, shardId, consumerGroup, [(ulong)offset], replica, shardLog, ackIndex, cancellationToken);
+        await operations.AckAsync(streamName, consumerGroup, [(ulong)offset], replica, shardLog, ackIndex, cancellationToken);
     }
 
     StreamShardingConfig StreamConfig(string streamName) =>

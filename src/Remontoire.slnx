@@ -3,7 +3,6 @@
     <Project Path="Remontoire.Storage/Remontoire.Storage.csproj" />
     <Project Path="Remontoire.Raft/Remontoire.Raft.csproj" />
     <Project Path="Remontoire.Messaging/Remontoire.Messaging.csproj" />
-    <Project Path="Remontoire.Observability/Remontoire.Observability.csproj" />
   </Folder>
   <Folder Name="/Packages/">
     <Project Path="Remontoire/Remontoire.csproj" />

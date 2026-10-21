@@ -65,6 +65,7 @@ public class ReshardEndToEndTests {
         builder.Services.AddSingleton<LeaderAddressDirectory>();
         builder.Services.AddSingleton<ShardAssignmentTable>();
         builder.Services.AddSingleton<MigrationAdmissionGate>();
+        builder.Services.AddSingleton<RemontoireMetrics>();
         builder.Services.AddSingleton<MessagingOperations>();
 
         var app = builder.Build();

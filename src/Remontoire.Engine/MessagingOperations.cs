@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Remontoire.Messaging;
-using Remontoire.Observability;
 using Remontoire.Raft;
 using Remontoire.Sharding;
 using Remontoire.Storage;
@@ -15,18 +14,18 @@ namespace Remontoire.Engine;
 /// the group, and answering when it isn't hosted here, stays with the caller.
 /// </summary>
 /// <param name="assignmentTable">The source of every stream's consumer-group policies.</param>
-public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
+/// <param name="metrics">Records the published and acknowledged messages.</param>
+public sealed class MessagingOperations(ShardAssignmentTable assignmentTable, RemontoireMetrics metrics) {
     /// <summary>
-    /// The header key a message's own correlation id rides under — durably stored alongside the
-    /// message (the existing free-form headers mechanism), so a later Consume/Ack of that same
-    /// message can recover the same value. Unified with OpenTelemetry's own trace id rather than
-    /// inventing a second, parallel id scheme.
+    /// The header a message's trace context rides under, in W3C <c>traceparent</c> format: stored
+    /// with the message at publish, so every later receive of it can link back to the publish.
     /// </summary>
-    public const string CorrelationIdHeaderKey = "correlation-id";
+    public const string TraceParentHeaderKey = "traceparent";
 
     /// <summary>
-    /// Proposes one message to <paramref name="replica"/> and completes once it is committed.
-    /// Without a caller-supplied correlation id, the current trace id is stored as one.
+    /// Proposes one message to <paramref name="replica"/> in a <c>publish</c> span and completes
+    /// once it is committed. Unless the caller supplied one, the current trace context is stored
+    /// as the message's <c>traceparent</c> header.
     /// </summary>
     /// <param name="streamName">The stream, for the metrics.</param>
     /// <param name="replica">The replica of the group serving the message's virtual shard.</param>
@@ -44,17 +43,21 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken
     ) {
+        // Current from here on: the propose below captures it as the parent of its Raft spans, and
+        // its context is the one stored. Without a listener, the caller's own context (if any) is
+        // stored instead.
+        using var activity = RemontoireActivitySource.Source.StartActivity($"publish {streamName}", ActivityKind.Producer);
+        activity?.SetTag("messaging.system", "remontoire")
+            .SetTag("messaging.operation.type", "send")
+            .SetTag("messaging.operation.name", "publish")
+            .SetTag("messaging.destination.name", streamName);
+
         var storedHeaders = headers.ToList();
-        // If the caller didn't already supply its own correlation-id, the current trace-id doubles
-        // as one for this message — every later Consume/Ack of it can then link back to this same
-        // Publish trace, even though tracing itself never forces one unbroken trace across both.
-        if (Activity.Current?.Id is { } currentTraceparent && !storedHeaders.Any(header => HeaderKeyEquals(header, CorrelationIdHeaderKey)))
-            storedHeaders.Add(new Header(Encoding.UTF8.GetBytes(CorrelationIdHeaderKey), Encoding.UTF8.GetBytes(currentTraceparent)));
+        if (Activity.Current?.Id is { } traceparent && !storedHeaders.Any(header => HeaderKeyEquals(header, TraceParentHeaderKey)))
+            storedHeaders.Add(new Header(Encoding.UTF8.GetBytes(TraceParentHeaderKey), Encoding.UTF8.GetBytes(traceparent)));
 
         var result = await replica.ProposeAsync(new AppendRequest(partitionKey, storedHeaders, payload), cancellationToken);
-        RemontoireMetrics.IngestMessagesTotal.Add(1,
-            new KeyValuePair<string, object?>("stream", streamName),
-            new KeyValuePair<string, object?>("shard", replica.GroupId));
+        metrics.RecordPublished(streamName, replica.GroupId);
         return result;
     }
 
@@ -63,7 +66,6 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
     /// group's ack mode asks: through Raft in strict mode, locally on the leader in checkpoint mode.
     /// </summary>
     /// <param name="streamName">The stream.</param>
-    /// <param name="shardId">The virtual shard, for the metrics.</param>
     /// <param name="consumerGroup">The consumer group.</param>
     /// <param name="offsets">The acknowledged offsets.</param>
     /// <param name="replica">The replica of the group serving the virtual shard.</param>
@@ -73,7 +75,6 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
     /// <exception cref="NotLeaderException"><paramref name="replica"/> doesn't lead its group.</exception>
     public async Task AckAsync(
         string streamName,
-        int shardId,
         string consumerGroup,
         IReadOnlyList<ulong> offsets,
         RaftReplica replica,
@@ -100,7 +101,7 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
             await replica.ProposeAsync(new AckRequest(consumerGroup, offsets), cancellationToken);
         }
 
-        RecordAckMetrics(streamName, shardId, consumerGroup, offsets, shardLog);
+        RecordAckMetrics(streamName, replica.GroupId, consumerGroup, offsets, shardLog);
     }
 
     /// <summary>
@@ -136,40 +137,53 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
         [EnumeratorCancellation] CancellationToken cancellationToken
     ) {
         // ShardLog's own reads are point-in-time snapshots, so this alternates draining what's
-        // currently available with waiting for the next Append.
+        // currently available with waiting for the next Append. The wait is taken before the read:
+        // an Append applied after the snapshot but before the wait would otherwise go unnoticed
+        // until the next one.
         var offset = ackIndex.GetOrCreate(consumerGroup).LowWatermark; // exclusive — already the first not-yet-acked offset
         while (true) {
+            var appended = shardLog.WaitForAppendAsync(cancellationToken);
             await foreach (var handle in shardLog.ReadFromAsync(offset, cancellationToken)) {
                 offset = handle.Entry.LogicalOffset + 1;
                 yield return handle;
             }
 
-            await shardLog.WaitForAppendAsync(cancellationToken);
+            await appended;
         }
     }
 
     /// <summary>
-    /// Links the current activity to the trace a message's stored correlation id names — a Link,
-    /// never a parent: a trace that stayed open from Publish until a possibly-much-later,
-    /// possibly-repeated, possibly-never-arriving Consume wouldn't match how tracing backends expect
-    /// a trace's lifetime to behave, and a Link is the only shape that survives independent consumer
-    /// groups each reading the same message at their own, unrelated time.
+    /// Starts the <c>receive</c> span of one delivered message: a trace of its own, without a parent,
+    /// linked to the publish its <c>traceparent</c> header names. A link, never a parent: a trace
+    /// that stayed open from a publish until a possibly much later, possibly repeated receive
+    /// wouldn't match how tracing backends expect a trace to behave, and every consumer group
+    /// receives the same message at its own time. Without a parent, too: a consume stream stays open
+    /// for hours, and thousands of children under its span would make one unusable trace.
     /// </summary>
+    /// <param name="streamName">The stream.</param>
+    /// <param name="consumerGroup">The consumer group receiving the message.</param>
     /// <param name="headers">The message's stored headers.</param>
-    public static void LinkToStoredCorrelationContext(IReadOnlyList<Header> headers) {
-        if (Activity.Current is not { } activity)
-            return;
+    /// <returns>The started span, to dispose once the message is handed over; <see langword="null"/> when nobody listens.</returns>
+    public static Activity? StartReceiveActivity(string streamName, string consumerGroup, IReadOnlyList<Header> headers) {
+        if (!RemontoireActivitySource.Source.HasListeners())
+            return null;
 
+        ActivityLink[]? links = null;
         foreach (var header in headers) {
-            if (!HeaderKeyEquals(header, CorrelationIdHeaderKey))
+            if (!HeaderKeyEquals(header, TraceParentHeaderKey))
                 continue;
 
-            var traceparent = Encoding.UTF8.GetString(header.Value.Span);
-            if (ActivityContext.TryParse(traceparent, traceState: null, out var linkedContext))
-                activity.AddLink(new ActivityLink(linkedContext));
-
-            return;
+            if (ActivityContext.TryParse(Encoding.UTF8.GetString(header.Value.Span), traceState: null, out var publishContext))
+                links = [new ActivityLink(publishContext)];
+            break;
         }
+
+        return RemontoireActivitySource.StartActivity($"receive {streamName}", parentContext: null, ActivityKind.Consumer, links)
+            ?.SetTag("messaging.system", "remontoire")
+            .SetTag("messaging.operation.type", "receive")
+            .SetTag("messaging.operation.name", "receive")
+            .SetTag("messaging.destination.name", streamName)
+            .SetTag("messaging.consumer.group.name", consumerGroup);
     }
 
     /// <summary>
@@ -185,16 +199,13 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
     static bool HeaderKeyEquals(Header header, string key) =>
         Encoding.UTF8.GetByteCount(key) == header.Key.Length && Encoding.UTF8.GetString(header.Key.Span) == key;
 
-    // remontoire_ack_messages_total: no consumer_group dimension risk here — a plain counter is
-    // cheap regardless of cardinality. remontoire_ack_latency_seconds needs one ShardLog lookup per
-    // acked offset to read back the message's own ingest timestamp — never consumer_group-tagged,
-    // since a histogram (unlike a counter) keeps per-tag-combination state for the process's whole
-    // lifetime, and consumer groups are the least bounded dimension available here.
-    static void RecordAckMetrics(string streamName, int shardId, string consumerGroup, IReadOnlyList<ulong> offsets, ShardLog shardLog) {
-        RemontoireMetrics.AckMessagesTotal.Add(offsets.Count,
-            new KeyValuePair<string, object?>("stream", streamName),
-            new KeyValuePair<string, object?>("shard", shardId.ToString()),
-            new KeyValuePair<string, object?>("consumer_group", consumerGroup));
+    // The acked counter carries consumer_group: a plain counter is cheap regardless of
+    // cardinality. The latency needs one ShardLog lookup per acked offset to read back the
+    // message's ingest timestamp, and is never consumer_group-tagged: a histogram keeps
+    // per-tag-combination state for the process's whole lifetime, and consumer groups are the
+    // least bounded dimension available here.
+    void RecordAckMetrics(string streamName, string groupId, string consumerGroup, IReadOnlyList<ulong> offsets, ShardLog shardLog) {
+        metrics.RecordAcked(streamName, groupId, consumerGroup, offsets.Count);
 
         var nowMicros = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() * 1000;
         foreach (var offset in offsets) {
@@ -208,9 +219,7 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable) {
                 // between them can make TimestampMicros briefly exceed nowMicros, which a plain
                 // ulong subtraction would silently wrap into a multi-billion-second latency instead
                 // of clamping to zero.
-                RemontoireMetrics.AckLatencySeconds.Record(Math.Max(0L, (long)nowMicros - (long)handle.Entry.TimestampMicros) / 1_000_000.0,
-                    new KeyValuePair<string, object?>("stream", streamName),
-                    new KeyValuePair<string, object?>("shard", shardId.ToString()));
+                metrics.RecordAckLatency(streamName, groupId, Math.Max(0L, (long)nowMicros - (long)handle.Entry.TimestampMicros) / 1_000_000.0);
         }
     }
 }

@@ -1,10 +1,12 @@
 using System.Net;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Remontoire;
 using Remontoire.Cluster;
+using Remontoire.Engine;
 using Remontoire.Server;
 
 // One node of a three-node cluster: every node hosts the data group "group-1" and a replica of the
@@ -16,6 +18,8 @@ using Remontoire.Server;
 //   REMONTOIRE_PEER_CA             the CA that signed every node certificate (.crt)
 const int ClientPort = 6000;
 const int PeerPort = 6001;
+// Plain HTTP/1.1 for probes: the client and peer ports speak HTTP/2 only.
+const int HealthPort = 8080;
 
 var nodeId = Environment.GetEnvironmentVariable("REMONTOIRE_NODE_ID")
     ?? throw new InvalidOperationException("REMONTOIRE_NODE_ID is not set.");
@@ -39,6 +43,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddJsonConsole(options => options.IncludeScopes = true);
 
 builder.WebHost.ConfigureKestrel(options => {
+    options.Listen(IPAddress.Any, HealthPort, listen => listen.Protocols = HttpProtocols.Http1);
     options.Listen(IPAddress.Any, ClientPort, listen => listen.Protocols = HttpProtocols.Http2);
     options.Listen(IPAddress.Any, PeerPort, listen => {
         listen.Protocols = HttpProtocols.Http2;
@@ -60,8 +65,14 @@ builder.Services.AddRemontoire().AddCluster(options => {
             RemoteCertificateValidationCallback = (_, certificate, _, _) => certificate is X509Certificate2 candidate && IsSignedBy(peerCa!, candidate),
         };
 }).AddServer();
+builder.Services.AddHealthChecks()
+    .AddRemontoireLiveness()
+    .AddRemontoireReadiness()
+    .AddRemontoireDiskSpace();
 
 var app = builder.Build();
+app.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = check => check.Tags.Contains("live") }).RequireHost($"*:{HealthPort}");
+app.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") }).RequireHost($"*:{HealthPort}");
 app.MapRemontoireCluster().RequireHost($"*:{PeerPort}");
 app.MapRemontoire().RequireHost($"*:{ClientPort}");
 app.MapRemontoireAdmin().RequireHost($"*:{ClientPort}");

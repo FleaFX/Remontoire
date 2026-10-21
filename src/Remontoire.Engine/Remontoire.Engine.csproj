@@ -11,6 +11,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Diagnostics" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.8" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.8" />
   </ItemGroup>
 
@@ -20,7 +22,6 @@
     <ProjectReference Include="..\Remontoire.Storage\Remontoire.Storage.csproj" PrivateAssets="all" />
     <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" PrivateAssets="all" />
     <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" PrivateAssets="all" />
-    <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
@@ -40,7 +41,6 @@
       <BuildOutputInPackage Include="$(OutputPath)Remontoire.Storage.dll" Condition="Exists('$(OutputPath)Remontoire.Storage.dll')" />
       <BuildOutputInPackage Include="$(OutputPath)Remontoire.Raft.dll" Condition="Exists('$(OutputPath)Remontoire.Raft.dll')" />
       <BuildOutputInPackage Include="$(OutputPath)Remontoire.Messaging.dll" Condition="Exists('$(OutputPath)Remontoire.Messaging.dll')" />
-      <BuildOutputInPackage Include="$(OutputPath)Remontoire.Observability.dll" Condition="Exists('$(OutputPath)Remontoire.Observability.dll')" />
     </ItemGroup>
   </Target>
 

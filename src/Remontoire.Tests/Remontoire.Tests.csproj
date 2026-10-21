@@ -39,7 +39,6 @@
     <ProjectReference Include="..\Remontoire.Storage\Remontoire.Storage.csproj" />
     <ProjectReference Include="..\Remontoire.Raft\Remontoire.Raft.csproj" />
     <ProjectReference Include="..\Remontoire.Messaging\Remontoire.Messaging.csproj" />
-    <ProjectReference Include="..\Remontoire.Observability\Remontoire.Observability.csproj" />
     <ProjectReference Include="..\Remontoire.Client\Remontoire.Client.csproj" />
     <ProjectReference Include="..\Remontoire.Cluster\Remontoire.Cluster.csproj" />
   </ItemGroup>
