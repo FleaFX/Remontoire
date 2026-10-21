@@ -5,7 +5,7 @@ namespace Remontoire.Raft.Grpc;
 /// <summary>
 /// Resolves an inbound RPC's <c>group_id</c> to the <see cref="RaftReplica"/> that owns it.
 /// Phase 3 registers exactly one; the indirection itself is the day-one reservation for phase 5's
-/// many groups per node — <see cref="RaftTransportGrpcService"/> never hardcodes "the" replica.
+/// many groups per node — <c>RaftTransportGrpcService</c> never hardcodes "the" replica.
 /// </summary>
 public sealed class RaftReplicaRegistry {
     readonly ConcurrentDictionary<string, RaftReplica> _replicas = new();

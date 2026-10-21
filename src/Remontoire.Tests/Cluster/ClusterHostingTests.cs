@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging;
 using Remontoire;
 using Remontoire.Admin.V1;
 using Remontoire.Client;
+using Remontoire.Server;
 
 namespace Remontoire.Cluster;
 
@@ -76,7 +77,7 @@ public class ClusterHostingTests {
                         GroupId = GroupId, NodeId = node.NodeId, DataDirectory = Path.Combine(root, node.NodeId, GroupId), Peers = peers,
                     }];
                     o.MetaGroup = new MetaGroupOptions { NodeId = node.NodeId, DataDirectory = Path.Combine(root, node.NodeId, "meta"), Peers = peers };
-                });
+                }).AddServer();
 
                 var app = builder.Build();
                 app.MapRemontoireCluster().RequireHost($"*:{node.PeerPort}");

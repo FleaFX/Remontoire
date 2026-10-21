@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="Remontoire.Cluster" Version="0.1.0" />
+    <PackageReference Include="Remontoire.Server" Version="0.1.0" />
   </ItemGroup>
 
 </Project>

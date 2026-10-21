@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using FluentAssertions;
 using Google.Protobuf;
+using Remontoire.Engine;
 using Remontoire.Raft.V1;
 using Remontoire.Cluster;
 using Remontoire.Storage;

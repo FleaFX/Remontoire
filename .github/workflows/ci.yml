@@ -26,5 +26,10 @@ jobs:
       - name: Pack
         run: dotnet pack src/Remontoire.slnx --configuration Release --no-build --output src/Samples/LocalPackages
 
-      - name: Build sample against the packages
-        run: dotnet build src/Samples/ClusterSample/ClusterSample.csproj --configuration Release
+      - name: Build the samples against the packages
+        run: |
+          dotnet build src/Samples/ClusterSample/ClusterSample.csproj --configuration Release
+          dotnet build src/Samples/EmbeddedSample/EmbeddedSample.csproj --configuration Release
+
+      - name: Test the embedded sample against the packages
+        run: dotnet test src/Samples/EmbeddedSample.Tests/EmbeddedSample.Tests.csproj --configuration Release

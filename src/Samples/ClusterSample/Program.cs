@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Remontoire;
 using Remontoire.Cluster;
+using Remontoire.Server;
 
 // One node of a three-node cluster: every node hosts the data group "group-1" and a replica of the
 // meta group, with the same members. Configured from the environment (see docker-compose.yml):
@@ -58,7 +59,7 @@ builder.Services.AddRemontoire().AddCluster(options => {
             ClientCertificates = [peerCertificate],
             RemoteCertificateValidationCallback = (_, certificate, _, _) => certificate is X509Certificate2 candidate && IsSignedBy(peerCa!, candidate),
         };
-});
+}).AddServer();
 
 var app = builder.Build();
 app.MapRemontoireCluster().RequireHost($"*:{PeerPort}");

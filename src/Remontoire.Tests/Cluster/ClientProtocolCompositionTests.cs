@@ -1,6 +1,8 @@
 using FluentAssertions;
+using Remontoire.Engine;
 using Remontoire.Messaging;
 using Remontoire.Raft;
+using Remontoire.Server;
 using Remontoire.Storage;
 
 namespace Remontoire.Cluster;

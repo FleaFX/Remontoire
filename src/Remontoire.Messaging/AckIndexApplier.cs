@@ -11,6 +11,7 @@ namespace Remontoire.Messaging;
 public sealed class AckIndexApplier : IAsyncDisposable {
     readonly CancellationTokenSource _cts = new();
     readonly Task _loop;
+    ulong _appliedIndex;
 
     /// <summary>
     /// Starts forwarding immediately — every record already applied replays first, same as any other reader of <see cref="ShardLog.ReadAppliedAsync"/>.
@@ -18,10 +19,19 @@ public sealed class AckIndexApplier : IAsyncDisposable {
     public AckIndexApplier(ShardLog shardLog, AckIndex ackIndex) =>
         _loop = Task.Run(() => RunAsync(shardLog, ackIndex, _cts.Token));
 
-    static async Task RunAsync(ShardLog shardLog, AckIndex ackIndex, CancellationToken cancellationToken) {
+    /// <summary>
+    /// The <see cref="WalRecord.RaftIndex"/> of the last record applied, whatever its type; zero
+    /// before the first. Once it reaches the replica's commit index, the ack index reflects every
+    /// committed ack — what the embedded engine waits for at startup before it serves consumers.
+    /// </summary>
+    public ulong AppliedIndex => Volatile.Read(ref _appliedIndex);
+
+    async Task RunAsync(ShardLog shardLog, AckIndex ackIndex, CancellationToken cancellationToken) {
         try {
-            await foreach (var record in shardLog.ReadAppliedAsync(cancellationToken))
+            await foreach (var record in shardLog.ReadAppliedAsync(cancellationToken)) {
                 await ackIndex.ApplyAsync(record, cancellationToken);
+                Volatile.Write(ref _appliedIndex, record.RaftIndex);
+            }
         } catch (OperationCanceledException) {
             // Expected shutdown path — DisposeAsync cancels and awaits this.
         }

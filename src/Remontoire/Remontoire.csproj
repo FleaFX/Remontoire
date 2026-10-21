@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <PackageId>$(AssemblyName)</PackageId>
     <Title>Remontoire</Title>
-    <Description>Public interfaces and types of Remontoire: producer, consumer, messages, and the builder the hosting packages extend.</Description>
+    <Description>Public interfaces and types of Remontoire: producer, consumer, admin, messages, and the builder the hosting packages extend.</Description>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
   </PropertyGroup>
 

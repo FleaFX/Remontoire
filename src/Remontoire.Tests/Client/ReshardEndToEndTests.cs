@@ -7,12 +7,13 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Grpc.Net.Client;
+using Remontoire.Engine;
 using Remontoire.Messaging;
 using Remontoire.Meta.V1;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
 using Remontoire.Cluster;
-using Remontoire.Cluster.Grpc;
+using Remontoire.Server;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 using Remontoire.Tests;
@@ -64,6 +65,7 @@ public class ReshardEndToEndTests {
         builder.Services.AddSingleton<LeaderAddressDirectory>();
         builder.Services.AddSingleton<ShardAssignmentTable>();
         builder.Services.AddSingleton<MigrationAdmissionGate>();
+        builder.Services.AddSingleton<MessagingOperations>();
 
         var app = builder.Build();
         app.MapGrpcService<RaftTransportGrpcService>();

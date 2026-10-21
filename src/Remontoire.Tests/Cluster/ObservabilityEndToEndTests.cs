@@ -2,6 +2,7 @@ using System.Diagnostics.Metrics;
 using FluentAssertions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Remontoire.Engine;
 using Remontoire.Observability;
 using Remontoire.Raft.Grpc;
 using Remontoire.Sharding;
