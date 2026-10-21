@@ -10,10 +10,11 @@ public class CallWithRedirectAsyncTests {
     static readonly IReadOnlyList<Uri> Members = [MemberAddress];
 
     static RemontoireConnection Connect(int maxRedirectAttempts = 5) =>
-        new(new RemontoireClientOptions(
-            MetaGroupSeedAddresses: [MemberAddress],
-            MaxRedirectAttempts: maxRedirectAttempts,
-            RedirectRetryDelay: TimeSpan.Zero));
+        new(new RemontoireClientOptions {
+            MetaGroupSeedAddresses = [MemberAddress],
+            MaxRedirectAttempts = maxRedirectAttempts,
+            RedirectRetryDelay = TimeSpan.Zero,
+        });
 
     static bool NeverShardMigrating(string reply) => false;
 

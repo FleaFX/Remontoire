@@ -26,6 +26,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     readonly ShardAssignmentTable _table = new();
     readonly ShardAssignmentWatcher _watcher;
     readonly GrpcChannel _seedChannel;
+    bool _disposed;
 
     /// <summary>
     /// Starts a <see cref="ShardAssignmentWatcher"/> against the first of
@@ -263,9 +264,15 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     static DateTimeOffset ToDateTimeOffset(ulong micros) => DateTimeOffset.UnixEpoch.AddTicks((long)micros * 10);
 
     /// <summary>
-    /// Stops the assignment watcher and disposes every underlying channel.
+    /// Stops the assignment watcher and disposes every underlying channel. A second call does
+    /// nothing.
     /// </summary>
     public void Dispose() {
+        // AddClient's container disposes this once per registration it resolves through.
+        if (_disposed)
+            return;
+        _disposed = true;
+
         _watcher.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _seedChannel.Dispose();
 

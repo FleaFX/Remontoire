@@ -2,7 +2,7 @@ using System.Diagnostics;
 using FluentAssertions;
 using Google.Protobuf;
 using Remontoire.Raft.V1;
-using Remontoire.Server;
+using Remontoire.Cluster;
 using Remontoire.Storage;
 using Remontoire.Storage.Serialization;
 

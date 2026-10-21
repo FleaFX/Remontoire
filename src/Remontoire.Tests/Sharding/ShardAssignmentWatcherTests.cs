@@ -8,8 +8,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Remontoire.Meta.V1;
 using Remontoire.Raft;
-using Remontoire.Server;
-using Remontoire.Server.Grpc;
+using Remontoire.Cluster;
+using Remontoire.Cluster.Grpc;
 using Remontoire.Storage;
 using Remontoire.Tests;
 

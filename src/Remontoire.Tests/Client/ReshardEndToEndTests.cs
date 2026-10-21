@@ -11,8 +11,8 @@ using Remontoire.Messaging;
 using Remontoire.Meta.V1;
 using Remontoire.Raft;
 using Remontoire.Raft.Grpc;
-using Remontoire.Server;
-using Remontoire.Server.Grpc;
+using Remontoire.Cluster;
+using Remontoire.Cluster.Grpc;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 using Remontoire.Tests;
@@ -189,8 +189,9 @@ public class ReshardEndToEndTests {
                     $"fromGroupRegistered: {fromGroupTable.TryGetGroup(FromGroupId, out _)}, toGroupRegistered: {fromGroupTable.TryGetGroup(ToGroupId, out _)}, " +
                     $"assignment: {(fromGroupTable.TryGetAssignment(StreamName, 0, out var finalAssignment) ? finalAssignment.ToString() : "none")}");
 
-            using var connection = new RemontoireConnection(new RemontoireClientOptions(
-                MetaGroupSeedAddresses: [metaSeedAddress], MaxRedirectAttempts: 20, RedirectRetryDelay: TimeSpan.FromMilliseconds(50)));
+            using var connection = new RemontoireConnection(new RemontoireClientOptions {
+                MetaGroupSeedAddresses = [metaSeedAddress], MaxRedirectAttempts = 20, RedirectRetryDelay = TimeSpan.FromMilliseconds(50),
+            });
 
             var published = new List<(long Offset, string Payload)>();
             for (var i = 0; i < 5; i++) {
