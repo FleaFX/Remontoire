@@ -6,12 +6,14 @@
     <Nullable>enable</Nullable>
     <PackageId>$(AssemblyName)</PackageId>
     <Title>Remontoire</Title>
-    <Description>Public interfaces and types of Remontoire: producer, consumer, admin, messages, and the builder the hosting packages extend.</Description>
+    <Description>Public interfaces and types of Remontoire: producer, consumer, admin, messages, declarations, and the builder the hosting packages extend.</Description>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
   </ItemGroup>
 
 </Project>

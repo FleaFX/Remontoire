@@ -60,6 +60,9 @@ public sealed class RemontoireClientGrpcService(
     public override async Task<AckReply> Ack(Remontoire.Client.V1.AckRequest request, ServerCallContext context) {
         if (!assignmentTable.TryGetStreamConfig(request.StreamName, out _))
             throw new RpcException(new Status(StatusCode.NotFound, $"No stream '{request.StreamName}' is hosted here."));
+        if (!assignmentTable.TryGetConsumerGroupPolicy(request.StreamName, request.ConsumerGroup, out _))
+            throw new RpcException(new Status(StatusCode.NotFound,
+                $"No consumer group '{request.ConsumerGroup}' is declared on stream '{request.StreamName}'."));
 
         var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out var shardLog, out var ackIndex);
         if (redirect is not null)
@@ -80,6 +83,9 @@ public sealed class RemontoireClientGrpcService(
     public override async Task Consume(ConsumeRequest request, IServerStreamWriter<ConsumeReply> responseStream, ServerCallContext context) {
         if (!assignmentTable.TryGetStreamConfig(request.StreamName, out _))
             throw new RpcException(new Status(StatusCode.NotFound, $"No stream '{request.StreamName}' is hosted here."));
+        if (!assignmentTable.TryGetConsumerGroupPolicy(request.StreamName, request.ConsumerGroup, out _))
+            throw new RpcException(new Status(StatusCode.NotFound,
+                $"No consumer group '{request.ConsumerGroup}' is declared on stream '{request.StreamName}'."));
 
         var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out var shardLog, out var ackIndex);
         if (redirect is not null) {

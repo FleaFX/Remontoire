@@ -75,7 +75,7 @@ sealed class EmbeddedHostedService(
 
                 // A group id names a directory: one that came in over the admin endpoint and isn't a
                 // safe name is never opened.
-                if (!EmbeddedRemontoire.IsValidName(cutover.ToGroupId)) {
+                if (!NodeAdmin.IsValidName(cutover.ToGroupId)) {
                     logger.LogError("Group {GroupId} of stream {StreamName} is not a valid directory name; it is not opened.",
                         cutover.ToGroupId, cutover.StreamName);
                     continue;

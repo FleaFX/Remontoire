@@ -3,6 +3,22 @@ using FluentAssertions;
 namespace Remontoire.Engine;
 
 public class MetaLogJournalTests {
+    public class Contains {
+        [Fact]
+        public void Contains_is_true_from_the_appended_version_on() {
+            var journal = new MetaLogJournal();
+
+            journal.Contains(0).Should().BeFalse();
+
+            journal.Append(0, "first"u8.ToArray(), 0, []);
+            journal.Append(1, "second"u8.ToArray(), 0, []);
+
+            journal.Contains(0).Should().BeTrue();
+            journal.Contains(1).Should().BeTrue();
+            journal.Contains(2).Should().BeFalse();
+        }
+    }
+
     public class Snapshot {
         [Fact]
         public void Returns_version_zero_and_no_records_when_empty() {

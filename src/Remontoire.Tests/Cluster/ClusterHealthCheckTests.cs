@@ -23,6 +23,7 @@ public class ClusterHealthCheckTests {
             builder.Services.AddRemontoire().AddCluster(o => {
                 o.Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = groupDirectory }];
                 o.MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory };
+                o.ClientAddress = "http://127.0.0.1:1";
             });
             builder.Services.AddHealthChecks().AddRemontoireReadiness();
             host = builder.Build();

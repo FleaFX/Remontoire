@@ -43,7 +43,7 @@ public class ObservabilityEndToEndTests {
                 Groups = [new RaftGroupOptions { GroupId = GroupId, NodeId = "node-1", DataDirectory = directory }],
             }),
             TestNodes.Node(raftRegistry, messagingRegistry, assignmentTable, metrics: metrics, loggerFactory: loggerFactory),
-            new LeaderAddressDirectory(), assignmentTable, loggerFactory);
+            new LeaderAddressDirectory(), assignmentTable, loggerFactory, []);
 
         try {
             await service.StartAsync(CancellationToken.None);

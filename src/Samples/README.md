@@ -29,6 +29,13 @@ Health lives on port 8080, plain HTTP/1.1 (`/health/live` and `/health/ready`), 
 the compose network: the client and peer ports speak HTTP/2 only, which an HTTP/1.1 probe cannot
 talk to.
 
+Nodes take no declarations: every service that produces or consumes declares what it owns itself,
+as a client — `AddRemontoire().AddClient(...).AddStream("orders")` for the stream a service
+publishes to, `.AddConsumerGroup("orders", "billing")` for the group it consumes with. The client
+applies the declarations through the admin endpoint on the client port when its host starts. Each
+node registers the data group it hosts in the meta log under its `ClientAddress`, which is how
+clients and new streams find the cluster's groups.
+
 ## TLS on the peer port
 
 Only the peer port uses TLS with a mandatory client certificate; the client port stays plain, and

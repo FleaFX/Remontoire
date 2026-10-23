@@ -27,6 +27,13 @@ public sealed class RemontoireClusterOptions {
     public List<string> MetaGroupSeedAddresses { get; set; } = [];
 
     /// <summary>
+    /// The address of this node's client endpoint (<c>MapRemontoire</c>), as clients reach it.
+    /// Required on a node that hosts a meta-group replica and data groups: it registers those groups
+    /// in the meta log, itself included at this address, so clients and new streams find them.
+    /// </summary>
+    public string? ClientAddress { get; set; }
+
+    /// <summary>
     /// Optional hook to configure the <see cref="SocketsHttpHandler"/> of every channel this node
     /// opens — the Raft channels to its peers (after the transport's keep-alive settings) and the
     /// channel to the meta-group seed — called once per channel on a fresh handler. For example

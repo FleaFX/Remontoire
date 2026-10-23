@@ -58,7 +58,8 @@ public class EmbeddedTests {
             var admin = host1.Services.GetRequiredService<IRemontoireAdmin>();
             var producer = host1.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host1.Services.GetRequiredService<IRemontoireConsumer>();
-            await admin.CreateStreamAsync("orders");
+            await admin.EnsureStreamAsync("orders");
+            await admin.EnsureConsumerGroupAsync("orders", "billing");
 
             (await producer.PublishAsync("orders", "key-1", "one"u8.ToArray())).Offset.Should().Be(0);
             (await producer.PublishAsync("orders", "key-2", "two"u8.ToArray())).Offset.Should().Be(1);
@@ -92,19 +93,23 @@ public class EmbeddedTests {
     }
 
     [Fact]
-    public async Task CreateStreamAsync_does_nothing_for_an_existing_stream() {
+    public async Task EnsureStreamAsync_does_nothing_for_an_existing_stream() {
         var dataDirectory = NewDataDirectory();
         IHost? host = null;
         try {
             host = await StartAsync(dataDirectory);
             var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
             var producer = host.Services.GetRequiredService<IRemontoireProducer>();
+            var journal = host.Services.GetRequiredService<MetaLogJournal>();
 
-            await admin.CreateStreamAsync("orders");
-            await admin.CreateStreamAsync("orders");
+            await admin.EnsureStreamAsync("orders");
+            var recordsAfterFirst = journal.Snapshot().Records.Count;
+
+            await admin.EnsureStreamAsync("orders");
 
             (await producer.PublishAsync("orders", "key-1", "one"u8.ToArray())).Offset.Should().Be(0);
             host.Services.GetRequiredService<ShardAssignmentTable>().EnumerateAssignments().Should().HaveCount(1);
+            journal.Snapshot().Records.Count.Should().Be(recordsAfterFirst, "a declaration that matches the current state proposes nothing");
         } finally {
             if (host is not null)
                 await StopAsync(host);
@@ -119,14 +124,14 @@ public class EmbeddedTests {
     [InlineData("__meta__")]
     [InlineData("orders/eu")]
     [InlineData(".hidden")]
-    public async Task CreateStreamAsync_rejects_a_name_that_is_not_a_safe_directory_name(string streamName) {
+    public async Task EnsureStreamAsync_rejects_a_name_that_is_not_a_safe_directory_name(string streamName) {
         var dataDirectory = NewDataDirectory();
         IHost? host = null;
         try {
             host = await StartAsync(dataDirectory);
             var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
 
-            var act = () => admin.CreateStreamAsync(streamName);
+            var act = () => admin.EnsureStreamAsync(streamName);
 
             (await act.Should().ThrowAsync<ArgumentException>()).And.ParamName.Should().Be("streamName");
         } finally {
@@ -166,12 +171,14 @@ public class EmbeddedTests {
             var producer = host.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
             var table = host.Services.GetRequiredService<ShardAssignmentTable>();
-            await admin.CreateStreamAsync("orders");
-            await admin.CreateStreamAsync("orders.__deadletter__");
+            await admin.EnsureStreamAsync("orders");
+            await admin.EnsureStreamAsync("orders.__deadletter__");
+            await admin.EnsureConsumerGroupAsync("orders", "mandatory-group");
+            await admin.EnsureConsumerGroupAsync("orders", "best-effort-group", new ConsumerGroupOptions { Mandatory = false });
+            await admin.EnsureConsumerGroupAsync("orders.__deadletter__", "dead-letter-reader");
 
             await ProposeMetaAsync(host, new SetStreamRetentionPolicy("orders",
                 AuditRetention: TimeSpan.Zero, MaxRetention: TimeSpan.FromMilliseconds(100), MaxSizeBytesPerVirtualShard: null));
-            await ProposeMetaAsync(host, new SetConsumerGroupMandatory("orders", "best-effort-group", false));
 
             (await ConditionPoller.WaitUntilAsync(() => table.GetRetentionPolicy("orders").MaxRetention == TimeSpan.FromMilliseconds(100),
                 TimeSpan.FromSeconds(2))).Should().BeTrue();
@@ -202,15 +209,11 @@ public class EmbeddedTests {
             var admin = host1.Services.GetRequiredService<IRemontoireAdmin>();
             var producer = host1.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host1.Services.GetRequiredService<IRemontoireConsumer>();
-            var table = host1.Services.GetRequiredService<ShardAssignmentTable>();
             var messagingRegistry = host1.Services.GetRequiredService<MessagingGroupRegistry>();
-            await admin.CreateStreamAsync("orders");
+            await admin.EnsureStreamAsync("orders");
+            await admin.EnsureConsumerGroupAsync("orders", "billing", new ConsumerGroupOptions { AckMode = AckMode.Checkpoint });
 
-            await ProposeMetaAsync(host1, new SetConsumerGroupAckMode("orders", "billing", AckMode.Checkpoint));
             await ProposeMetaAsync(host1, new SetStreamCheckpointInterval("orders", Interval: null, OffsetCount: 1));
-
-            (await ConditionPoller.WaitUntilAsync(() => table.GetConsumerGroupPolicy("orders", "billing").Mode == AckMode.Checkpoint,
-                TimeSpan.FromSeconds(2))).Should().BeTrue();
 
             await producer.PublishAsync("orders", "key-1", "one"u8.ToArray());
             await producer.PublishAsync("orders", "key-2", "two"u8.ToArray());
@@ -249,7 +252,7 @@ public class EmbeddedTests {
         try {
             host1 = await StartAsync(dataDirectory, options => options.ClientAddress = new Uri("http://127.0.0.1:1"));
             var admin = host1.Services.GetRequiredService<IRemontoireAdmin>();
-            await admin.CreateStreamAsync("orders");
+            await admin.EnsureStreamAsync("orders");
             await StopAsync(host1);
             host1 = null;
 
@@ -264,6 +267,51 @@ public class EmbeddedTests {
                 await StopAsync(host1);
             if (host2 is not null)
                 await StopAsync(host2);
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConsumeAsync_for_an_undeclared_consumer_group_throws() {
+        var dataDirectory = NewDataDirectory();
+        IHost? host = null;
+        try {
+            host = await StartAsync(dataDirectory);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
+            await admin.EnsureStreamAsync("orders");
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await using var enumerator = consumer.ConsumeAsync("orders", "undeclared-group", cts.Token).GetAsyncEnumerator(cts.Token);
+
+            var act = () => enumerator.MoveNextAsync().AsTask();
+
+            (await act.Should().ThrowAsync<ArgumentException>()).Which.Message.Should().Contain("undeclared-group");
+        } finally {
+            if (host is not null)
+                await StopAsync(host);
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AckAsync_for_an_undeclared_consumer_group_throws() {
+        var dataDirectory = NewDataDirectory();
+        IHost? host = null;
+        try {
+            host = await StartAsync(dataDirectory);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
+            await admin.EnsureStreamAsync("orders");
+
+            var act = () => consumer.AckAsync("orders", "undeclared-group", 0, 0);
+
+            (await act.Should().ThrowAsync<ArgumentException>()).Which.Message.Should().Contain("undeclared-group");
+        } finally {
+            if (host is not null)
+                await StopAsync(host);
             if (Directory.Exists(dataDirectory))
                 Directory.Delete(dataDirectory, recursive: true);
         }

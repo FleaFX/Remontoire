@@ -3,26 +3,34 @@ using System.Runtime.CompilerServices;
 using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Net.Client;
+using Remontoire.Admin.V1;
 using Remontoire.Client.V1;
 using Remontoire.Meta.V1;
 using Remontoire.Sharding;
+using Duration = Google.Protobuf.WellKnownTypes.Duration;
+using NotLeader = Remontoire.Client.V1.NotLeader;
 
 namespace Remontoire.Client;
 
 /// <summary>
-/// A connection to Remontoire — both producer and consumer, sharing one <see cref="LeaderAddressCache"/>
+/// A connection to Remontoire — producer, consumer and admin, sharing one <see cref="LeaderAddressCache"/>
 /// so a successful call on either side benefits every later call on the same group. One gRPC
 /// channel per address ever needed, opened lazily and reused for the connection's lifetime. A
 /// stream's virtual shard and that shard's current physical group are never configured directly:
 /// a <see cref="ShardAssignmentWatcher"/>, bootstrapped from <see cref="RemontoireClientOptions.MetaGroupSeedAddresses"/>,
 /// keeps a local <see cref="ShardAssignmentTable"/> fresh, and every call resolves against it —
 /// a redirect hint the server sends is trusted the same way even when it points somewhere this
-/// connection has never talked to before, the same authoritative source either way.
+/// connection has never talked to before, the same authoritative source either way. Declarations
+/// go to the admin endpoint of the seeds; descriptions come from the local table.
 /// </summary>
-public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsumer, IDisposable {
+public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsumer, IRemontoireAdmin, IDisposable {
+    // The well-known id of the meta group, for the exceptions of the admin calls.
+    const string MetaGroupId = "__meta__";
+    static readonly TimeSpan DeclarationVisibleTimeout = TimeSpan.FromSeconds(10);
+
     readonly RemontoireClientOptions _options;
     readonly LeaderAddressCache _leaderCache = new();
-    readonly ConcurrentDictionary<Uri, (GrpcChannel Channel, RemontoireClient.RemontoireClientClient Client)> _clients = new();
+    readonly ConcurrentDictionary<Uri, GrpcChannel> _channels = new();
     readonly ShardAssignmentTable _table = new();
     readonly ShardAssignmentWatcher _watcher;
     readonly GrpcChannel _seedChannel;
@@ -93,6 +101,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
 
     /// <inheritdoc />
     public async Task AckAsync(string streamName, string consumerGroup, int shardId, long offset, CancellationToken cancellationToken = default) {
+        RequireConsumerGroup(streamName, consumerGroup);
         // No partition key travels with an ack — virtual shard 0 always, same limitation Consume
         // has, until multi-vshard consumption's own wire contract is settled.
         var (groupId, memberAddresses) = ResolveGroup(streamName, virtualShardIndex: 0);
@@ -106,6 +115,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     /// <inheritdoc />
     public async IAsyncEnumerable<RemontoireMessage> ConsumeAsync(
         string streamName, string consumerGroup, [EnumeratorCancellation] CancellationToken cancellationToken = default) {
+        RequireConsumerGroup(streamName, consumerGroup);
         var (groupId, memberAddresses) = ResolveGroup(streamName, virtualShardIndex: 0);
 
         // NotLeader can only ever appear as the FIRST reply on the stream — once the server
@@ -171,6 +181,82 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
                 await Task.Delay(_options.RedirectRetryDelay, cancellationToken);
             }
         }
+    }
+
+    /// <inheritdoc />
+    public async Task EnsureStreamAsync(string streamName, StreamOptions? options = null, CancellationToken cancellationToken = default) {
+        options ??= new StreamOptions();
+        var request = new EnsureStreamRequest { StreamName = streamName, MaxRetention = Duration.FromTimeSpan(options.MaxRetention) };
+        if (options.MaxSizeBytesPerVirtualShard is { } maxSize)
+            request.MaxSizeBytesPerVirtualShard = maxSize;
+        if (options.CheckpointInterval is { } interval)
+            request.CheckpointInterval = Duration.FromTimeSpan(interval);
+        if (options.CheckpointOffsetCount is { } offsetCount)
+            request.CheckpointOffsetCount = offsetCount;
+
+        await CallAdminAsync(address => AdminFor(address).EnsureStreamAsync(request, cancellationToken: cancellationToken).ResponseAsync, cancellationToken);
+        await WaitUntilVisibleAsync(() => _table.TryGetAssignment(streamName, 0, out _) && _table.DescribeStream(streamName) is { } stream
+            && stream.MaxRetention == options.MaxRetention && stream.MaxSizeBytesPerVirtualShard == options.MaxSizeBytesPerVirtualShard
+            && stream.CheckpointInterval == options.CheckpointInterval && stream.CheckpointOffsetCount == options.CheckpointOffsetCount, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task EnsureConsumerGroupAsync(string streamName, string consumerGroup, ConsumerGroupOptions? options = null, CancellationToken cancellationToken = default) {
+        options ??= new ConsumerGroupOptions();
+        var request = new EnsureConsumerGroupRequest {
+            StreamName = streamName, ConsumerGroup = consumerGroup, Mandatory = options.Mandatory,
+            AckMode = options.AckMode == AckMode.Checkpoint ? AckModeProto.Checkpoint : AckModeProto.Strict,
+        };
+
+        await CallAdminAsync(address => AdminFor(address).EnsureConsumerGroupAsync(request, cancellationToken: cancellationToken).ResponseAsync, cancellationToken);
+        await WaitUntilVisibleAsync(() => _table.TryGetConsumerGroupPolicy(streamName, consumerGroup, out var policy)
+            && policy.Mode == options.AckMode && policy.Mandatory == options.Mandatory, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<StreamDescription?> GetStreamAsync(string streamName, CancellationToken cancellationToken = default) =>
+        Task.FromResult(_table.DescribeStream(streamName));
+
+    /// <inheritdoc />
+    public Task<IReadOnlyList<StreamDescription>> ListStreamsAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult(_table.DescribeStreams());
+
+    // Any seed with a meta-group replica serves a declaration and forwards it to the leader itself;
+    // one that is down, or has no replica, sends this call to the next seed.
+    async Task CallAdminAsync(Func<Uri, Task> call, CancellationToken cancellationToken) {
+        var seeds = _options.MetaGroupSeedAddresses;
+        Exception? lastFailure = null;
+        for (var attempt = 0; attempt < _options.MaxRedirectAttempts; attempt++) {
+            try {
+                await call(seeds[attempt % seeds.Count]);
+                return;
+            } catch (RpcException ex) when (ex.StatusCode is StatusCode.Unavailable or StatusCode.FailedPrecondition or StatusCode.DeadlineExceeded) {
+                lastFailure = ex;
+                await Task.Delay(_options.RedirectRetryDelay, cancellationToken);
+            } catch (RpcException ex) when (ex.StatusCode == StatusCode.InvalidArgument) {
+                throw new ArgumentException(ex.Status.Detail, ex);
+            } catch (RpcException ex) when (ex.StatusCode == StatusCode.AlreadyExists) {
+                throw new RemontoireConflictException(ex.Status.Detail);
+            }
+        }
+
+        throw new RemontoireUnavailableException(MetaGroupId, _options.MaxRedirectAttempts, lastFailure);
+    }
+
+    // A consumer started right after a declaration must find it: wait until this connection's own
+    // table shows it.
+    async Task WaitUntilVisibleAsync(Func<bool> isVisible, CancellationToken cancellationToken) {
+        var deadline = DateTime.UtcNow + DeclarationVisibleTimeout;
+        while (!isVisible()) {
+            if (DateTime.UtcNow >= deadline)
+                throw new RemontoireUnavailableException(MetaGroupId, "The declaration was applied, but this connection's view of the meta log did not catch up in time.");
+            await Task.Delay(20, cancellationToken);
+        }
+    }
+
+    void RequireConsumerGroup(string streamName, string consumerGroup) {
+        if (!_table.TryGetConsumerGroupPolicy(streamName, consumerGroup, out _))
+            throw new ArgumentException($"No consumer group '{consumerGroup}' is declared on stream '{streamName}'.", nameof(consumerGroup));
     }
 
     // Internal (not private): a test-only seam letting CallWithRedirectAsyncTests exercise the
@@ -246,11 +332,11 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
 
     static Uri RandomMemberAddress(IReadOnlyList<Uri> memberAddresses) => memberAddresses[Random.Shared.Next(memberAddresses.Count)];
 
-    RemontoireClient.RemontoireClientClient ClientFor(Uri address) =>
-        _clients.GetOrAdd(address, a => {
-            var channel = CreateChannel(a);
-            return (channel, new RemontoireClient.RemontoireClientClient(channel));
-        }).Client;
+    RemontoireClient.RemontoireClientClient ClientFor(Uri address) => new(ChannelFor(address));
+
+    RemontoireAdmin.RemontoireAdminClient AdminFor(Uri address) => new(ChannelFor(address));
+
+    GrpcChannel ChannelFor(Uri address) => _channels.GetOrAdd(address, CreateChannel);
 
     static RemontoireMessage ToMessage(RemontoireMessageProto proto) => new(
         proto.ShardId,
@@ -276,7 +362,7 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
         _watcher.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _seedChannel.Dispose();
 
-        foreach (var (channel, _) in _clients.Values)
+        foreach (var channel in _channels.Values)
             channel.Dispose();
     }
 }

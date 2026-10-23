@@ -69,6 +69,37 @@ public class RetentionEvaluatorTests {
     }
 
     [Fact]
+    public async Task A_declared_consumer_group_without_acks_holds_back_the_safe_to_prune_watermark() {
+        var directory = CreateTempDirectory();
+        try {
+            var timeProvider = new FakeTimeProvider();
+            var recentTimestamp = ToMicros(timeProvider.GetUtcNow()); // well within MaxRetention
+            await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+            var ackIndex = new AckIndex();
+            await ackIndex.ApplyAsync(AckRecord("mandatory", 0)); // a genuinely committed ack — ApplyLocal alone would never advance CommittedWatermark
+            var forwarded = new ConcurrentQueue<AppendRequest>();
+
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, recentTimestamp, "hello world")));
+            await WaitForVisibleAsync(shardLog, 0);
+
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory" || consumerGroup == "late-group", GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider,
+                GetDeclaredConsumerGroups: () => ["late-group"]));
+
+            await AdvanceAndSettleAsync(timeProvider);
+
+            // Without the declared late-group, "mandatory"'s ack alone would already cover offset
+            // 0 and advance the watermark; the registered group's watermark 0 holds it back instead.
+            forwarded.Should().BeEmpty("the message is within its retention window");
+            evaluator.SafeToPruneWatermark.Should().Be(0, "the declared group registered with watermark 0 holds back pruning before its first ack");
+            ackIndex.RegisteredConsumerGroups().Should().Contain("late-group");
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Does_not_forward_or_advance_the_watermark_within_the_retention_window() {
         var directory = CreateTempDirectory();
         try {

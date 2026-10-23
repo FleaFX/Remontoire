@@ -16,6 +16,8 @@ using Remontoire.Server;
 // Optional, for TLS with a client certificate on the peer port only (see docker-compose.tls.yml):
 //   REMONTOIRE_PEER_CERTIFICATE    this node's certificate with its private key (.pfx, no password)
 //   REMONTOIRE_PEER_CA             the CA that signed every node certificate (.crt)
+// Streams and consumer groups are declared by the clients (AddClient with AddStream/AddConsumerGroup),
+// through the admin endpoint on the client port.
 const int ClientPort = 6000;
 const int PeerPort = 6001;
 // Plain HTTP/1.1 for probes: the client and peer ports speak HTTP/2 only.
@@ -59,6 +61,7 @@ builder.WebHost.ConfigureKestrel(options => {
 builder.Services.AddRemontoire().AddCluster(options => {
     options.Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = nodeId, DataDirectory = $"data/{nodeId}/group-1", Peers = peers }];
     options.MetaGroup = new MetaGroupOptions { NodeId = nodeId, DataDirectory = $"data/{nodeId}/meta", Peers = peers };
+    options.ClientAddress = $"http://{nodeId}:{ClientPort}";
     if (peerCertificate is not null)
         options.ConfigureHttpHandler = handler => handler.SslOptions = new SslClientAuthenticationOptions {
             ClientCertificates = [peerCertificate],

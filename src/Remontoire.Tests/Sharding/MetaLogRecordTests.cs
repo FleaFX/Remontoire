@@ -128,6 +128,15 @@ public class MetaLogRecordTests {
         }
 
         [Fact]
+        public void Round_trips_a_DeclareConsumerGroup_record() {
+            var record = new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false);
+
+            var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
+
+            decoded.Should().Be(record);
+        }
+
+        [Fact]
         public void Throws_for_an_unrecognized_tag_byte() {
             var act = () => MetaLogRecord.Decode([255]);
 

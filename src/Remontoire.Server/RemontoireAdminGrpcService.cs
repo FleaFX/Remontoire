@@ -11,15 +11,15 @@ using Remontoire.Storage;
 namespace Remontoire.Server;
 
 /// <summary>
-/// The administrative RPCs (<c>CreateStream</c>, the reshard lifecycle, consumer-group/stream
-/// policy, and the meta-log audit trail) — every one of
-/// them ultimately proposes against the meta-group replica this node hosts (resolved via
-/// <see cref="TryGetMetaReplica"/>), the same replica <see cref="ShardAssignmentTableApplier"/>
-/// and <see cref="ReshardOrchestrator"/> already use directly. Only ever mapped on a process that
+/// The administrative RPCs (declaring streams and consumer groups, the reshard lifecycle, and the
+/// meta-log audit trail). The declarations run through <see cref="NodeAdmin"/>, which forwards to
+/// the meta-group leader itself; the reshard RPCs propose against the meta-group replica this node
+/// hosts and answer with a redirect when it doesn't lead. Only ever mapped on a process that
 /// also hosts a meta-group replica. Who may call them is the host's decision, on the mapped
 /// endpoint (for example <c>RequireAuthorization</c>).
 /// </summary>
 public sealed class RemontoireAdminGrpcService(
+    NodeAdmin admin,
     RaftReplicaRegistry raftRegistry,
     MessagingGroupRegistry messagingRegistry,
     LeaderAddressDirectory leaderAddresses,
@@ -30,31 +30,27 @@ public sealed class RemontoireAdminGrpcService(
     // The meta-group's own, well-known group id — the same literal RaftReplicaHostedService uses
     // everywhere it establishes the meta-group replica.
     const string MetaGroupId = "__meta__";
-    internal const string ProposedByHeaderKey = "proposed-by";
 
     /// <inheritdoc />
-    public override async Task<CreateStreamReply> CreateStream(CreateStreamRequest request, ServerCallContext context) {
-        if (!TryGetMetaReplica(out var metaReplica))
-            throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
+    public override async Task<Empty> EnsureStream(EnsureStreamRequest request, ServerCallContext context) {
+        if (request.MaxRetention is null)
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "max_retention is required."));
 
-        var routingAlgorithm = MapRoutingAlgorithm(request.RoutingAlgorithm);
+        var options = new StreamOptions {
+            MaxRetention = request.MaxRetention.ToTimeSpan(),
+            MaxSizeBytesPerVirtualShard = request.HasMaxSizeBytesPerVirtualShard ? request.MaxSizeBytesPerVirtualShard : null,
+            CheckpointInterval = request.CheckpointInterval?.ToTimeSpan(),
+            CheckpointOffsetCount = request.HasCheckpointOffsetCount ? request.CheckpointOffsetCount : null,
+        };
+        await RunAsync(() => admin.EnsureStreamAsync(request.StreamName, options, ProposedBy(context), context.CancellationToken));
+        return new Empty();
+    }
 
-        if (!CoversEveryIndexExactlyOnce(request.InitialAssignments.Select(assignment => assignment.VirtualShardIndex), request.VirtualShardCount))
-            throw new RpcException(new Status(StatusCode.InvalidArgument,
-                $"initial_assignments must cover every index 0..{request.VirtualShardCount - 1} exactly once."));
-
-        var groups = request.InitialGroups.Select(group =>
-            new RegisterGroup(group.GroupId, group.Members.Select(member => new ShardGroupMember(member.NodeId, new Uri(member.Address))).ToArray()));
-        var assignments = request.InitialAssignments.Select(assignment => (assignment.VirtualShardIndex, assignment.GroupId));
-
-        try {
-            foreach (var record in StreamBootstrap.Records(request.StreamName, request.VirtualShardCount, routingAlgorithm, groups, assignments))
-                await metaReplica.ProposeAsync(ToAppendRequest(record, context), context.CancellationToken);
-
-            return new CreateStreamReply { Success = new Empty() };
-        } catch (NotLeaderException ex) {
-            return new CreateStreamReply { NotLeader = BuildNotLeader(ex) };
-        }
+    /// <inheritdoc />
+    public override async Task<Empty> EnsureConsumerGroup(EnsureConsumerGroupRequest request, ServerCallContext context) {
+        var options = new ConsumerGroupOptions { AckMode = MapAckMode(request.AckMode), Mandatory = request.Mandatory };
+        await RunAsync(() => admin.EnsureConsumerGroupAsync(request.StreamName, request.ConsumerGroup, options, ProposedBy(context), context.CancellationToken));
+        return new Empty();
     }
 
     /// <inheritdoc />
@@ -177,55 +173,6 @@ public sealed class RemontoireAdminGrpcService(
     }
 
     /// <inheritdoc />
-    public override async Task<SetConsumerGroupFlagReply> SetConsumerGroupFlag(SetConsumerGroupFlagRequest request, ServerCallContext context) {
-        if (!TryGetMetaReplica(out var metaReplica))
-            throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
-
-        MetaLogRecord record = request.SettingCase switch {
-            SetConsumerGroupFlagRequest.SettingOneofCase.AckMode =>
-                new SetConsumerGroupAckMode(request.StreamName, request.ConsumerGroup, MapAckMode(request.AckMode)),
-            SetConsumerGroupFlagRequest.SettingOneofCase.Mandatory =>
-                new SetConsumerGroupMandatory(request.StreamName, request.ConsumerGroup, request.Mandatory),
-            _ => throw new RpcException(new Status(StatusCode.InvalidArgument, "Exactly one of ack_mode/mandatory must be set.")),
-        };
-
-        try {
-            await metaReplica.ProposeAsync(ToAppendRequest(record, context), context.CancellationToken);
-            return new SetConsumerGroupFlagReply { Success = new Empty() };
-        } catch (NotLeaderException ex) {
-            return new SetConsumerGroupFlagReply { NotLeader = BuildNotLeader(ex) };
-        }
-    }
-
-    /// <inheritdoc />
-    public override async Task<SetStreamPolicyReply> SetStreamPolicy(SetStreamPolicyRequest request, ServerCallContext context) {
-        if (!TryGetMetaReplica(out var metaReplica))
-            throw new RpcException(new Status(StatusCode.FailedPrecondition, "This node does not host a meta-group replica."));
-
-        if (request.Retention is null && request.Checkpoint is null)
-            throw new RpcException(new Status(StatusCode.InvalidArgument, "At least one of retention/checkpoint must be set."));
-
-        try {
-            if (request.Retention is { } retention)
-                await metaReplica.ProposeAsync(
-                    ToAppendRequest(new SetStreamRetentionPolicy(
-                        request.StreamName, retention.AuditRetention.ToTimeSpan(), retention.MaxRetention.ToTimeSpan(),
-                        retention.HasMaxSizeBytesPerVirtualShard ? retention.MaxSizeBytesPerVirtualShard : null), context),
-                    context.CancellationToken);
-
-            if (request.Checkpoint is { } checkpoint)
-                await metaReplica.ProposeAsync(
-                    ToAppendRequest(new SetStreamCheckpointInterval(
-                        request.StreamName, checkpoint.Interval?.ToTimeSpan(), checkpoint.HasOffsetCount ? checkpoint.OffsetCount : null), context),
-                    context.CancellationToken);
-
-            return new SetStreamPolicyReply { Success = new Empty() };
-        } catch (NotLeaderException ex) {
-            return new SetStreamPolicyReply { NotLeader = BuildNotLeader(ex) };
-        }
-    }
-
-    /// <inheritdoc />
     public override async Task ListMetaLogRecords(ListMetaLogRecordsRequest request, IServerStreamWriter<MetaLogRecordView> responseStream, ServerCallContext context) {
         await foreach (var (version, payload, timestampMicros, headers) in journal.WatchAsync(request.FromVersion, context.CancellationToken)) {
             var record = MetaLogRecord.Decode(payload);
@@ -275,6 +222,9 @@ public sealed class RemontoireAdminGrpcService(
         SetStreamCheckpointInterval r => (nameof(SetStreamCheckpointInterval), new Dictionary<string, string> {
             ["StreamName"] = r.StreamName, ["Interval"] = r.Interval?.ToString() ?? "", ["OffsetCount"] = r.OffsetCount?.ToString() ?? "",
         }),
+        DeclareConsumerGroup r => (nameof(DeclareConsumerGroup), new Dictionary<string, string> {
+            ["StreamName"] = r.StreamName, ["ConsumerGroup"] = r.ConsumerGroup, ["Mode"] = r.Mode.ToString(), ["Mandatory"] = r.Mandatory.ToString(),
+        }),
         _ => throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case."),
     };
 
@@ -284,16 +234,38 @@ public sealed class RemontoireAdminGrpcService(
     // share four lines.
     internal static string? FindProposedBy(IReadOnlyList<Header> headers) {
         foreach (var header in headers) {
-            if (Encoding.UTF8.GetByteCount(ProposedByHeaderKey) != header.Key.Length || Encoding.UTF8.GetString(header.Key.Span) != ProposedByHeaderKey)
+            if (Encoding.UTF8.GetByteCount(RemontoireNode.ProposedByHeaderKey) != header.Key.Length || Encoding.UTF8.GetString(header.Key.Span) != RemontoireNode.ProposedByHeaderKey)
                 continue;
             return Encoding.UTF8.GetString(header.Value.Span);
         }
         return null;
     }
-    internal static RoutingAlgorithm MapRoutingAlgorithm(RoutingAlgorithmProto algorithm) => algorithm switch {
-        RoutingAlgorithmProto.XxHash3V1 => RoutingAlgorithm.XxHash3V1,
-        _ => throw new RpcException(new Status(StatusCode.InvalidArgument, $"'{algorithm}' is not a valid routing algorithm.")),
+
+    /// <summary>
+    /// The status a declaration's failure answers with; <see langword="null"/> for an exception
+    /// that is no declaration failure, which then surfaces as it would anyway.
+    /// </summary>
+    /// <param name="exception">The failure.</param>
+    /// <returns>The status, or <see langword="null"/>.</returns>
+    internal static Status? ToStatus(Exception exception) => exception switch {
+        ArgumentException => new Status(StatusCode.InvalidArgument, exception.Message),
+        RemontoireConflictException => new Status(StatusCode.AlreadyExists, exception.Message),
+        RemontoireUnavailableException or TimeoutException => new Status(StatusCode.Unavailable, exception.Message),
+        InvalidOperationException => new Status(StatusCode.FailedPrecondition, exception.Message),
+        _ => null,
     };
+
+    static async Task RunAsync(Func<Task> declaration) {
+        try {
+            await declaration();
+        } catch (Exception ex) when (ToStatus(ex) is { } status) {
+            throw new RpcException(status);
+        }
+    }
+
+    // The caller's name as the host's authentication resolved it (User.Identity.Name, so the host
+    // picks the claim through its NameClaimType); an anonymous call names nobody.
+    static string? ProposedBy(ServerCallContext context) => context.GetHttpContext().User.Identity?.Name;
 
     internal static AckMode MapAckMode(AckModeProto mode) => mode switch {
         AckModeProto.Strict => AckMode.Strict,
@@ -303,24 +275,6 @@ public sealed class RemontoireAdminGrpcService(
 
     internal static MigrationId ParseMigrationId(string value) =>
         Guid.TryParse(value, out var guid) ? new MigrationId(guid) : throw new RpcException(new Status(StatusCode.InvalidArgument, $"'{value}' is not a valid migration_id."));
-
-    internal static bool CoversEveryIndexExactlyOnce(IEnumerable<int> indices, int virtualShardCount) {
-        var distinct = indices.ToHashSet();
-        return distinct.Count == virtualShardCount && distinct.SetEquals(Enumerable.Range(0, virtualShardCount));
-    }
-
-    // Shared by every meta-proposing RPC: attaches the caller's name as the host's authentication
-    // resolved it (User.Identity.Name, so the host picks the claim through its NameClaimType) as a
-    // "proposed-by" header, reusing AppendRequest.Headers exactly the way
-    // RemontoireClientGrpcService.Publish already reuses it for a correlation id. An anonymous
-    // call carries no header.
-    AppendRequest ToAppendRequest(MetaLogRecord record, ServerCallContext context) {
-        var subject = context.GetHttpContext().User.Identity?.Name;
-        IReadOnlyList<Header> headers = subject is null
-            ? []
-            : [new Header(Encoding.UTF8.GetBytes(ProposedByHeaderKey), Encoding.UTF8.GetBytes(subject))];
-        return new AppendRequest(Array.Empty<byte>(), headers, MetaLogRecord.Encode(record));
-    }
 
     bool TryGetMetaReplica(out RaftReplica metaReplica) => raftRegistry.TryGet(MetaGroupId, out metaReplica);
 

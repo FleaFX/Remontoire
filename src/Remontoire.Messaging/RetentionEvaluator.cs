@@ -6,12 +6,15 @@ namespace Remontoire.Messaging;
 /// <summary>
 /// Everything <see cref="RetentionEvaluator"/> needs, bundled into one type instead of a long,
 /// duplicated parameter list — same "Options" shape used by several other composition roots
-/// elsewhere in this codebase.
+/// elsewhere in this codebase. <see cref="GetDeclaredConsumerGroups"/> names the groups declared
+/// on the stream: each is registered in the ack index every tick, so a declared group holds back
+/// pruning before its first ack.
 /// </summary>
 public sealed record RetentionEvaluatorOptions(
     ShardLog ShardLog, AckIndex AckIndex, Func<string, bool> IsMandatory,
     Func<TimeSpan> GetMaxRetention, Func<AppendRequest, CancellationToken, Task<bool>> ForwardToDeadLetterAsync,
-    Func<bool> IsAdmissionPaused, Func<bool> IsLeader, TimeProvider? TimeProvider = null, TimeSpan? TickInterval = null, ILogger? Logger = null);
+    Func<bool> IsAdmissionPaused, Func<bool> IsLeader, TimeProvider? TimeProvider = null, TimeSpan? TickInterval = null, ILogger? Logger = null,
+    Func<IEnumerable<string>>? GetDeclaredConsumerGroups = null);
 
 /// <summary>
 /// Periodically scans for messages past their stream's max-retention window that no mandatory
@@ -66,6 +69,11 @@ public sealed class RetentionEvaluator : IAsyncDisposable {
                 try {
                     if (_options.IsAdmissionPaused())
                         continue;
+
+                    // A declared group that never consumed or acked starts at the beginning of the
+                    // log: registered here, it holds back pruning like any other group.
+                    foreach (var consumerGroup in _options.GetDeclaredConsumerGroups?.Invoke() ?? [])
+                        _options.AckIndex.GetOrCreate(consumerGroup);
 
                     var mandatoryWatermark = _options.AckIndex.MandatoryGroupsLowWatermark(_options.IsMandatory);
                     var maxRetention = _options.GetMaxRetention();

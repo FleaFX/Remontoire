@@ -31,9 +31,10 @@ public static class RemontoireServerEndpointRouteBuilderExtensions {
     }
 
     /// <summary>
-    /// Maps the administrative endpoint: streams, policies, resharding and the meta-log audit
-    /// trail. Its calls need a meta-group replica on this node; elsewhere they fail with
-    /// <c>FailedPrecondition</c>.
+    /// Maps the administrative endpoint: declaring streams and consumer groups, resharding and the
+    /// meta-log audit trail. Its calls need a meta-group replica on this node; elsewhere they fail
+    /// with <c>FailedPrecondition</c>. <c>Remontoire.Client</c> declares through it, with the client's
+    /// token hook.
     /// </summary>
     /// <param name="endpoints">The endpoint route builder.</param>
     /// <returns>A builder that applies conventions to the endpoint mapped here.</returns>

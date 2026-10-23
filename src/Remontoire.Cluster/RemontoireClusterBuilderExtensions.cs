@@ -12,12 +12,15 @@ public static class RemontoireClusterBuilderExtensions {
     /// Registers a cluster node: every data group and the meta-group replica configured in
     /// <see cref="RemontoireClusterOptions"/>, started and stopped with the host, and the Raft
     /// endpoint <see cref="RemontoireClusterEndpointRouteBuilderExtensions.MapRemontoireCluster"/>
-    /// maps. Add <c>AddServer()</c> from <c>Remontoire.Server</c> for the client and admin endpoints.
+    /// maps. Registers <see cref="IRemontoireAdmin"/> in-process, for use once the host has
+    /// started; a cluster node refuses to start with the declarations of <c>AddStream</c> and
+    /// <c>AddConsumerGroup</c>. Add <c>AddServer()</c> from <c>Remontoire.Server</c> for the client
+    /// and admin endpoints.
     /// </summary>
     /// <param name="builder">The builder returned by <c>AddRemontoire()</c>.</param>
     /// <param name="configure">A delegate that configures the <see cref="RemontoireClusterOptions"/>.</param>
     /// <returns>The same <paramref name="builder"/> for further chaining.</returns>
-    /// <exception cref="ArgumentException">The node neither hosts a meta-group replica nor knows a meta-group seed address.</exception>
+    /// <exception cref="ArgumentException">The node neither hosts a meta-group replica nor knows a meta-group seed address, or hosts both a meta-group replica and data groups without a client address.</exception>
     public static RemontoireBuilder AddCluster(this RemontoireBuilder builder, Action<RemontoireClusterOptions> configure) {
         var options = new RemontoireClusterOptions();
         configure(options);
@@ -27,6 +30,11 @@ public static class RemontoireClusterBuilderExtensions {
         if (options.MetaGroup is null && options.MetaGroupSeedAddresses.Count == 0)
             throw new ArgumentException(
                 $"Configure {nameof(RemontoireClusterOptions.MetaGroup)} or at least one of {nameof(RemontoireClusterOptions.MetaGroupSeedAddresses)}.",
+                nameof(configure));
+
+        if (options.MetaGroup is not null && options.Groups.Count > 0 && string.IsNullOrWhiteSpace(options.ClientAddress))
+            throw new ArgumentException(
+                $"Configure {nameof(RemontoireClusterOptions.ClientAddress)}: this node hosts a meta-group replica and data groups, and registers those groups at that address.",
                 nameof(configure));
 
         var services = builder.Services;

@@ -269,6 +269,99 @@ public class ShardAssignmentTableTests {
             policy.MaxRetention.Should().Be(TimeSpan.FromDays(14));
             policy.MaxSizeBytesPerVirtualShard.Should().Be(1024);
         }
+
+        [Fact]
+        public void CreateStream_for_an_existing_stream_keeps_the_first_configuration() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new CreateStream("orders", 1, RoutingAlgorithm.XxHash3V1));
+
+            table.Apply(new CreateStream("orders", 4, RoutingAlgorithm.XxHash3V1));
+
+            table.TryGetStreamConfig("orders", out var config).Should().BeTrue();
+            config.VirtualShardCount.Should().Be(1, "a stream's sharding is fixed at creation; a second CreateStream must not reroute its partition keys");
+        }
+
+        [Fact]
+        public void Cutover_to_another_group_than_the_migration_target_is_rejected() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new MigrationStarted(Migration1, "orders", 0, "group-1", "group-1"));
+            table.Apply(new Cutover(Migration1, "orders", 0, "group-1"));
+
+            table.Apply(new Cutover(Migration1, "orders", 0, "group-2"));
+
+            table.TryGetAssignment("orders", 0, out var assignment).Should().BeTrue();
+            assignment.GroupId.Should().Be("group-1", "a cutover must only point at its own migration's target");
+        }
+
+        [Fact]
+        public void DeclareConsumerGroup_declares_the_group_with_its_policy() {
+            var table = new ShardAssignmentTable();
+
+            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false));
+
+            table.TryGetConsumerGroupPolicy("orders", "billing", out var policy).Should().BeTrue();
+            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false));
+            table.TryGetConsumerGroupPolicy("orders", "other", out _).Should().BeFalse();
+        }
+
+        [Fact]
+        public void DeclareConsumerGroup_for_a_declared_group_replaces_its_policy() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Strict, Mandatory: true));
+
+            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false));
+
+            table.TryGetConsumerGroupPolicy("orders", "billing", out var policy).Should().BeTrue();
+            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false), "the last declaration of a group replaces its whole policy");
+        }
+    }
+
+    public class DescribeStream {
+        [Fact]
+        public void Returns_null_for_an_unknown_stream() {
+            var table = new ShardAssignmentTable();
+
+            table.DescribeStream("orders").Should().BeNull();
+        }
+
+        [Fact]
+        public void Returns_the_policy_and_the_declared_consumer_groups_in_name_order() {
+            var table = new ShardAssignmentTable();
+            table.Apply(new CreateStream("orders", 1, RoutingAlgorithm.XxHash3V1));
+            table.Apply(new CreateStream("payments", 1, RoutingAlgorithm.XxHash3V1));
+            table.Apply(new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(3), TimeSpan.FromDays(14), MaxSizeBytesPerVirtualShard: 1024));
+            table.Apply(new SetStreamCheckpointInterval("orders", TimeSpan.FromSeconds(30), 500));
+            table.Apply(new DeclareConsumerGroup("orders", "b", AckMode.Checkpoint, Mandatory: false));
+            table.Apply(new DeclareConsumerGroup("orders", "a", AckMode.Strict, Mandatory: true));
+            table.Apply(new DeclareConsumerGroup("payments", "other", AckMode.Strict, Mandatory: true));
+
+            var description = table.DescribeStream("orders");
+
+            description!.Name.Should().Be("orders");
+            description.VirtualShardCount.Should().Be(1);
+            description.MaxRetention.Should().Be(TimeSpan.FromDays(14));
+            description.MaxSizeBytesPerVirtualShard.Should().Be(1024);
+            description.CheckpointInterval.Should().Be(TimeSpan.FromSeconds(30));
+            description.CheckpointOffsetCount.Should().Be(500);
+            description.ConsumerGroups.Should().Equal(
+                new ConsumerGroupDescription("a", AckMode.Strict, true),
+                new ConsumerGroupDescription("b", AckMode.Checkpoint, false));
+            table.DescribeStreams().Select(stream => stream.Name).Should().Equal("orders", "payments");
+        }
+    }
+
+    public class EnumerateGroups {
+        [Fact]
+        public void Returns_every_registered_group() {
+            var table = new ShardAssignmentTable();
+            var members = new[] { new ShardGroupMember("node-1", new Uri("https://node-1:5001")) };
+            table.Apply(new RegisterGroup("group-1", members));
+            table.Apply(new RegisterGroup("group-2", members));
+
+            var groups = table.EnumerateGroups();
+
+            groups.Select(group => group.GroupId).Should().Equal("group-1", "group-2");
+        }
     }
 
     public class GetConsumerGroupPolicy {

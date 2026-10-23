@@ -53,4 +53,9 @@ public enum MetaLogRecordType : byte {
     /// Tag for <see cref="SetStreamCheckpointInterval"/>.
     /// </summary>
     SetStreamCheckpointInterval = 9,
+
+    /// <summary>
+    /// Tag for <see cref="DeclareConsumerGroup"/>.
+    /// </summary>
+    DeclareConsumerGroup = 10,
 }

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using Microsoft.Extensions.Logging;
 using Remontoire.Messaging;
 using Remontoire.Raft;
@@ -42,6 +43,14 @@ public sealed class RemontoireNode(
     /// </summary>
     public const string MetaGroupId = "__meta__";
 
+    /// <summary>
+    /// The header that names who proposed a meta-log record, for the audit trail.
+    /// </summary>
+    public const string ProposedByHeaderKey = "proposed-by";
+
+    static readonly TimeSpan MetaProposeTimeout = TimeSpan.FromSeconds(10);
+    static readonly TimeSpan MetaProposeRetryDelay = TimeSpan.FromMilliseconds(50);
+
     const string DeadLetterStreamSuffix = ".__deadletter__";
 
     // Concurrent: the embedded engine opens groups while the retention and checkpoint loops of
@@ -64,6 +73,15 @@ public sealed class RemontoireNode(
     /// keeps its default. Set before opening groups.
     /// </summary>
     internal TimeSpan? RetentionTickInterval { get; set; }
+
+    /// <summary>
+    /// Forwards one meta-log proposal to the node with the given id, the meta-group leader as this
+    /// node knows it, and returns the result once committed there. Throws
+    /// <see cref="NotLeaderException"/> when that node does not lead, or cannot be reached. Set by a
+    /// cluster node that hosts a meta-group replica; <see langword="null"/> embedded, where the
+    /// replica always leads.
+    /// </summary>
+    public Func<string, AppendRequest, CancellationToken, Task<ProposeResult>>? ForwardMetaProposalAsync { get; set; }
 
     /// <summary>
     /// Whether a data group with id <paramref name="groupId"/> is open on this node.
@@ -106,6 +124,55 @@ public sealed class RemontoireNode(
     /// Marks this node started; the hosting service calls it at the end of its own start.
     /// </summary>
     public void MarkStarted() => _isStarted = true;
+
+    /// <summary>
+    /// Proposes <paramref name="records"/> to the meta-group leader, in order: directly when this
+    /// node's meta-group replica leads, otherwise through <see cref="ForwardMetaProposalAsync"/>.
+    /// Retries while no leader is known, for up to ten seconds per record. Completes once this
+    /// node's <see cref="ShardAssignmentTable"/> reflects the last record.
+    /// </summary>
+    /// <param name="records">The records to propose; each must be idempotent, since a retried proposal may commit twice.</param>
+    /// <param name="proposedBy">Who proposes them, for the audit trail; <see langword="null"/> for nobody in particular.</param>
+    /// <param name="cancellationToken">Cancels the wait; a proposal already sent may still commit.</param>
+    /// <exception cref="InvalidOperationException">This node hosts no meta-group replica.</exception>
+    /// <exception cref="RemontoireUnavailableException">No leader accepted a record, or this node did not apply it, in time.</exception>
+    public async Task ProposeMetaAsync(IEnumerable<MetaLogRecord> records, string? proposedBy, CancellationToken cancellationToken) {
+        IReadOnlyList<Header> headers = proposedBy is null
+            ? []
+            : [new Header(Encoding.UTF8.GetBytes(ProposedByHeaderKey), Encoding.UTF8.GetBytes(proposedBy))];
+
+        ulong? lastVersion = null;
+        foreach (var record in records)
+            lastVersion = (await ProposeOnMetaLeaderAsync(new AppendRequest(Array.Empty<byte>(), headers, MetaLogRecord.Encode(record)), cancellationToken)).LogicalOffset;
+
+        if (lastVersion is { } version
+            && !await ConditionPoller.WaitUntilAsync(() => metaLogJournal.Contains(version), MetaProposeTimeout, cancellationToken: cancellationToken))
+            throw new RemontoireUnavailableException(MetaGroupId, "The meta log committed the records, but this node did not apply them in time.");
+    }
+
+    async Task<ProposeResult> ProposeOnMetaLeaderAsync(AppendRequest request, CancellationToken cancellationToken) {
+        var deadline = DateTime.UtcNow + MetaProposeTimeout;
+        var attempts = 0;
+        Exception? lastFailure = null;
+        while (true) {
+            if (!registry.TryGet(MetaGroupId, out var metaReplica))
+                throw new InvalidOperationException("This node hosts no meta-group replica.");
+
+            attempts++;
+            try {
+                if (metaReplica.IsLeader)
+                    return await metaReplica.ProposeAsync(request, cancellationToken);
+                if (metaReplica.LeaderHint is { } leader && ForwardMetaProposalAsync is { } forward)
+                    return await forward(leader, request, cancellationToken);
+            } catch (NotLeaderException ex) {
+                lastFailure = ex; // leadership moved, or the leader isn't reachable: ask again after the delay
+            }
+
+            if (DateTime.UtcNow >= deadline)
+                throw new RemontoireUnavailableException(MetaGroupId, attempts, lastFailure);
+            await Task.Delay(MetaProposeRetryDelay, cancellationToken);
+        }
+    }
 
     /// <summary>
     /// Opens one data group in <paramref name="dataDirectory"/> (creating it if necessary), starts its
@@ -190,7 +257,10 @@ public sealed class RemontoireNode(
             IsAdmissionPaused: () => admissionGate.IsPaused(groupId),
             IsLeader: () => replica.IsLeader,
             TickInterval: RetentionTickInterval,
-            Logger: loggerFactory.CreateLogger("Remontoire.Messaging.RetentionEvaluator")));
+            Logger: loggerFactory.CreateLogger("Remontoire.Messaging.RetentionEvaluator"),
+            GetDeclaredConsumerGroups: () => ResolveStreamNameForGroup(groupId) is { } streamName
+                ? assignmentTable.DeclaredConsumerGroups(streamName)
+                : []));
         _retentionEvaluators[groupId] = retentionEvaluator;
 
         messagingRegistry.Register(groupId, shardLog, ackIndex, retentionEvaluator);
