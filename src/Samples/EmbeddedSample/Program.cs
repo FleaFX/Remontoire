@@ -9,11 +9,15 @@ using Remontoire.Engine;
 // Remontoire embedded in a web app: POST /greetings?name=… publishes a greeting, a background
 // consumer handles and acks each one, and GET /greetings lists the greetings handled since start.
 // The data lives in the setting Remontoire:DataDirectory ("data" by default).
+// The stream and the consumer group are declared on the builder and exist before the consumer starts.
 // The host owns observability: health at /health/live and /health/ready, Prometheus metrics at
 // /metrics, and traces over OTLP once OTEL_EXPORTER_OTLP_ENDPOINT is set. Requests are traced as
 // well: a publish span is the child of its request, and an untraced request would drop it.
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddRemontoire().AddEmbedded(options => options.DataDirectory = builder.Configuration["Remontoire:DataDirectory"] ?? "data");
+builder.Services.AddRemontoire()
+    .AddEmbedded(options => options.DataDirectory = builder.Configuration["Remontoire:DataDirectory"] ?? "data")
+    .AddStream(GreetingConsumer.StreamName)
+    .AddConsumerGroup(GreetingConsumer.StreamName, GreetingConsumer.ConsumerGroup);
 builder.Services.AddSingleton<HandledGreetings>();
 builder.Services.AddHostedService<GreetingConsumer>();
 
@@ -64,24 +68,18 @@ sealed class HandledGreetings {
 }
 
 /// <summary>
-/// Creates the greetings stream at startup, then handles and acks every greeting.
+/// Handles and acks every greeting; the stream and the consumer group are declared on the builder.
 /// </summary>
-sealed class GreetingConsumer(IRemontoireAdmin admin, IRemontoireConsumer consumer, HandledGreetings handled) : BackgroundService {
+sealed class GreetingConsumer(IRemontoireConsumer consumer, HandledGreetings handled) : BackgroundService {
     /// <summary>
     /// The stream greetings are published to.
     /// </summary>
     public const string StreamName = "greetings";
 
-    const string ConsumerGroup = "greeter";
-
     /// <summary>
-    /// Creates the stream before the consumer starts, so it exists before the app takes requests.
+    /// The consumer group the greetings are handled with.
     /// </summary>
-    /// <param name="cancellationToken">Cancels startup.</param>
-    public override async Task StartAsync(CancellationToken cancellationToken) {
-        await admin.CreateStreamAsync(StreamName, cancellationToken);
-        await base.StartAsync(cancellationToken);
-    }
+    public const string ConsumerGroup = "greeter";
 
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken) {

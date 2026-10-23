@@ -13,10 +13,47 @@ public sealed partial class ShardAssignmentTable {
 
     /// <summary>
     /// A consumer group's ack policy for a stream — <see cref="DefaultConsumerGroupPolicy"/>
-    /// (strict + mandatory) when no operator has ever set one.
+    /// (strict + mandatory) for a group that was never declared.
     /// </summary>
     public ConsumerGroupPolicy GetConsumerGroupPolicy(string streamName, string consumerGroup) =>
         _consumerGroupPolicies.GetValueOrDefault((streamName, consumerGroup), DefaultConsumerGroupPolicy);
+
+    /// <summary>
+    /// Looks up a declared consumer group's ack policy for a stream. A group is declared once any
+    /// policy record names it.
+    /// </summary>
+    public bool TryGetConsumerGroupPolicy(string streamName, string consumerGroup, out ConsumerGroupPolicy policy) =>
+        _consumerGroupPolicies.TryGetValue((streamName, consumerGroup), out policy);
+
+    /// <summary>
+    /// Every consumer group declared on <paramref name="streamName"/>, snapshotted.
+    /// </summary>
+    public IReadOnlyCollection<string> DeclaredConsumerGroups(string streamName) =>
+        _consumerGroupPolicies.Keys.Where(key => key.StreamName == streamName).Select(key => key.ConsumerGroup).ToArray();
+
+    /// <summary>
+    /// Describes <paramref name="streamName"/>: its sharding, its policy and its declared consumer
+    /// groups in ordinal name order; <see langword="null"/> for an unknown stream.
+    /// </summary>
+    public StreamDescription? DescribeStream(string streamName) {
+        if (!_streams.TryGetValue(streamName, out var config))
+            return null;
+
+        var retention = GetRetentionPolicy(streamName);
+        var consumerGroups = _consumerGroupPolicies
+            .Where(pair => pair.Key.StreamName == streamName)
+            .OrderBy(pair => pair.Key.ConsumerGroup, StringComparer.Ordinal)
+            .Select(pair => new ConsumerGroupDescription(pair.Key.ConsumerGroup, pair.Value.Mode, pair.Value.Mandatory))
+            .ToArray();
+        return new StreamDescription(streamName, config.VirtualShardCount, retention.MaxRetention, retention.MaxSizeBytesPerVirtualShard,
+            retention.CheckpointInterval, retention.CheckpointOffsetCount, consumerGroups);
+    }
+
+    /// <summary>
+    /// Describes every known stream, in ordinal name order.
+    /// </summary>
+    public IReadOnlyList<StreamDescription> DescribeStreams() =>
+        _streams.Keys.Order(StringComparer.Ordinal).Select(streamName => DescribeStream(streamName)!).ToArray();
 
     /// <summary>
     /// A stream's retention/checkpoint policy — <see cref="DefaultRetentionPolicy"/> (7/30 days,
@@ -27,7 +64,7 @@ public sealed partial class ShardAssignmentTable {
 
     // Called from Apply(MetaLogRecord)'s existing switch (ShardAssignmentTable.cs) — that
     // method's own signature and every one of its callers stay completely unchanged; only its
-    // switch body dispatches here for the four policy-record cases.
+    // switch body dispatches here for the five policy-record cases.
     void ApplyPolicyRecord(MetaLogRecord record) {
         switch (record) {
             case SetConsumerGroupAckMode r:
@@ -38,6 +75,10 @@ public sealed partial class ShardAssignmentTable {
             case SetConsumerGroupMandatory r:
                 _consumerGroupPolicies[(r.StreamName, r.ConsumerGroup)] =
                     GetConsumerGroupPolicy(r.StreamName, r.ConsumerGroup) with { Mandatory = r.Mandatory };
+                break;
+
+            case DeclareConsumerGroup r:
+                _consumerGroupPolicies[(r.StreamName, r.ConsumerGroup)] = new ConsumerGroupPolicy(r.Mode, r.Mandatory);
                 break;
 
             case SetStreamRetentionPolicy r:

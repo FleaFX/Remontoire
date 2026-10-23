@@ -22,7 +22,7 @@ public class RaftReplicaHostedServiceTests {
                     Options.Create(new RemontoireClusterOptions {
                         Groups = [new RaftGroupOptions { GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory }] }),
                     TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -53,7 +53,7 @@ public class RaftReplicaHostedServiceTests {
                         ],
                     }),
                     TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -84,7 +84,7 @@ public class RaftReplicaHostedServiceTests {
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
                     TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -117,7 +117,7 @@ public class RaftReplicaHostedServiceTests {
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
                     TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -159,7 +159,7 @@ public class RaftReplicaHostedServiceTests {
                         },
                     }),
                     TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 var act = async () => await service.StartAsync(CancellationToken.None);
 
@@ -182,7 +182,7 @@ public class RaftReplicaHostedServiceTests {
                         MetaGroupSeedAddresses = ["http://localhost:61002"],
                     }),
                     TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 var act = async () => await service.StartAsync(CancellationToken.None);
 
@@ -207,7 +207,7 @@ public class RaftReplicaHostedServiceTests {
                         }],
                     }),
                     TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    leaderAddresses, table, NullLoggerFactory.Instance);
+                    leaderAddresses, table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -234,7 +234,7 @@ public class RaftReplicaHostedServiceTests {
                         }],
                     }),
                     TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    leaderAddresses, table, NullLoggerFactory.Instance);
+                    leaderAddresses, table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -257,7 +257,7 @@ public class RaftReplicaHostedServiceTests {
                     ConfigureHttpHandler = handlers.Add,
                 }),
                 TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
             await service.StartAsync(CancellationToken.None);
             try {
@@ -288,7 +288,7 @@ public class RaftReplicaHostedServiceTests {
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
                     TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 await service.StopAsync(CancellationToken.None);
@@ -314,7 +314,7 @@ public class RaftReplicaHostedServiceTests {
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
                     TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 try {
@@ -370,7 +370,7 @@ public class RaftReplicaHostedServiceTests {
                         MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
                     }),
                     TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
-                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance);
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
 
                 await service.StartAsync(CancellationToken.None);
                 await service.StopAsync(CancellationToken.None);
@@ -380,6 +380,69 @@ public class RaftReplicaHostedServiceTests {
             } finally {
                 Directory.Delete(dataDirectory, recursive: true);
                 Directory.Delete(metaDirectory, recursive: true);
+            }
+        }
+    }
+
+    public class GroupRegistration {
+        [Fact]
+        public async Task Registers_every_hosted_data_group_in_the_meta_log() {
+            var dataDirectory = CreateTempDirectory();
+            var metaDirectory = CreateTempDirectory();
+            try {
+                var registry = new RaftReplicaRegistry();
+                var messagingRegistry = new MessagingGroupRegistry();
+                var table = new ShardAssignmentTable();
+                var service = new RaftReplicaHostedService(
+                    Options.Create(new RemontoireClusterOptions {
+                        MetaGroup = new MetaGroupOptions { NodeId = "node-1", DataDirectory = metaDirectory },
+                        Groups = [new RaftGroupOptions {
+                            GroupId = "group-1", NodeId = "node-1", DataDirectory = dataDirectory,
+                            Peers = [new RaftPeerOptions {
+                                NodeId = "node-2", Address = "http://node-2.invalid:6001", ClientAddress = "http://node-2.invalid:6000",
+                            }],
+                        }],
+                        ClientAddress = "http://node-1.invalid:6000",
+                    }),
+                    TestNodes.Node(registry, messagingRegistry, table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, []);
+
+                // group-1's one peer never answers, so that group never elects a leader — fine:
+                // the registration runs on the meta group, which elects itself without peers.
+                await service.StartAsync(CancellationToken.None);
+                try {
+                    (await WaitUntilAsync(() => table.TryGetGroup("group-1", out _), TimeSpan.FromSeconds(10))).Should().BeTrue();
+                    table.TryGetGroup("group-1", out var group).Should().BeTrue();
+                    group.Members.Should().BeEquivalentTo(new[] {
+                        new ShardGroupMember("node-1", new Uri("http://node-1.invalid:6000")),
+                        new ShardGroupMember("node-2", new Uri("http://node-2.invalid:6000")),
+                    });
+                } finally {
+                    await service.StopAsync(CancellationToken.None);
+                }
+            } finally {
+                Directory.Delete(dataDirectory, recursive: true);
+                Directory.Delete(metaDirectory, recursive: true);
+            }
+        }
+
+        [Fact]
+        public async Task Fails_to_start_with_declarations() {
+            var dataDirectory = CreateTempDirectory();
+            try {
+                var table = new ShardAssignmentTable();
+                var service = new RaftReplicaHostedService(
+                    Options.Create(new RemontoireClusterOptions {
+                        MetaGroupSeedAddresses = ["http://127.0.0.1:1"],
+                    }),
+                    TestNodes.Node(new RaftReplicaRegistry(), new MessagingGroupRegistry(), table, new MetaLogJournal(), new MigrationAdmissionGate(), loggerFactory: NullLoggerFactory.Instance),
+                    new LeaderAddressDirectory(), table, NullLoggerFactory.Instance, [new StreamDeclaration("orders", new StreamOptions())]);
+
+                var act = () => service.StartAsync(CancellationToken.None);
+
+                (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Contain("AddClient");
+            } finally {
+                Directory.Delete(dataDirectory, recursive: true);
             }
         }
     }

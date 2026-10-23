@@ -285,7 +285,8 @@ public class RemontoireMetricsTests {
             var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
             var producer = host.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
-            await admin.CreateStreamAsync("metrics");
+            await admin.EnsureStreamAsync("metrics");
+            await admin.EnsureConsumerGroupAsync("metrics", "metrics-group");
 
             await producer.PublishAsync("metrics", "key-1", "one"u8.ToArray());
             var message = await FirstAsync(consumer, "metrics", "metrics-group");

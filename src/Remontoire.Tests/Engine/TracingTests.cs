@@ -27,7 +27,9 @@ public class TracingTests {
             host = await StartHostAsync(dataDirectory);
             var producer = host.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
-            await host.Services.GetRequiredService<IRemontoireAdmin>().CreateStreamAsync(stream);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            await admin.EnsureStreamAsync(stream);
+            await admin.EnsureConsumerGroupAsync(stream, "trace-group");
 
             await producer.PublishAsync(stream, "key-1", "one"u8.ToArray());
             var message = await FirstAsync(consumer, stream, "trace-group");
@@ -64,7 +66,9 @@ public class TracingTests {
             host = await StartHostAsync(dataDirectory);
             var producer = host.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
-            await host.Services.GetRequiredService<IRemontoireAdmin>().CreateStreamAsync(stream);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            await admin.EnsureStreamAsync(stream);
+            await admin.EnsureConsumerGroupAsync(stream, "trace-group");
 
             await producer.PublishAsync(stream, "key-1", "one"u8.ToArray(),
                 headers: new Dictionary<string, string> { ["traceparent"] = callerTraceparent });
@@ -92,7 +96,9 @@ public class TracingTests {
             host = await StartHostAsync(dataDirectory);
             var producer = host.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
-            await host.Services.GetRequiredService<IRemontoireAdmin>().CreateStreamAsync(stream);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            await admin.EnsureStreamAsync(stream);
+            await admin.EnsureConsumerGroupAsync(stream, "trace-group");
 
             await producer.PublishAsync(stream, "key-1", "one"u8.ToArray());
             await producer.PublishAsync(stream, "key-2", "two"u8.ToArray());
@@ -145,7 +151,9 @@ public class TracingTests {
             host = await StartHostAsync(dataDirectory);
             var producer = host.Services.GetRequiredService<IRemontoireProducer>();
             var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
-            await host.Services.GetRequiredService<IRemontoireAdmin>().CreateStreamAsync(stream);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            await admin.EnsureStreamAsync(stream);
+            await admin.EnsureConsumerGroupAsync(stream, "trace-group");
 
             var source = new ActivitySource(testSourceName);
             Activity? ambient = null;

@@ -101,10 +101,20 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
         builder.Services.AddSingleton(table);
         builder.Services.AddSingleton(journal);
         builder.Services.AddSingleton(orchestrator);
+        builder.Services.AddSingleton(TestNodes.Node(raftRegistry, messagingRegistry, table, journal));
+        builder.Services.AddSingleton(new RemontoireNodeInfo(HostsMetaGroupReplica: true));
+        builder.Services.AddSingleton<NodeAdmin>();
 
         var metaReplica = await StartSingleNodeReplicaAsync("__meta__", "meta-node");
         raftRegistry.Register(metaReplica);
         var metaApplier = new ShardAssignmentTableApplier(metaReplica, table, journal);
+
+        // A declaration places a new stream on a registered data group — the harness registers both.
+        await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [],
+            MetaLogRecord.Encode(new RegisterGroup(GroupOne, [new ShardGroupMember("node-1", new Uri("http://node-1.invalid/"))]))));
+        await metaReplica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [],
+            MetaLogRecord.Encode(new RegisterGroup(GroupTwo, [new ShardGroupMember("node-2", new Uri("http://node-2.invalid/"))]))));
+        (await ConditionPoller.WaitUntilAsync(() => journal.Snapshot().Records.Count >= 2, TimeSpan.FromSeconds(5))).Should().BeTrue();
 
         var groupOneReplica = await StartSingleNodeReplicaAsync(GroupOne, "node-1");
         raftRegistry.Register(groupOneReplica);
@@ -168,10 +178,8 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
 
     static Metadata BearerHeader(string token) => new() { { "Authorization", $"Bearer {token}" } };
 
-    static CreateStreamRequest BootstrapRequest() => new() {
-        StreamName = StreamName, VirtualShardCount = 1, RoutingAlgorithm = RoutingAlgorithmProto.XxHash3V1,
-        InitialGroups = { new PhysicalGroupDescriptorProto { GroupId = GroupOne } },
-        InitialAssignments = { new VirtualShardAssignmentProto { VirtualShardIndex = 0, GroupId = GroupOne } },
+    static EnsureStreamRequest BootstrapRequest() => new() {
+        StreamName = StreamName, MaxRetention = Duration.FromTimeSpan(TimeSpan.FromDays(30)),
     };
 
     static async Task<List<MetaLogRecordView>> ReadRecordsAsync(AsyncServerStreamingCall<MetaLogRecordView> call, int count) {
@@ -186,12 +194,12 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
 
     public class AuthorizationGating {
         [Fact]
-        public async Task CreateStream_with_no_token_is_rejected_as_Unauthenticated() {
+        public async Task EnsureStream_with_no_token_is_rejected_as_Unauthenticated() {
             await using var harness = await StartHostAsync();
             using var channel = GrpcChannel.ForAddress(harness.Host.Urls.First());
             var client = new RemontoireAdmin.RemontoireAdminClient(channel);
 
-            var act = () => client.CreateStreamAsync(BootstrapRequest()).ResponseAsync;
+            var act = () => client.EnsureStreamAsync(BootstrapRequest()).ResponseAsync;
 
             var exception = await act.Should().ThrowAsync<RpcException>();
             exception.Which.StatusCode.Should().Be(StatusCode.Unauthenticated,
@@ -199,28 +207,28 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
         }
 
         [Fact]
-        public async Task CreateStream_with_a_valid_token_but_no_operator_role_is_rejected_as_PermissionDenied() {
+        public async Task EnsureStream_with_a_valid_token_but_no_operator_role_is_rejected_as_PermissionDenied() {
             await using var harness = await StartHostAsync();
             using var channel = GrpcChannel.ForAddress(harness.Host.Urls.First());
             var client = new RemontoireAdmin.RemontoireAdminClient(channel);
             var token = CreateToken(new Claim("client_id", "someone"));
 
-            var act = () => client.CreateStreamAsync(BootstrapRequest(), BearerHeader(token)).ResponseAsync;
+            var act = () => client.EnsureStreamAsync(BootstrapRequest(), BearerHeader(token)).ResponseAsync;
 
             var exception = await act.Should().ThrowAsync<RpcException>();
             exception.Which.StatusCode.Should().Be(StatusCode.PermissionDenied);
         }
 
         [Fact]
-        public async Task CreateStream_with_the_operator_role_reaches_the_services_own_logic() {
+        public async Task EnsureStream_with_the_operator_role_reaches_the_services_own_logic() {
             await using var harness = await StartHostAsync();
             using var channel = GrpcChannel.ForAddress(harness.Host.Urls.First());
             var client = new RemontoireAdmin.RemontoireAdminClient(channel);
             var token = CreateToken(new Claim("client_id", "operator-1"), new Claim("role", "operator"));
 
-            var reply = await client.CreateStreamAsync(BootstrapRequest(), BearerHeader(token));
+            var act = () => client.EnsureStreamAsync(BootstrapRequest(), BearerHeader(token)).ResponseAsync;
 
-            reply.ResultCase.Should().Be(CreateStreamReply.ResultOneofCase.Success);
+            await act.Should().NotThrowAsync();
         }
     }
 
@@ -258,7 +266,9 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
             var client = new RemontoireAdmin.RemontoireAdminClient(channel);
             var header = BearerHeader(CreateToken(new Claim("client_id", "operator-1"), new Claim("role", "operator")));
 
-            (await client.CreateStreamAsync(BootstrapRequest(), header)).ResultCase.Should().Be(CreateStreamReply.ResultOneofCase.Success);
+            // The placement picks group-1: both registered groups serve no shards yet, and group-1
+            // is ordinally the smallest.
+            await client.EnsureStreamAsync(BootstrapRequest(), header);
 
             var migrationId = Guid.NewGuid().ToString();
             (await client.StartReshardAsync(new StartReshardRequest {
@@ -286,26 +296,28 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
                 MigrationId = migrationId, StreamName = StreamName, VirtualShardIndex = 0,
             }, header)).ResultCase.Should().Be(CompleteReshardReply.ResultOneofCase.Success);
 
-            (await client.SetConsumerGroupFlagAsync(new SetConsumerGroupFlagRequest {
-                StreamName = StreamName, ConsumerGroup = "billing", AckMode = AckModeProto.Checkpoint,
-            }, header)).ResultCase.Should().Be(SetConsumerGroupFlagReply.ResultOneofCase.Success);
-            // Unlike Cutover, this RPC returns as soon as the meta-group commits — it never waits
-            // for ShardAssignmentTableApplier's own, separate background loop to have applied the
-            // record locally yet, so the table read right after must poll rather than assume.
-            (await ConditionPoller.WaitUntilAsync(
-                () => harness.Table.GetConsumerGroupPolicy(StreamName, "billing").Mode == AckMode.Checkpoint, TimeSpan.FromSeconds(5))).Should().BeTrue();
+            await client.EnsureConsumerGroupAsync(new EnsureConsumerGroupRequest {
+                StreamName = StreamName, ConsumerGroup = "billing", AckMode = AckModeProto.Checkpoint, Mandatory = true,
+            }, header);
+            // Ensure… waits for this node's own journal, and the applier applies a record to the
+            // table before appending it there — so the table shows the policy right away.
+            harness.Table.GetConsumerGroupPolicy(StreamName, "billing").Mode.Should().Be(AckMode.Checkpoint);
 
-            // CreateStream(1) -> RegisterGroup(1) -> MigrationStarted+Cutover(2, bootstrap) -> MigrationStarted(1, StartReshard)
-            // -> Cutover(1, the real one) -> MigrationCompleted(1) -> SetConsumerGroupAckMode(1) = 8.
+            // RegisterGroup(2, harness) -> CreateStream(1) -> MigrationStarted+Cutover(2, bootstrap) -> MigrationStarted(1, StartReshard)
+            // -> Cutover(1, the real one) -> MigrationCompleted(1) -> DeclareConsumerGroup(1) = 9.
             using var listCall = client.ListMetaLogRecords(new ListMetaLogRecordsRequest { FromVersion = 0 }, header);
-            var records = await ReadRecordsAsync(listCall, count: 8);
+            var records = await ReadRecordsAsync(listCall, count: 9);
 
             records.Should().Contain(r => r.RecordType == "CreateStream" && r.ProposedBy == "operator-1",
-                "CreateStream proposes via ToAppendRequest, which sets proposed-by from User.Identity.Name (NameClaimType client_id)");
+                "NodeAdmin proposes with the caller's name, which ProposedBy resolves from User.Identity.Name (NameClaimType client_id)");
+            records.Should().Contain(r => r.RecordType == "DeclareConsumerGroup" && r.ProposedBy == "operator-1");
+            records.Count(r => r.RecordType == "MigrationStarted").Should().Be(2);
+            records.Should().Contain(r => r.RecordType == "MigrationStarted" && r.ProposedBy == "operator-1",
+                "the bootstrap's own MigrationStarted, proposed via NodeAdmin, names the operator");
             records.Should().Contain(r => r.RecordType == "MigrationStarted" && r.ProposedBy == "",
-                "StartReshard/CreateStream's own bootstrap MigrationStarted both propose via ReshardOrchestrator/a shared record type — neither ever sets a proposed-by header");
+                "StartReshard proposes via ReshardOrchestrator, which never sets a proposed-by header");
             records.Should().Contain(r => r.RecordType == "MigrationCompleted" && r.ProposedBy == "");
-            records.Count(r => r.RecordType == "Cutover").Should().Be(2, "one from CreateStream's own bootstrap, one from the real reshard");
+            records.Count(r => r.RecordType == "Cutover").Should().Be(2, "one from the bootstrap, one from the real reshard");
         }
     }
 }

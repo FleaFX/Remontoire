@@ -5,16 +5,14 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 
 service RemontoireAdmin {
-  rpc CreateStream(CreateStreamRequest) returns (CreateStreamReply);
+  rpc EnsureStream(EnsureStreamRequest) returns (google.protobuf.Empty);
+  rpc EnsureConsumerGroup(EnsureConsumerGroupRequest) returns (google.protobuf.Empty);
 
   rpc StartReshard(StartReshardRequest) returns (StartReshardReply);
   rpc CopyReshardData(CopyReshardDataRequest) returns (stream CopyReshardDataProgress);
   rpc Cutover(CutoverRequest) returns (CutoverReply);
   rpc CompleteReshard(CompleteReshardRequest) returns (CompleteReshardReply);
   rpc AbortReshard(AbortReshardRequest) returns (AbortReshardReply);
-
-  rpc SetConsumerGroupFlag(SetConsumerGroupFlagRequest) returns (SetConsumerGroupFlagReply);
-  rpc SetStreamPolicy(SetStreamPolicyRequest) returns (SetStreamPolicyReply);
 
   rpc ListMetaLogRecords(ListMetaLogRecordsRequest) returns (stream MetaLogRecordView);
 }
@@ -26,43 +24,30 @@ message NotLeader {
   optional string leader_address = 2;
 }
 
-message CreateStreamRequest {
+// EnsureStream and EnsureConsumerGroup answer with a status code: INVALID_ARGUMENT for an invalid
+// name or option, ALREADY_EXISTS for a stream that exists with a configuration a declaration cannot
+// change, UNAVAILABLE while the meta group has no reachable leader (retry), FAILED_PRECONDITION on a
+// node without a meta-group replica (try another one). Any node with a meta-group replica serves
+// them: it forwards to the meta-group leader itself.
+message EnsureStreamRequest {
   string stream_name = 1;
-  int32 virtual_shard_count = 2;
-  RoutingAlgorithmProto routing_algorithm = 3;
-  repeated PhysicalGroupDescriptorProto initial_groups = 4;
-  repeated VirtualShardAssignmentProto initial_assignments = 5; // must cover every index 0..virtual_shard_count-1 exactly once
+  google.protobuf.Duration max_retention = 2;           // required
+  optional int64 max_size_bytes_per_virtual_shard = 3;  // absent: no size limit
+  google.protobuf.Duration checkpoint_interval = 4;     // absent: no time trigger
+  optional int32 checkpoint_offset_count = 5;           // absent: no offset trigger
 }
 
-enum RoutingAlgorithmProto {
-  ROUTING_ALGORITHM_UNSPECIFIED = 0;
-  XX_HASH3_V1 = 1; // mirrors Remontoire.Sharding.RoutingAlgorithm.XxHash3V1
+message EnsureConsumerGroupRequest {
+  string stream_name = 1;
+  string consumer_group = 2;
+  AckModeProto ack_mode = 3;
+  bool mandatory = 4;
 }
 
-// Renamed from the bare "PhysicalGroupDescriptor" in the product-level sketch: that exact name
-// already exists as a public readonly record struct in Remontoire.Sharding, and RemontoireAdminGrpcService
-// needs both namespaces in scope at once.
-message PhysicalGroupDescriptorProto {
-  string group_id = 1;
-  repeated ShardGroupMemberProto members = 2;
-}
-
-message ShardGroupMemberProto {
-  string node_id = 1;
-  string address = 2;
-}
-
-// Renamed for the same reason as PhysicalGroupDescriptorProto above.
-message VirtualShardAssignmentProto {
-  int32 virtual_shard_index = 1;
-  string group_id = 2; // must appear in initial_groups
-}
-
-message CreateStreamReply {
-  oneof result {
-    google.protobuf.Empty success = 1;
-    NotLeader not_leader = 2;
-  }
+enum AckModeProto {
+  ACK_MODE_UNSPECIFIED = 0;
+  STRICT = 1;
+  CHECKPOINT = 2;
 }
 
 message StartReshardRequest {
@@ -138,52 +123,6 @@ message AbortReshardRequest {
 }
 
 message AbortReshardReply {
-  oneof result {
-    google.protobuf.Empty success = 1;
-    NotLeader not_leader = 2;
-  }
-}
-
-message SetConsumerGroupFlagRequest {
-  string stream_name = 1;
-  string consumer_group = 2;
-  oneof setting {
-    AckModeProto ack_mode = 3;
-    bool mandatory = 4;
-  }
-}
-
-enum AckModeProto {
-  ACK_MODE_UNSPECIFIED = 0;
-  STRICT = 1;
-  CHECKPOINT = 2;
-}
-
-message SetConsumerGroupFlagReply {
-  oneof result {
-    google.protobuf.Empty success = 1;
-    NotLeader not_leader = 2;
-  }
-}
-
-message SetStreamPolicyRequest {
-  string stream_name = 1;
-  optional RetentionPolicy retention = 2;
-  optional CheckpointInterval checkpoint = 3; // at least one of the two must be set
-}
-
-message RetentionPolicy {
-  google.protobuf.Duration audit_retention = 1;
-  google.protobuf.Duration max_retention = 2;
-  optional int64 max_size_bytes_per_virtual_shard = 3;
-}
-
-message CheckpointInterval {
-  optional google.protobuf.Duration interval = 1;
-  optional int32 offset_count = 2;
-}
-
-message SetStreamPolicyReply {
   oneof result {
     google.protobuf.Empty success = 1;
     NotLeader not_leader = 2;

@@ -4,7 +4,7 @@ namespace Remontoire.Sharding;
 
 /// <summary>
 /// One committed admin command in the meta-group's own log — a create-stream, register-group,
-/// or resharding-lifecycle command. Encoded as its own small binary format rather than protobuf:
+/// resharding-lifecycle or policy command. Encoded as its own small binary format rather than protobuf:
 /// admin-command volume is tiny compared to message volume, and this project carries no project
 /// references it would otherwise need in order to reuse an existing wire format.
 /// </summary>
@@ -108,6 +108,14 @@ public abstract record MetaLogRecord {
                 WriteNullableInt32(writer, r.OffsetCount);
                 break;
 
+            case DeclareConsumerGroup r:
+                writer.Write((byte)MetaLogRecordType.DeclareConsumerGroup);
+                writer.Write(r.StreamName);
+                writer.Write(r.ConsumerGroup);
+                writer.Write((byte)r.Mode);
+                writer.Write(r.Mandatory);
+                break;
+
             default:
                 throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case.");
         }
@@ -135,6 +143,8 @@ public abstract record MetaLogRecord {
                 new SetStreamRetentionPolicy(reader.ReadString(), TimeSpan.FromTicks(reader.ReadInt64()), TimeSpan.FromTicks(reader.ReadInt64()), ReadNullableInt64(reader)),
             MetaLogRecordType.SetStreamCheckpointInterval =>
                 ReadSetStreamCheckpointInterval(reader),
+            MetaLogRecordType.DeclareConsumerGroup =>
+                new DeclareConsumerGroup(reader.ReadString(), reader.ReadString(), ReadAckMode(reader), reader.ReadBoolean()),
             _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown MetaLogRecordType tag."),
         };
     }
@@ -247,3 +257,10 @@ public sealed record SetStreamRetentionPolicy(string StreamName, TimeSpan AuditR
 /// own default.
 /// </summary>
 public sealed record SetStreamCheckpointInterval(string StreamName, TimeSpan? Interval, int? OffsetCount) : MetaLogRecord;
+
+/// <summary>
+/// Declares one consumer group on one stream with its whole policy, or replaces the policy of a
+/// declared group. Only a declared group can consume and ack; a mandatory one holds back
+/// retention from its declaration on, acked or not.
+/// </summary>
+public sealed record DeclareConsumerGroup(string StreamName, string ConsumerGroup, AckMode Mode, bool Mandatory) : MetaLogRecord;

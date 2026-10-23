@@ -63,7 +63,7 @@ public class HealthCheckRegistrationTests {
             (await StatusAsync(service, "remontoire-disk-space")).Should().Be(HealthStatus.Healthy, "no directory is open yet");
 
             await host.StartAsync();
-            await host.Services.GetRequiredService<IRemontoireAdmin>().CreateStreamAsync("health");
+            await host.Services.GetRequiredService<IRemontoireAdmin>().EnsureStreamAsync("health");
 
             (await StatusAsync(service, "remontoire-readiness")).Should().Be(HealthStatus.Healthy);
             (await StatusAsync(service, "remontoire-liveness")).Should().Be(HealthStatus.Healthy);

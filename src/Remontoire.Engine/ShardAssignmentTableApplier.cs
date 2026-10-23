@@ -40,8 +40,10 @@ public sealed class ShardAssignmentTableApplier : IAsyncDisposable {
                 // establishing NoOp entries (and any future ShardConfigChange) carry no payload
                 // this format can decode, and must never reach it.
                 if (record.RecordType == WalRecordType.Append) {
-                    journal?.Append(record.LogicalOffset, record.Payload.ToArray(), record.TimestampMicros, record.Headers);
                     table.Apply(MetaLogRecord.Decode(record.Payload.Span));
+                    // After the table, never before: whoever finds a version in the journal finds its
+                    // effect in the table.
+                    journal?.Append(record.LogicalOffset, record.Payload.ToArray(), record.TimestampMicros, record.Headers);
                 }
 
                 Volatile.Write(ref _appliedIndex, record.RaftIndex);

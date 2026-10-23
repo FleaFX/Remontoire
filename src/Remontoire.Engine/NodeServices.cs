@@ -11,14 +11,15 @@ namespace Remontoire.Engine;
 /// </summary>
 public static class NodeServices {
     /// <summary>
-    /// Registers the shared node services as singletons, and the host's <c>IMeterFactory</c> when it
-    /// has none yet.
+    /// Registers the shared node services as singletons, <see cref="IRemontoireAdmin"/> among them,
+    /// and the host's <c>IMeterFactory</c> when it has none yet.
     /// </summary>
     /// <param name="services">The service collection to register into.</param>
     /// <param name="hostsMetaGroupReplica">Whether this node hosts a meta-group replica.</param>
-    public static void Add(IServiceCollection services, bool hostsMetaGroupReplica) {
+    /// <param name="ownGroupMember">Embedded: the only member of each stream's own group; <see langword="null"/> on a cluster node.</param>
+    public static void Add(IServiceCollection services, bool hostsMetaGroupReplica, ShardGroupMember? ownGroupMember = null) {
         services.AddMetrics();
-        services.AddSingleton(new RemontoireNodeInfo(hostsMetaGroupReplica));
+        services.AddSingleton(new RemontoireNodeInfo(hostsMetaGroupReplica, ownGroupMember));
         services.AddSingleton<RaftReplicaRegistry>();
         services.AddSingleton<MessagingGroupRegistry>();
         services.AddSingleton<LeaderAddressDirectory>();
@@ -29,5 +30,7 @@ public static class NodeServices {
         services.AddSingleton<RemontoireMetrics>();
         services.AddSingleton<RemontoireNode>();
         services.AddSingleton<MessagingOperations>();
+        services.AddSingleton<NodeAdmin>();
+        services.AddSingleton<IRemontoireAdmin>(provider => provider.GetRequiredService<NodeAdmin>());
     }
 }

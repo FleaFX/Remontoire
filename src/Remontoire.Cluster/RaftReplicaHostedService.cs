@@ -23,14 +23,25 @@ namespace Remontoire.Cluster;
 /// </remarks>
 sealed class RaftReplicaHostedService(
     IOptions<RemontoireClusterOptions> options, RemontoireNode node, LeaderAddressDirectory leaderAddresses,
-    ShardAssignmentTable assignmentTable, ILoggerFactory loggerFactory)
+    ShardAssignmentTable assignmentTable, ILoggerFactory loggerFactory, IEnumerable<RemontoireDeclaration> declarations)
     : IHostedService {
+    static readonly TimeSpan RegistrationRetryDelay = TimeSpan.FromSeconds(1);
+
+    readonly CancellationTokenSource _cts = new();
+    Task? _groupRegistration;
+
     RaftGrpcTransport? _transport;
     ShardAssignmentWatcher? _tableWatcher;
     GrpcChannel? _watcherChannel;
 
     /// <inheritdoc />
     public async Task StartAsync(CancellationToken cancellationToken) {
+        // Declarations wait for the meta group while the host starts; on a cluster node that needs
+        // peers whose Raft endpoint listens only once every hosted service has started.
+        if (declarations.Any())
+            throw new InvalidOperationException(
+                "A cluster node does not apply AddStream or AddConsumerGroup declarations: declare them from a client (AddClient), or call IRemontoireAdmin once the host has started.");
+
         var raftOptions = options.Value;
 
         var groupPeers = raftOptions.Groups.Select(group => group.Peers.Select(peer => new RaftGroupMember(peer.NodeId, new Uri(peer.Address))));
@@ -56,6 +67,8 @@ sealed class RaftReplicaHostedService(
         if (raftOptions.MetaGroup is { } metaOptions) {
             await node.OpenMetaGroupAsync(CreateConfig(RemontoireNode.MetaGroupId, metaOptions.NodeId, metaPeers), metaOptions.DataDirectory,
                 _transport, cancellationToken);
+            var transport = _transport;
+            node.ForwardMetaProposalAsync = (leaderNodeId, request, ct) => transport.ProposeMetaAsync(leaderNodeId, request, ct);
         } else if (raftOptions.MetaGroupSeedAddresses is { Count: > 0 } seedAddresses) {
             _watcherChannel = GrpcChannel.ForAddress(seedAddresses[0], CreateWatcherChannelOptions(raftOptions.ConfigureHttpHandler));
             var client = new ShardAssignmentMeta.ShardAssignmentMetaClient(_watcherChannel);
@@ -63,10 +76,18 @@ sealed class RaftReplicaHostedService(
         }
 
         node.MarkStarted();
+
+        if (raftOptions.MetaGroup is not null && raftOptions.Groups.Count > 0 && raftOptions.ClientAddress is { } clientAddress)
+            _groupRegistration = Task.Run(() => RegisterGroupsAsync(raftOptions.Groups, new Uri(clientAddress), _cts.Token));
     }
 
     /// <inheritdoc />
     public async Task StopAsync(CancellationToken cancellationToken) {
+        await _cts.CancelAsync();
+        if (_groupRegistration is not null)
+            await _groupRegistration;
+        node.ForwardMetaProposalAsync = null;
+
         if (_tableWatcher is not null)
             await _tableWatcher.DisposeAsync();
         _watcherChannel?.Dispose();
@@ -74,6 +95,35 @@ sealed class RaftReplicaHostedService(
         await node.StopAsync();
 
         _transport?.Dispose();
+        _cts.Dispose();
+    }
+
+    // Clients and new streams find a data group through the meta log. A node with a meta-group
+    // replica registers every group it hosts with the members its configuration names, itself at
+    // its client address; again at every start, so a changed address takes effect. In the
+    // background, retried: the meta group may not have a leader until the peers are up.
+    async Task RegisterGroupsAsync(IReadOnlyList<RaftGroupOptions> groups, Uri clientAddress, CancellationToken cancellationToken) {
+        var logger = loggerFactory.CreateLogger<RaftReplicaHostedService>();
+        try {
+            foreach (var group in groups) {
+                var members = group.Peers
+                    .Select(peer => new ShardGroupMember(peer.NodeId, new Uri(peer.ClientAddress ?? peer.Address)))
+                    .Append(new ShardGroupMember(group.NodeId, clientAddress))
+                    .OrderBy(member => member.NodeId, StringComparer.Ordinal)
+                    .ToArray();
+
+                while (!(assignmentTable.TryGetGroup(group.GroupId, out var registered) && registered.Members.SequenceEqual(members))) {
+                    try {
+                        await node.ProposeMetaAsync([new RegisterGroup(group.GroupId, members)], proposedBy: null, cancellationToken);
+                    } catch (Exception ex) when (ex is not OperationCanceledException) {
+                        logger.LogWarning(ex, "Could not register group {GroupId} in the meta log yet; retrying.", group.GroupId);
+                        await Task.Delay(RegistrationRetryDelay, cancellationToken);
+                    }
+                }
+            }
+        } catch (OperationCanceledException) {
+            // Expected shutdown path — StopAsync cancels and awaits this.
+        }
     }
 
     static RaftReplicaConfig CreateConfig(string groupId, string nodeId, IReadOnlyList<RaftGroupMember> peers) => new(

@@ -31,6 +31,18 @@ public sealed class MetaLogJournal {
     }
 
     /// <summary>
+    /// Whether the record with version <paramref name="version"/> has been appended, and with it
+    /// every earlier one. The applier appends a record after applying it to the table, so the table
+    /// reflects it too.
+    /// </summary>
+    /// <param name="version">The version to look for.</param>
+    /// <returns><see langword="true"/> once that version is here.</returns>
+    public bool Contains(ulong version) {
+        lock (_gate)
+            return _records.Count > 0 && _records[^1].Version >= version;
+    }
+
+    /// <summary>
     /// The full history so far, as of this call, plus the version it reflects (0 if empty).
     /// </summary>
     public (ulong Version, IReadOnlyList<(ulong Version, byte[] Payload, ulong TimestampMicros, IReadOnlyList<Header> Headers)> Records) Snapshot() {

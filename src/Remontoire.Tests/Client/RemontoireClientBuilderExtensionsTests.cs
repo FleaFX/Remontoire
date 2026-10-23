@@ -16,5 +16,6 @@ public class RemontoireClientBuilderExtensionsTests {
         var connection = provider.GetRequiredService<RemontoireConnection>();
         provider.GetRequiredService<IRemontoireProducer>().Should().BeSameAs(connection);
         provider.GetRequiredService<IRemontoireConsumer>().Should().BeSameAs(connection);
+        provider.GetRequiredService<IRemontoireAdmin>().Should().BeSameAs(connection);
     }
 }

@@ -2,6 +2,7 @@ using System.Text;
 using FluentAssertions;
 using Grpc.Core;
 using Remontoire.Admin.V1;
+using Remontoire.Engine;
 using Remontoire.Sharding;
 using Remontoire.Storage;
 
@@ -9,23 +10,9 @@ namespace Remontoire.Server;
 
 // The RPC methods themselves need a real ServerCallContext (no fake precedent in this codebase,
 // see RemontoireClientGrpcServiceTests's own remarks) — so only the extracted, pure logic is
-// covered here. End-to-end coverage of CreateStream's own bootstrap sequence lives in a later,
-// real-network harness once enough of the admin surface exists to justify one.
+// covered here. End-to-end coverage of EnsureStream's own bootstrap sequence lives in
+// RemontoireAdminGrpcServiceEndToEndTests.
 public class RemontoireAdminGrpcServiceTests {
-    public class MapRoutingAlgorithm {
-        [Fact]
-        public void Maps_XxHash3V1_to_its_C_sharp_counterpart() {
-            RemontoireAdminGrpcService.MapRoutingAlgorithm(RoutingAlgorithmProto.XxHash3V1).Should().Be(RoutingAlgorithm.XxHash3V1);
-        }
-
-        [Fact]
-        public void Rejects_unspecified_as_an_invalid_argument_rather_than_defaulting_silently() {
-            var act = () => RemontoireAdminGrpcService.MapRoutingAlgorithm(RoutingAlgorithmProto.RoutingAlgorithmUnspecified);
-
-            act.Should().Throw<RpcException>().Which.Status.StatusCode.Should().Be(StatusCode.InvalidArgument);
-        }
-    }
-
     public class MapAckMode {
         [Fact]
         public void Maps_Strict_to_its_C_sharp_counterpart() {
@@ -58,28 +45,6 @@ public class RemontoireAdminGrpcServiceTests {
             var act = () => RemontoireAdminGrpcService.ParseMigrationId("not-a-guid");
 
             act.Should().Throw<RpcException>().Which.Status.StatusCode.Should().Be(StatusCode.InvalidArgument);
-        }
-    }
-
-    public class CoversEveryIndexExactlyOnce {
-        [Fact]
-        public void Returns_true_when_every_index_is_present_exactly_once() {
-            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1, 2], virtualShardCount: 3).Should().BeTrue();
-        }
-
-        [Fact]
-        public void Returns_false_when_an_index_is_missing() {
-            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1], virtualShardCount: 3).Should().BeFalse();
-        }
-
-        [Fact]
-        public void Returns_false_when_an_index_is_duplicated_masking_a_missing_one() {
-            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1, 1], virtualShardCount: 3).Should().BeFalse();
-        }
-
-        [Fact]
-        public void Returns_false_when_an_index_is_out_of_range() {
-            RemontoireAdminGrpcService.CoversEveryIndexExactlyOnce([0, 1, 5], virtualShardCount: 3).Should().BeFalse();
         }
     }
 
@@ -210,6 +175,15 @@ public class RemontoireAdminGrpcServiceTests {
             fields["OffsetCount"].Should().BeEmpty();
         }
 
+        [Fact]
+        public void Describes_a_DeclareConsumerGroup_record() {
+            var (recordType, fields) = RemontoireAdminGrpcService.Describe(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false));
+
+            recordType.Should().Be("DeclareConsumerGroup");
+            fields.Should().Equal(new Dictionary<string, string> {
+                ["StreamName"] = "orders", ["ConsumerGroup"] = "billing", ["Mode"] = AckMode.Checkpoint.ToString(), ["Mandatory"] = false.ToString(),
+            });
+        }
     }
 
     public class FindProposedBy {
@@ -221,7 +195,7 @@ public class RemontoireAdminGrpcServiceTests {
         [Fact]
         public void Returns_the_value_of_the_matching_header() {
             var headers = new[] {
-                new Header(Encoding.UTF8.GetBytes(RemontoireAdminGrpcService.ProposedByHeaderKey), Encoding.UTF8.GetBytes("client-1")),
+                new Header(Encoding.UTF8.GetBytes(RemontoireNode.ProposedByHeaderKey), Encoding.UTF8.GetBytes("client-1")),
             };
 
             RemontoireAdminGrpcService.FindProposedBy(headers).Should().Be("client-1");
@@ -232,6 +206,33 @@ public class RemontoireAdminGrpcServiceTests {
             var headers = new[] { new Header(Encoding.UTF8.GetBytes("correlation-id"), Encoding.UTF8.GetBytes("abc")) };
 
             RemontoireAdminGrpcService.FindProposedBy(headers).Should().BeNull();
+        }
+    }
+
+    public class ToStatus {
+        [Theory]
+        [InlineData(0)]
+        [InlineData(1)]
+        [InlineData(2)]
+        [InlineData(3)]
+        [InlineData(4)]
+        public void Maps_each_exception_to_its_status_code(int caseIndex) {
+            Exception exception = caseIndex switch {
+                0 => new ArgumentException("invalid"),
+                1 => new RemontoireConflictException("conflict"),
+                2 => new RemontoireUnavailableException("group-1", 1),
+                3 => new TimeoutException(),
+                _ => new InvalidOperationException("no replica"),
+            };
+            var expected = caseIndex switch {
+                0 => StatusCode.InvalidArgument,
+                1 => StatusCode.AlreadyExists,
+                2 => StatusCode.Unavailable,
+                3 => StatusCode.Unavailable,
+                _ => StatusCode.FailedPrecondition,
+            };
+
+            RemontoireAdminGrpcService.ToStatus(exception).Should().Be(new Status(expected, exception.Message));
         }
     }
 }

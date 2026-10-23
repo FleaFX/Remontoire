@@ -24,6 +24,11 @@ public sealed partial class ShardAssignmentTable {
     public bool TryGetGroup(string groupId, out PhysicalGroupDescriptor group) => _groups.TryGetValue(groupId, out group);
 
     /// <summary>
+    /// Every currently-known physical group, snapshotted — the candidates for a new stream.
+    /// </summary>
+    public IReadOnlyCollection<PhysicalGroupDescriptor> EnumerateGroups() => _groups.Values.ToArray();
+
+    /// <summary>
     /// Looks up which physical group currently serves a stream's virtual shard.
     /// </summary>
     public bool TryGetAssignment(string streamName, int virtualShardIndex, out VirtualShardAssignment assignment) =>
@@ -47,7 +52,9 @@ public sealed partial class ShardAssignmentTable {
     /// migration this table currently considers in progress for that (stream, virtual shard)
     /// pair — the same "reject a second, conflicting command instead of applying it" discipline
     /// membership changes already apply, here guarding against a stale or duplicate command
-    /// silently corrupting an unrelated, later migration for the same shard.
+    /// silently corrupting an unrelated, later migration for the same shard. A <see cref="Cutover"/>
+    /// must also point at its own migration's target: a second bootstrap of the same stream, with
+    /// the same deterministic migration id but another group, must not reroute it.
     /// <see cref="Cutover"/> deliberately keeps <see cref="VirtualShardAssignment.MigrationId"/>
     /// set (only <see cref="VirtualShardAssignment.MigratingToGroupId"/> is cleared) — a
     /// completed migration's id must stay remembered, or a late-arriving duplicate
@@ -59,7 +66,9 @@ public sealed partial class ShardAssignmentTable {
     public void Apply(MetaLogRecord record) {
         switch (record) {
             case CreateStream r:
-                _streams[r.StreamName] = new StreamShardingConfig(r.StreamName, r.VirtualShardCount, r.RoutingAlgorithm);
+                // The first one wins: a stream's sharding is fixed at creation, and a second
+                // CreateStream with other choices would silently reroute its partition keys.
+                _streams.TryAdd(r.StreamName, new StreamShardingConfig(r.StreamName, r.VirtualShardCount, r.RoutingAlgorithm));
                 break;
 
             case RegisterGroup r:
@@ -91,7 +100,7 @@ public sealed partial class ShardAssignmentTable {
 
             case Cutover r:
                 if (_assignments.TryGetValue((r.StreamName, r.VirtualShardIndex), out var beforeCutover) &&
-                    beforeCutover.MigrationId == r.MigrationId)
+                    beforeCutover.MigrationId == r.MigrationId && beforeCutover.MigratingToGroupId == r.ToGroupId)
                     _assignments[(r.StreamName, r.VirtualShardIndex)] =
                         new VirtualShardAssignment(r.StreamName, r.VirtualShardIndex, r.ToGroupId, MigrationId: r.MigrationId);
                 break;
@@ -101,7 +110,7 @@ public sealed partial class ShardAssignmentTable {
                 // change — this record carries no table update.
                 break;
 
-            case SetConsumerGroupAckMode or SetConsumerGroupMandatory or SetStreamRetentionPolicy or SetStreamCheckpointInterval:
+            case SetConsumerGroupAckMode or SetConsumerGroupMandatory or DeclareConsumerGroup or SetStreamRetentionPolicy or SetStreamCheckpointInterval:
                 ApplyPolicyRecord(record);
                 break;
 

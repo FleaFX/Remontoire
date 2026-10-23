@@ -326,6 +326,8 @@ public class RemontoireGrpcClusterTests {
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
 
+            await DeclareConsumerGroupAsync(nodes, "group-a");
+
             using var connection = Connect(nodes);
             var result = await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
             result.Offset.Should().Be(0);
@@ -361,6 +363,8 @@ public class RemontoireGrpcClusterTests {
         var nodes = await StartClusterAsync(directoryRoot);
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            await DeclareConsumerGroupAsync(nodes, "group-a");
 
             using var connection = Connect(nodes);
             await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
@@ -412,6 +416,8 @@ public class RemontoireGrpcClusterTests {
                 if (instrument.Name == "remontoire.ack.latency") latencyMeasurements.Add((value, tags.ToArray()));
             });
             listener.Start();
+
+            await DeclareConsumerGroupAsync(nodes, "group-a");
 
             using var connection = Connect(nodes);
             await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
@@ -505,6 +511,10 @@ public class RemontoireGrpcClusterTests {
             var follower = nodes.First(node => !node.Replica.IsLeader);
             var (soloReplica, soloApplier) = await SeedSoleKnownMemberAsync(follower);
             try {
+                await DeclareConsumerGroupAsync(nodes, "group-a");
+                // This connection's watcher reads the follower's journal, fed by the solo replica when the follower has none of its own.
+                await DeclareConsumerGroupAsync([follower], "group-a", metaReplica: soloReplica);
+
                 using var connection = Connect([follower]); // its own table only ever lists the follower's address
 
                 List<RemontoireMessage> messages;
@@ -531,6 +541,8 @@ public class RemontoireGrpcClusterTests {
         var nodes = await StartClusterAsync(directoryRoot);
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            await DeclareConsumerGroupAsync(nodes, "group-a");
 
             using var connection = Connect(nodes);
             await PublishOnceReadyAsync(connection, StreamName, "key-1", "one"u8.ToArray());
@@ -569,6 +581,8 @@ public class RemontoireGrpcClusterTests {
         var nodes = await StartClusterAsync(directoryRoot);
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+
+            await DeclareConsumerGroupAsync(nodes, "group-a");
 
             using var connection = Connect(nodes);
             var first = await PublishOnceReadyAsync(connection, StreamName, "key-1", "one"u8.ToArray());
@@ -611,7 +625,7 @@ public class RemontoireGrpcClusterTests {
         var nodes = await StartClusterAsync(directoryRoot);
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
-            SetCheckpointMode(nodes, "checkpoint-group");
+            await DeclareConsumerGroupAsync(nodes, "checkpoint-group", AckMode.Checkpoint);
 
             using var connection = Connect(nodes);
             var published = await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
@@ -634,7 +648,7 @@ public class RemontoireGrpcClusterTests {
         var nodes = await StartClusterAsync(directoryRoot);
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
-            SetCheckpointMode(nodes, "checkpoint-group");
+            await DeclareConsumerGroupAsync(nodes, "checkpoint-group", AckMode.Checkpoint);
             var follower = nodes.First(node => !node.Replica.IsLeader);
 
             using var channel = GrpcChannel.ForAddress(follower.Host.Urls.First());
@@ -657,7 +671,7 @@ public class RemontoireGrpcClusterTests {
         var nodes = await StartClusterAsync(directoryRoot);
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
-            SetCheckpointMode(nodes, "checkpoint-group");
+            await DeclareConsumerGroupAsync(nodes, "checkpoint-group", AckMode.Checkpoint);
 
             using var connection = Connect(nodes);
             await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
@@ -682,9 +696,22 @@ public class RemontoireGrpcClusterTests {
         }
     }
 
-    static void SetCheckpointMode(IEnumerable<Node> nodes, string consumerGroup) {
+    // Only a declared consumer group can consume and ack. Applies the declaration to every node's
+    // table, and commits it on the meta replica that feeds node 0's journal — the source of the
+    // clients' watchers — so a fresh connection sees it too: node 0's own, unless metaReplica names
+    // another. Deliberately not in StartClusterAsync for every group a test might use: a mandatory
+    // group a test never consumes with holds back pruning.
+    static async Task DeclareConsumerGroupAsync(IReadOnlyList<Node> nodes, string consumerGroup, AckMode mode = AckMode.Strict, bool mandatory = true, RaftReplica? metaReplica = null) {
         foreach (var node in nodes)
-            node.Host.Services.GetRequiredService<ShardAssignmentTable>().Apply(new SetConsumerGroupAckMode(StreamName, consumerGroup, AckMode.Checkpoint));
+            node.Host.Services.GetRequiredService<ShardAssignmentTable>().Apply(new DeclareConsumerGroup(StreamName, consumerGroup, mode, mandatory));
+
+        var journal = nodes[0].Host.Services.GetRequiredService<MetaLogJournal>();
+        if ((metaReplica ?? nodes[0].MetaReplica) is { } replica) {
+            await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [],
+                MetaLogRecord.Encode(new DeclareConsumerGroup(StreamName, consumerGroup, mode, mandatory))));
+            await RunUntilAsync(() => journal.Snapshot().Records.Any(record =>
+                MetaLogRecord.Decode(record.Payload) is DeclareConsumerGroup declared && declared.ConsumerGroup == consumerGroup), TimeSpan.FromSeconds(5));
+        }
     }
 
     static bool Dispose(LogEntryHandle handle) {
@@ -712,8 +739,10 @@ public class RemontoireGrpcClusterTests {
                 table.Apply(new MigrationStarted(dlMigrationId, $"{StreamName}.__deadletter__", 0, GroupId, GroupId));
                 table.Apply(new Cutover(dlMigrationId, $"{StreamName}.__deadletter__", 0, GroupId));
                 table.Apply(new SetStreamRetentionPolicy(StreamName, AuditRetention: TimeSpan.Zero, MaxRetention: TimeSpan.FromMilliseconds(100), MaxSizeBytesPerVirtualShard: null));
-                table.Apply(new SetConsumerGroupMandatory(StreamName, "best-effort-group", false));
             }
+
+            await DeclareConsumerGroupAsync(nodes, "mandatory-group");
+            await DeclareConsumerGroupAsync(nodes, "best-effort-group", mandatory: false);
 
             using var connection = Connect(nodes);
             await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
@@ -777,8 +806,10 @@ public class RemontoireGrpcClusterTests {
             foreach (var node in nodes) {
                 var table = node.Host.Services.GetRequiredService<ShardAssignmentTable>();
                 table.Apply(new SetStreamRetentionPolicy(StreamName, AuditRetention: TimeSpan.Zero, MaxRetention: TimeSpan.FromHours(1), MaxSizeBytesPerVirtualShard: null));
-                table.Apply(new SetConsumerGroupMandatory(StreamName, "best-effort-group", false));
             }
+
+            await DeclareConsumerGroupAsync(nodes, "mandatory-group");
+            await DeclareConsumerGroupAsync(nodes, "best-effort-group", mandatory: false);
 
             using var connection = Connect(nodes);
             var published = await PublishOnceReadyAsync(connection, StreamName, "key-1", "hello"u8.ToArray());
@@ -858,7 +889,7 @@ public class RemontoireGrpcClusterTests {
         var nodes = await StartClusterAsync(directoryRoot);
         try {
             (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
-            SetCheckpointMode(nodes, "checkpoint-group");
+            await DeclareConsumerGroupAsync(nodes, "checkpoint-group", AckMode.Checkpoint);
             foreach (var node in nodes)
                 node.Host.Services.GetRequiredService<ShardAssignmentTable>().Apply(new SetStreamCheckpointInterval(StreamName, Interval: null, OffsetCount: 1));
 

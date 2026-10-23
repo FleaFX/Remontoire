@@ -5,6 +5,9 @@ service RaftTransport {
   rpc RequestVote(VoteRequest) returns (VoteResponse);
   rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
   rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+  // Not Raft itself: a node with a meta-group replica forwards a meta-log proposal to the leader
+  // over the same trusted channel.
+  rpc ProposeMeta(ProposeMetaRequest) returns (ProposeMetaResponse);
 }
 
 message VoteRequest {
@@ -67,4 +70,31 @@ message ShardConfiguration {
 message ShardConfigMember {
   string node_id = 1;
   string address = 2; // RaftGroupMember.Address, as a Uri string
+}
+
+message ProposeMetaRequest {
+  bytes payload = 1;
+  repeated ProposeMetaHeader headers = 2;
+}
+
+message ProposeMetaHeader {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message ProposeMetaResponse {
+  oneof result {
+    ProposeMetaSuccess success = 1;
+    ProposeMetaNotLeader not_leader = 2;
+  }
+}
+
+message ProposeMetaSuccess {
+  uint64 raft_index = 1;
+  uint64 logical_offset = 2;
+  uint64 timestamp_micros = 3;
+}
+
+message ProposeMetaNotLeader {
+  optional string leader_hint = 1;
 }

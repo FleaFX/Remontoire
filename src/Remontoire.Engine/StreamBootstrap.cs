@@ -5,8 +5,8 @@ using Remontoire.Sharding;
 namespace Remontoire.Engine;
 
 /// <summary>
-/// The meta-log records that create a stream — shared by the admin endpoint and the embedded
-/// engine, so a stream is created the same way whichever path proposes it.
+/// The meta-log records that create a stream — proposed by <see cref="NodeAdmin"/>, so a stream
+/// is created the same way in every mode.
 /// </summary>
 public static class StreamBootstrap {
     /// <summary>

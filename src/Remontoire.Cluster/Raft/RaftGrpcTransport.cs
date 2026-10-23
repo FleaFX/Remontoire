@@ -1,7 +1,10 @@
+using Google.Protobuf;
 using Grpc.Core;
 using Grpc.Core.Interceptors;
 using Grpc.Net.Client;
+using Remontoire.Engine;
 using Remontoire.Raft.V1;
+using Remontoire.Storage;
 
 namespace Remontoire.Raft.Grpc;
 
@@ -17,6 +20,8 @@ public sealed class RaftGrpcTransport : IRaftTransport, IDisposable {
     readonly Dictionary<string, GrpcChannel> _channels;
     readonly Dictionary<string, RaftTransport.RaftTransportClient> _clients;
     readonly TimeSpan _rpcTimeout;
+
+    static readonly TimeSpan ForwardTimeout = TimeSpan.FromSeconds(5);
 
     /// <param name="peers">The reachable peer nodes.</param>
     /// <param name="rpcTimeout">Deadline applied to every outbound RPC, no exceptions.</param>
@@ -80,6 +85,36 @@ public sealed class RaftGrpcTransport : IRaftTransport, IDisposable {
     public async ValueTask<InstallSnapshotResponse> InstallSnapshotAsync(string peerId, InstallSnapshotRequest request, CancellationToken cancellationToken = default) {
         using var call = Client(peerId).InstallSnapshotAsync(request, deadline: DateTime.UtcNow + _rpcTimeout, cancellationToken: cancellationToken);
         return await call.ResponseAsync;
+    }
+
+    /// <summary>
+    /// Forwards one meta-log proposal to <paramref name="peerId"/>, the meta-group leader as this node
+    /// knows it, and awaits its commit there.
+    /// </summary>
+    /// <param name="peerId">The node to forward to.</param>
+    /// <param name="request">The proposal.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <returns>The commit's result on the leader.</returns>
+    /// <exception cref="NotLeaderException"><paramref name="peerId"/> is no peer of this node, can't be reached, or doesn't lead the meta group.</exception>
+    public async Task<ProposeResult> ProposeMetaAsync(string peerId, AppendRequest request, CancellationToken cancellationToken = default) {
+        if (!_clients.TryGetValue(peerId, out var client))
+            throw new NotLeaderException(RemontoireNode.MetaGroupId, leaderHint: null);
+
+        var proto = new ProposeMetaRequest { Payload = ByteString.CopyFrom(request.Payload.Span) };
+        proto.Headers.Add(request.Headers.Select(header => new ProposeMetaHeader { Key = ByteString.CopyFrom(header.Key.Span), Value = ByteString.CopyFrom(header.Value.Span) }));
+
+        ProposeMetaResponse response;
+        try {
+            // A commit takes longer than a Raft RPC: its own, longer deadline.
+            using var call = client.ProposeMetaAsync(proto, deadline: DateTime.UtcNow + ForwardTimeout, cancellationToken: cancellationToken);
+            response = await call.ResponseAsync;
+        } catch (RpcException) when (!cancellationToken.IsCancellationRequested) {
+            throw new NotLeaderException(RemontoireNode.MetaGroupId, leaderHint: null);
+        }
+
+        return response.ResultCase == ProposeMetaResponse.ResultOneofCase.Success
+            ? new ProposeResult(response.Success.RaftIndex, response.Success.LogicalOffset, response.Success.TimestampMicros)
+            : throw new NotLeaderException(RemontoireNode.MetaGroupId, response.NotLeader.HasLeaderHint ? response.NotLeader.LeaderHint : null);
     }
 
     RaftTransport.RaftTransportClient Client(string peerId) => _clients.TryGetValue(peerId, out var client)
