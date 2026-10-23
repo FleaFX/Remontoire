@@ -25,4 +25,18 @@ public class MessagingOperationsTests {
             MessagingOperations.WithinLogBounds([5, 6, 7], nextOffsetToApply: 0).Should().BeEmpty();
         }
     }
+
+    public class RetryDelay {
+        [Theory]
+        [InlineData(1, 1)]
+        [InlineData(2, 2)]
+        [InlineData(3, 4)]
+        [InlineData(6, 30)]
+        [InlineData(1000, 30)]
+        public void Doubles_from_the_initial_delay_up_to_the_maximum(int attempt, int expectedSeconds) {
+            var policy = new Remontoire.Sharding.ConsumerGroupPolicy(AckMode.Strict, true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
+
+            MessagingOperations.RetryDelay(policy, attempt).Should().Be(TimeSpan.FromSeconds(expectedSeconds));
+        }
+    }
 }

@@ -48,7 +48,13 @@ public sealed class RemontoireAdminGrpcService(
 
     /// <inheritdoc />
     public override async Task<Empty> EnsureConsumerGroup(EnsureConsumerGroupRequest request, ServerCallContext context) {
-        var options = new ConsumerGroupOptions { AckMode = MapAckMode(request.AckMode), Mandatory = request.Mandatory };
+        if (request.InitialRetryDelay is null || request.MaxRetryDelay is null)
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "initial_retry_delay and max_retry_delay are required."));
+
+        var options = new ConsumerGroupOptions {
+            AckMode = MapAckMode(request.AckMode), Mandatory = request.Mandatory, MaxRetries = request.MaxRetries,
+            InitialRetryDelay = request.InitialRetryDelay.ToTimeSpan(), MaxRetryDelay = request.MaxRetryDelay.ToTimeSpan(),
+        };
         await RunAsync(() => admin.EnsureConsumerGroupAsync(request.StreamName, request.ConsumerGroup, options, ProposedBy(context), context.CancellationToken));
         return new Empty();
     }
@@ -224,6 +230,7 @@ public sealed class RemontoireAdminGrpcService(
         }),
         DeclareConsumerGroup r => (nameof(DeclareConsumerGroup), new Dictionary<string, string> {
             ["StreamName"] = r.StreamName, ["ConsumerGroup"] = r.ConsumerGroup, ["Mode"] = r.Mode.ToString(), ["Mandatory"] = r.Mandatory.ToString(),
+            ["MaxRetries"] = r.MaxRetries.ToString(), ["InitialRetryDelay"] = r.InitialRetryDelay.ToString(), ["MaxRetryDelay"] = r.MaxRetryDelay.ToString(),
         }),
         _ => throw new ArgumentOutOfRangeException(nameof(record), record, "Unknown MetaLogRecord case."),
     };

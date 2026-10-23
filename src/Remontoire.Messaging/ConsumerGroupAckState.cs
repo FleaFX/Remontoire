@@ -30,6 +30,9 @@ public sealed class ConsumerGroupAckState {
     ImmutableSortedSet<ulong> _committedSelectiveAcks = ImmutableSortedSet<ulong>.Empty;
     ulong _lowWatermark;       // "applied" — every locally-observed ack, committed or not
     ulong _committedWatermark; // only what a Raft quorum has actually agreed on
+    PendingRetry? _retry;
+    ImmutableSortedDictionary<ulong, ParkedMessage> _parked = ImmutableSortedDictionary<ulong, ParkedMessage>.Empty;
+    TaskCompletionSource _retryChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>
     /// Every offset below this one is acked, locally — committed or not. Zero means nothing has
@@ -56,6 +59,29 @@ public sealed class ConsumerGroupAckState {
     /// Whether <paramref name="offset"/> has been acked, via the watermark or selectively.
     /// </summary>
     public bool IsAcked(ulong offset) => offset < LowWatermark || Volatile.Read(ref _selectiveAcks).Contains(offset);
+
+    /// <summary>
+    /// The nacked message the group is to be offered again, before any later one;
+    /// <see langword="null"/> when there is none, or once that message is acked or parked.
+    /// </summary>
+    public PendingRetry? Retry => Volatile.Read(ref _retry) is { } retry && !IsAcked(retry.Offset) ? retry : null;
+
+    /// <summary>
+    /// Every message the group parked, by offset. A parked message counts as acked for the group's
+    /// cursor, but holds back pruning until its maximum retention.
+    /// </summary>
+    public IReadOnlyDictionary<ulong, ParkedMessage> Parked => Volatile.Read(ref _parked);
+
+    /// <summary>
+    /// Whether the group parked the message at <paramref name="offset"/>.
+    /// </summary>
+    public bool IsParked(ulong offset) => Volatile.Read(ref _parked).ContainsKey(offset);
+
+    /// <summary>
+    /// Completes at the next nack applied to this group, retry or park — what a consume stream waits
+    /// on besides new messages. Take it before reading the state it guards.
+    /// </summary>
+    public Task RetryChanged => Volatile.Read(ref _retryChanged).Task;
 
     /// <summary>
     /// Strict mode's replay path only: records every offset in <paramref name="offsets"/>,
@@ -141,5 +167,39 @@ public sealed class ConsumerGroupAckState {
             Volatile.Write(ref _selectiveAcks, ImmutableSortedSet.CreateRange(_selectiveAcks.Where(offset => offset >= watermark)));
             Volatile.Write(ref _lowWatermark, watermark);
         }
+    }
+
+    /// <summary>
+    /// Schedules the message at <paramref name="offset"/> to be offered again as attempt
+    /// <paramref name="attempt"/> from <paramref name="notBeforeMicros"/> on. Ignored for an offset
+    /// that is already acked, and while an earlier offset waits for its own retry: the group offers
+    /// that one first. Only ever called from <see cref="AckIndex"/>'s own actor thread, same as
+    /// <see cref="Ack"/>.
+    /// </summary>
+    internal void Nack(ulong offset, int attempt, ulong notBeforeMicros) {
+        if (IsAcked(offset) || Retry is { } pending && pending.Offset < offset)
+            return;
+
+        Volatile.Write(ref _retry, new PendingRetry(offset, attempt, notBeforeMicros));
+        SignalRetryChanged();
+    }
+
+    /// <summary>
+    /// Parks the message at <paramref name="offset"/>: acks it, committed like <see cref="Ack"/>, and
+    /// keeps <paramref name="parked"/> for it. Idempotent, like every apply. Only ever called from
+    /// <see cref="AckIndex"/>'s own actor thread, same as <see cref="Ack"/>.
+    /// </summary>
+    internal void Park(ulong offset, ParkedMessage parked) {
+        Ack([offset]);
+        Volatile.Write(ref _parked, _parked.SetItem(offset, parked));
+        SignalRetryChanged();
+    }
+
+    // Swaps in a fresh signal before completing the old one, like ShardLog's own append signal: a
+    // waiter that takes RetryChanged again right after waking never lands on the completed instance.
+    void SignalRetryChanged() {
+        var previous = _retryChanged;
+        Volatile.Write(ref _retryChanged, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+        previous.TrySetResult();
     }
 }

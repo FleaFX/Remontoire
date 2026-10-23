@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Extensions.Logging;
 using Remontoire.Storage;
 
@@ -17,8 +18,9 @@ public sealed record RetentionEvaluatorOptions(
     Func<IEnumerable<string>>? GetDeclaredConsumerGroups = null);
 
 /// <summary>
-/// Periodically scans for messages past their stream's max-retention window that no mandatory
-/// consumer group has yet acked, forwards each to the dead-letter stream, then folds the result
+/// Periodically scans for messages past their stream's max-retention window that a mandatory
+/// consumer group has not acked yet, or parked, forwards each to the dead-letter stream with a
+/// <see cref="DeadLetterReasonHeaderKey"/> header, then folds the result
 /// into <see cref="SafeToPruneWatermark"/> — the single number a caller wires into
 /// <see cref="CompactionPolicy.GetAckedLowWatermarkAsync"/>, so <c>Remontoire.Storage</c>
 /// never needs to know whether a given offset became prunable via a real ack or via forced
@@ -27,7 +29,18 @@ public sealed record RetentionEvaluatorOptions(
 /// duplicates message content of its own.
 /// </summary>
 public sealed class RetentionEvaluator : IAsyncDisposable {
+    /// <summary>
+    /// The header every message forwarded to the dead-letter stream carries, naming why.
+    /// </summary>
+    public const string DeadLetterReasonHeaderKey = "dead-letter-reason";
+
+    /// <summary>
+    /// The <see cref="DeadLetterReasonHeaderKey"/> value of a message forwarded after its maximum retention.
+    /// </summary>
+    public const string DeadLetterReasonMaxRetention = "max-retention";
+
     static readonly TimeSpan DefaultTickInterval = TimeSpan.FromMinutes(1);
+    static readonly Header DeadLetterReasonHeader = new(Encoding.UTF8.GetBytes(DeadLetterReasonHeaderKey), Encoding.UTF8.GetBytes(DeadLetterReasonMaxRetention));
 
     readonly RetentionEvaluatorOptions _options;
     readonly TimeProvider _timeProvider;
@@ -84,7 +97,10 @@ public sealed class RetentionEvaluator : IAsyncDisposable {
                     await foreach (var handle in _options.ShardLog.ReadFromAsync(scanFrom, cancellationToken)) {
                         using (handle) {
                             var entry = handle.Entry;
-                            if (entry.LogicalOffset < mandatoryWatermark) {
+                            // A parked message counts as acked for its group's watermark, but stays
+                            // until its maximum retention, like a message the group never acked.
+                            var parked = _options.AckIndex.IsParkedByMandatoryGroup(entry.LogicalOffset, _options.IsMandatory);
+                            if (entry.LogicalOffset < mandatoryWatermark && !parked) {
                                 // Already acked by every mandatory group — safe, no forcing needed.
                                 Volatile.Write(ref _safeToPruneWatermark, entry.LogicalOffset + 1);
                                 continue;
@@ -96,14 +112,14 @@ public sealed class RetentionEvaluator : IAsyncDisposable {
                             if (!_options.IsLeader())
                                 break; // only the leader may propose the forward — wait for it to replicate through instead of retrying a doomed propose every tick
 
-                            // Past max-retention, still not fully acked by a mandatory group — force it
+                            // Past max-retention, not acked by a mandatory group, or parked by one — force it
                             // through the dead-letter stream before letting the watermark cover it. A
                             // false return means no copy was actually made (an unprovisioned dead-letter
                             // stream, an unresolvable stream name, or a non-locally-hosted target group —
                             // all documented, silent v1 gaps) — this entry must not be treated as safe to
                             // prune in that case, so stop here and retry next tick instead of advancing
                             // past data that exists nowhere else.
-                            if (!await _options.ForwardToDeadLetterAsync(new AppendRequest(entry.PartitionKey, entry.Headers, entry.Payload), cancellationToken))
+                            if (!await _options.ForwardToDeadLetterAsync(new AppendRequest(entry.PartitionKey, [.. entry.Headers, DeadLetterReasonHeader], entry.Payload), cancellationToken))
                                 break;
 
                             Interlocked.Increment(ref _deadLetterMessagesTotal);

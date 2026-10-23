@@ -58,7 +58,7 @@ public class DeclarationsTests {
 
             var description = (await admin.GetStreamAsync("orders"))!;
             description.MaxRetention.Should().Be(TimeSpan.FromDays(14));
-            description.ConsumerGroups.Should().BeEquivalentTo([new ConsumerGroupDescription("billing", AckMode.Strict, true)]);
+            description.ConsumerGroups.Should().BeEquivalentTo([new ConsumerGroupDescription("billing", AckMode.Strict, true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30))]);
 
             await producer.PublishAsync("orders", "key-1", "one"u8.ToArray());
             var message = await FirstAsync(consumer, "orders", "billing");
@@ -119,7 +119,7 @@ public class DeclarationsTests {
             var description = (await host2.Services.GetRequiredService<IRemontoireAdmin>().GetStreamAsync("orders"))!;
 
             description.MaxRetention.Should().Be(TimeSpan.FromDays(7));
-            description.ConsumerGroups.Should().BeEquivalentTo([new ConsumerGroupDescription("billing", AckMode.Strict, false)]);
+            description.ConsumerGroups.Should().BeEquivalentTo([new ConsumerGroupDescription("billing", AckMode.Strict, false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30))]);
         } finally {
             if (host1 is not null)
                 await StopAsync(host1);

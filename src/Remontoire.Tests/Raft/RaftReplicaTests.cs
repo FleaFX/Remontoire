@@ -382,6 +382,55 @@ public class RaftReplicaTests {
 
             await act.Should().ThrowAsync<ArgumentException>();
         }
+
+        [Fact]
+        public async Task NackRequest_overload_does_not_consume_a_LogicalOffset() {
+            var (replica, _) = await StartAsync("node-1");
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader
+            await replica.DrainAsync();
+
+            await replica.ProposeAsync(new NackRequest("group-1", 7, 2, TimeSpan.FromMilliseconds(1500), Park: false, "boom"));
+            var appendResult = await replica.ProposeAsync(new AppendRequest("key"u8.ToArray(), [], "payload"u8.ToArray()));
+
+            // Same regression guard as the AckRequest overload: a nack proposal in between must not
+            // have advanced _nextLogicalOffset — the very first Append still gets LogicalOffset 0.
+            appendResult.LogicalOffset.Should().Be(0);
+        }
+
+        [Fact]
+        public async Task NackRequest_overload_commits_its_fields_in_the_Nack_payload() {
+            var (replica, _) = await StartAsync("node-1");
+            replica.TryPost(new ElectionTimeoutElapsed(replica.ElectionTimerGeneration)); // -> ready leader
+            await replica.DrainAsync();
+
+            await replica.ProposeAsync(new NackRequest("group-1", 7, 2, TimeSpan.FromMilliseconds(1500), Park: false, "boom"));
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await foreach (var record in replica.ReadCommittedAsync(cts.Token)) {
+                if (record.RecordType is not WalRecordType.Nack)
+                    continue;
+
+                System.Text.Encoding.UTF8.GetString(record.PartitionKey.Span).Should().Be("group-1");
+                var payload = record.Payload.Span;
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(payload).Should().Be(7UL);
+                System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(payload[8..]).Should().Be(2);
+                System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(payload[12..]).Should().Be(1_500_000L);
+                payload[20].Should().Be((byte)0);
+                System.Text.Encoding.UTF8.GetString(payload[21..]).Should().Be("boom");
+                return;
+            }
+
+            throw new TimeoutException("No Nack record was committed within 10 s.");
+        }
+
+        [Fact]
+        public async Task NackRequest_overload_rejects_a_negative_delay() {
+            var (replica, _) = await StartAsync("node-1");
+
+            var act = () => replica.ProposeAsync(new NackRequest("group-1", 7, 2, TimeSpan.FromSeconds(-1), Park: false, "boom")).AsTask();
+
+            await act.Should().ThrowAsync<ArgumentException>();
+        }
     }
 
     public class TryTriggerSnapshotAsync {

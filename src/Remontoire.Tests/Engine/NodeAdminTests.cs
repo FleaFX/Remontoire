@@ -156,11 +156,69 @@ public class NodeAdminTests {
 
             await admin.EnsureConsumerGroupAsync("orders", "billing");
             (await admin.GetStreamAsync("orders"))!.ConsumerGroups.Should().BeEquivalentTo(
-                [new ConsumerGroupDescription("billing", AckMode.Strict, true)]);
+                [new ConsumerGroupDescription("billing", AckMode.Strict, true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30))]);
 
             await admin.EnsureConsumerGroupAsync("orders", "billing", new ConsumerGroupOptions { AckMode = AckMode.Checkpoint, Mandatory = false });
             (await admin.GetStreamAsync("orders"))!.ConsumerGroups.Should().BeEquivalentTo(
-                [new ConsumerGroupDescription("billing", AckMode.Checkpoint, false)]);
+                [new ConsumerGroupDescription("billing", AckMode.Checkpoint, false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30))]);
+        } finally {
+            if (host is not null)
+                await StopAsync(host);
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task EnsureConsumerGroupAsync_applies_changed_retry_options() {
+        var dataDirectory = NewDataDirectory();
+        IHost? host = null;
+        try {
+            host = await StartAsync(dataDirectory);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            var journal = host.Services.GetRequiredService<MetaLogJournal>();
+            await admin.EnsureStreamAsync("orders");
+
+            await admin.EnsureConsumerGroupAsync("orders", "billing");
+            (await admin.GetStreamAsync("orders"))!.ConsumerGroups.Should().BeEquivalentTo(
+                [new ConsumerGroupDescription("billing", AckMode.Strict, true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30))]);
+
+            var changed = new ConsumerGroupOptions { MaxRetries = 10, InitialRetryDelay = TimeSpan.FromSeconds(2), MaxRetryDelay = TimeSpan.FromMinutes(1) };
+            await admin.EnsureConsumerGroupAsync("orders", "billing", changed);
+            (await admin.GetStreamAsync("orders"))!.ConsumerGroups.Should().BeEquivalentTo(
+                [new ConsumerGroupDescription("billing", AckMode.Strict, true, 10, TimeSpan.FromSeconds(2), TimeSpan.FromMinutes(1))]);
+
+            var recordsAfterSecond = journal.Snapshot().Records.Count;
+            await admin.EnsureConsumerGroupAsync("orders", "billing", changed);
+            journal.Snapshot().Records.Count.Should().Be(recordsAfterSecond, "a declaration that matches the current state proposes nothing");
+        } finally {
+            if (host is not null)
+                await StopAsync(host);
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task EnsureConsumerGroupAsync_rejects_invalid_retry_options(int caseIndex) {
+        var dataDirectory = NewDataDirectory();
+        IHost? host = null;
+        try {
+            host = await StartAsync(dataDirectory);
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+
+            Func<Task> act = caseIndex switch {
+                0 => () => admin.EnsureConsumerGroupAsync("orders", "billing", new ConsumerGroupOptions { MaxRetries = -1 }),
+                1 => () => admin.EnsureConsumerGroupAsync("orders", "billing", new ConsumerGroupOptions { InitialRetryDelay = TimeSpan.Zero }),
+                _ => () => admin.EnsureConsumerGroupAsync("orders", "billing", new ConsumerGroupOptions {
+                    InitialRetryDelay = TimeSpan.FromSeconds(2), MaxRetryDelay = TimeSpan.FromSeconds(1),
+                }),
+            };
+
+            await act.Should().ThrowAsync<ArgumentException>();
         } finally {
             if (host is not null)
                 await StopAsync(host);
@@ -202,7 +260,7 @@ public class NodeAdminTests {
 
             await admin.EnsureStreamAsync("later");
             var description = (await admin.GetStreamAsync("later"))!;
-            description.ConsumerGroups.Should().BeEquivalentTo([new ConsumerGroupDescription("billing", AckMode.Strict, true)]);
+            description.ConsumerGroups.Should().BeEquivalentTo([new ConsumerGroupDescription("billing", AckMode.Strict, true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30))]);
         } finally {
             if (host is not null)
                 await StopAsync(host);

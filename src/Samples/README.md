@@ -58,7 +58,9 @@ done
 
 A web app with Remontoire embedded: `POST /greetings?name=Ada` publishes a greeting, a background
 consumer handles and acks each one, and `GET /greetings` lists the greetings handled since the
-app started. A restart doesn't hand out acked greetings again. Start it with `dotnet run` from
+app started. A restart doesn't hand out acked greetings again. A greeting that fails to be handled
+is nacked: it comes back after the group's backoff, before any later greeting, and is parked
+after the last retry. Start it with `dotnet run` from
 `src/Samples/EmbeddedSample`; the data lives in `data/` (setting `Remontoire:DataDirectory`).
 `EmbeddedSample.Tests` hosts the app in a `WebApplicationFactory`:
 `dotnet test src/Samples/EmbeddedSample.Tests`.

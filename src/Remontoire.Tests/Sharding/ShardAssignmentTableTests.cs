@@ -297,22 +297,23 @@ public class ShardAssignmentTableTests {
         public void DeclareConsumerGroup_declares_the_group_with_its_policy() {
             var table = new ShardAssignmentTable();
 
-            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false));
+            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
 
             table.TryGetConsumerGroupPolicy("orders", "billing", out var policy).Should().BeTrue();
-            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false));
+            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
             table.TryGetConsumerGroupPolicy("orders", "other", out _).Should().BeFalse();
         }
 
         [Fact]
         public void DeclareConsumerGroup_for_a_declared_group_replaces_its_policy() {
             var table = new ShardAssignmentTable();
-            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Strict, Mandatory: true));
+            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Strict, Mandatory: true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
 
-            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false));
+            table.Apply(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false, 7, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(30)));
 
             table.TryGetConsumerGroupPolicy("orders", "billing", out var policy).Should().BeTrue();
-            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false), "the last declaration of a group replaces its whole policy");
+            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false, 7, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(30)),
+                "the last declaration of a group replaces its whole policy");
         }
     }
 
@@ -331,9 +332,9 @@ public class ShardAssignmentTableTests {
             table.Apply(new CreateStream("payments", 1, RoutingAlgorithm.XxHash3V1));
             table.Apply(new SetStreamRetentionPolicy("orders", TimeSpan.FromDays(3), TimeSpan.FromDays(14), MaxSizeBytesPerVirtualShard: 1024));
             table.Apply(new SetStreamCheckpointInterval("orders", TimeSpan.FromSeconds(30), 500));
-            table.Apply(new DeclareConsumerGroup("orders", "b", AckMode.Checkpoint, Mandatory: false));
-            table.Apply(new DeclareConsumerGroup("orders", "a", AckMode.Strict, Mandatory: true));
-            table.Apply(new DeclareConsumerGroup("payments", "other", AckMode.Strict, Mandatory: true));
+            table.Apply(new DeclareConsumerGroup("orders", "b", AckMode.Checkpoint, Mandatory: false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
+            table.Apply(new DeclareConsumerGroup("orders", "a", AckMode.Strict, Mandatory: true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
+            table.Apply(new DeclareConsumerGroup("payments", "other", AckMode.Strict, Mandatory: true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
 
             var description = table.DescribeStream("orders");
 
@@ -344,8 +345,8 @@ public class ShardAssignmentTableTests {
             description.CheckpointInterval.Should().Be(TimeSpan.FromSeconds(30));
             description.CheckpointOffsetCount.Should().Be(500);
             description.ConsumerGroups.Should().Equal(
-                new ConsumerGroupDescription("a", AckMode.Strict, true),
-                new ConsumerGroupDescription("b", AckMode.Checkpoint, false));
+                new ConsumerGroupDescription("a", AckMode.Strict, true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)),
+                new ConsumerGroupDescription("b", AckMode.Checkpoint, false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
             table.DescribeStreams().Select(stream => stream.Name).Should().Equal("orders", "payments");
         }
     }
@@ -371,7 +372,7 @@ public class ShardAssignmentTableTests {
 
             var policy = table.GetConsumerGroupPolicy("orders", "billing");
 
-            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Strict, Mandatory: true));
+            policy.Should().Be(new ConsumerGroupPolicy(AckMode.Strict, Mandatory: true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
         }
     }
 
@@ -462,16 +463,16 @@ public class VirtualShardAssignmentTests {
 public class ConsumerGroupPolicyTests {
     [Fact]
     public void Two_policies_with_the_same_field_values_are_equal() {
-        var first = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false);
-        var second = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false);
+        var first = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
+        var second = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: false, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
 
         first.Should().Be(second);
     }
 
     [Fact]
     public void Policies_with_a_different_mode_are_not_equal() {
-        var first = new ConsumerGroupPolicy(AckMode.Strict, Mandatory: true);
-        var second = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: true);
+        var first = new ConsumerGroupPolicy(AckMode.Strict, Mandatory: true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
+        var second = new ConsumerGroupPolicy(AckMode.Checkpoint, Mandatory: true, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30));
 
         first.Should().NotBe(second);
     }

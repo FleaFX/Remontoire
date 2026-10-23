@@ -17,4 +17,22 @@ public sealed class ConsumerGroupOptions {
     /// <see langword="true"/>.
     /// </summary>
     public bool Mandatory { get; set; } = true;
+
+    /// <summary>
+    /// How often a nacked message is offered again before it is parked. Zero parks a message at its
+    /// first nack. Defaults to 5.
+    /// </summary>
+    public int MaxRetries { get; set; } = 5;
+
+    /// <summary>
+    /// The delay before the first retry of a nacked message; every next retry waits twice as long,
+    /// up to <see cref="MaxRetryDelay"/>. A delay passed to <see cref="IRemontoireConsumer.NackAsync"/>
+    /// takes precedence. Defaults to one second.
+    /// </summary>
+    public TimeSpan InitialRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// The longest delay between two retries of a nacked message. Defaults to 30 seconds.
+    /// </summary>
+    public TimeSpan MaxRetryDelay { get; set; } = TimeSpan.FromSeconds(30);
 }

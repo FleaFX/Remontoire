@@ -114,6 +114,9 @@ public abstract record MetaLogRecord {
                 writer.Write(r.ConsumerGroup);
                 writer.Write((byte)r.Mode);
                 writer.Write(r.Mandatory);
+                writer.Write(r.MaxRetries);
+                writer.Write(r.InitialRetryDelay.Ticks);
+                writer.Write(r.MaxRetryDelay.Ticks);
                 break;
 
             default:
@@ -144,7 +147,8 @@ public abstract record MetaLogRecord {
             MetaLogRecordType.SetStreamCheckpointInterval =>
                 ReadSetStreamCheckpointInterval(reader),
             MetaLogRecordType.DeclareConsumerGroup =>
-                new DeclareConsumerGroup(reader.ReadString(), reader.ReadString(), ReadAckMode(reader), reader.ReadBoolean()),
+                new DeclareConsumerGroup(reader.ReadString(), reader.ReadString(), ReadAckMode(reader), reader.ReadBoolean(),
+                    reader.ReadInt32(), TimeSpan.FromTicks(reader.ReadInt64()), TimeSpan.FromTicks(reader.ReadInt64())),
             _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown MetaLogRecordType tag."),
         };
     }
@@ -261,6 +265,15 @@ public sealed record SetStreamCheckpointInterval(string StreamName, TimeSpan? In
 /// <summary>
 /// Declares one consumer group on one stream with its whole policy, or replaces the policy of a
 /// declared group. Only a declared group can consume and ack; a mandatory one holds back
-/// retention from its declaration on, acked or not.
+/// retention from its declaration on, acked or not. <see cref="MaxRetries"/>,
+/// <see cref="InitialRetryDelay"/> and <see cref="MaxRetryDelay"/> govern its nacked messages.
 /// </summary>
-public sealed record DeclareConsumerGroup(string StreamName, string ConsumerGroup, AckMode Mode, bool Mandatory) : MetaLogRecord;
+public sealed record DeclareConsumerGroup(
+    string StreamName,
+    string ConsumerGroup,
+    AckMode Mode,
+    bool Mandatory,
+    int MaxRetries,
+    TimeSpan InitialRetryDelay,
+    TimeSpan MaxRetryDelay
+) : MetaLogRecord;

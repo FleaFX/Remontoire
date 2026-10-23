@@ -39,6 +39,8 @@ public class RemontoireMetricsTests {
         var expected = new (string Name, string? Unit, Type Type)[] {
             ("remontoire.messages.published", "{message}", typeof(Counter<long>)),
             ("remontoire.messages.acked", "{message}", typeof(Counter<long>)),
+            ("remontoire.messages.retried", "{message}", typeof(Counter<long>)),
+            ("remontoire.messages.parked", "{message}", typeof(Counter<long>)),
             ("remontoire.ack.latency", "s", typeof(Histogram<double>)),
             ("remontoire.wal.fsync.duration", "s", typeof(Histogram<double>)),
             ("remontoire.segment.compaction.duration", "s", typeof(Histogram<double>)),
@@ -309,6 +311,67 @@ public class RemontoireMetricsTests {
             Directory.Delete(dataDirectory, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task An_embedded_host_records_retried_and_parked_on_its_own_meter() {
+        var dataDirectory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        IHost? host = null;
+        try {
+            var builder = Host.CreateApplicationBuilder();
+            builder.Logging.ClearProviders();
+            builder.Services.AddRemontoire().AddEmbedded(options => options.DataDirectory = dataDirectory);
+            host = builder.Build();
+
+            var metrics = host.Services.GetRequiredService<RemontoireMetrics>();
+            var measurements = new List<(string Name, object Value, KeyValuePair<string, object?>[] Tags)>();
+            using var listener = new MeterListener {
+                InstrumentPublished = (instrument, meterListener) => {
+                    if (ReferenceEquals(instrument.Meter, metrics.Meter))
+                        meterListener.EnableMeasurementEvents(instrument);
+                },
+            };
+            listener.SetMeasurementEventCallback<long>((instrument, value, tags, _) => measurements.Add((instrument.Name, value, tags.ToArray())));
+            listener.SetMeasurementEventCallback<double>((instrument, value, tags, _) => measurements.Add((instrument.Name, value, tags.ToArray())));
+            listener.Start();
+
+            await host.StartAsync();
+            var admin = host.Services.GetRequiredService<IRemontoireAdmin>();
+            var producer = host.Services.GetRequiredService<IRemontoireProducer>();
+            var consumer = host.Services.GetRequiredService<IRemontoireConsumer>();
+            await admin.EnsureStreamAsync("metrics");
+            await admin.EnsureConsumerGroupAsync("metrics", "metrics-group",
+                new ConsumerGroupOptions { MaxRetries = 1, InitialRetryDelay = TimeSpan.FromMilliseconds(10) });
+
+            await producer.PublishAsync("metrics", "key-1", "one"u8.ToArray());
+
+            await using var messages = new ConsumeStream(consumer.ConsumeAsync("metrics", "metrics-group"));
+            var first = await NextAsync(messages);
+            first.Attempt.Should().Be(1);
+            await consumer.NackAsync("metrics", "metrics-group", first.ShardId, first.Offset); // within MaxRetries: offered again
+            var second = await NextAsync(messages);
+            second.Attempt.Should().Be(2);
+            await consumer.NackAsync("metrics", "metrics-group", second.ShardId, second.Offset, reason: "boom"); // past MaxRetries: parked
+
+            measurements.Where(m => m.Name == "remontoire.messages.retried").Should().ContainSingle(m =>
+                (long)m.Value == 1
+                && m.Tags.Contains(new KeyValuePair<string, object?>("stream", "metrics"))
+                && m.Tags.Contains(new KeyValuePair<string, object?>("group", "metrics"))
+                && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "metrics-group")));
+            measurements.Where(m => m.Name == "remontoire.messages.parked").Should().ContainSingle(m =>
+                (long)m.Value == 1
+                && m.Tags.Contains(new KeyValuePair<string, object?>("stream", "metrics"))
+                && m.Tags.Contains(new KeyValuePair<string, object?>("group", "metrics"))
+                && m.Tags.Contains(new KeyValuePair<string, object?>("consumer_group", "metrics-group")));
+        } finally {
+            if (host is not null) {
+                await host.StopAsync();
+                host.Dispose();
+            }
+            Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    static Task<RemontoireMessage> NextAsync(ConsumeStream messages) => messages.NextAsync();
 
     static async Task<RaftReplica> StartFollowerAsync(RaftReplicaRegistry registry, string groupId) {
         var replica = new RaftReplica(new InMemoryRaftStateStore(), new InMemoryRaftLog(), new RecordingRaftTransport(),

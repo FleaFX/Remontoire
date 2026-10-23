@@ -33,6 +33,10 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     readonly ConcurrentDictionary<Uri, GrpcChannel> _channels = new();
     readonly ShardAssignmentTable _table = new();
     readonly ShardAssignmentWatcher _watcher;
+
+    // Per stream and consumer group, the lowest offset nacked through this connection that hasn't
+    // come back yet: ConsumeAsync drops what the server sent before it saw that nack.
+    readonly ConcurrentDictionary<(string StreamName, string ConsumerGroup), long> _rewinds = new();
     readonly GrpcChannel _seedChannel;
     bool _disposed;
 
@@ -113,10 +117,41 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
     }
 
     /// <inheritdoc />
+    public async Task NackAsync(
+        string streamName,
+        string consumerGroup,
+        int shardId,
+        long offset,
+        string? reason = null,
+        TimeSpan? delay = null,
+        CancellationToken cancellationToken = default
+    ) {
+        RequireConsumerGroup(streamName, consumerGroup);
+        if (delay < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(delay), delay, "A nack's delay can't be negative.");
+
+        // No partition key travels with a nack either — virtual shard 0 always, same as AckAsync.
+        var (groupId, memberAddresses) = ResolveGroup(streamName, virtualShardIndex: 0);
+        var request = new NackRequest { StreamName = streamName, ConsumerGroup = consumerGroup, ShardId = shardId, Offset = (ulong)offset, Reason = reason ?? "" };
+        if (delay is { } value)
+            request.Delay = Duration.FromTimeSpan(value);
+
+        var reply = await CallWithRedirectAsync(
+            groupId, memberAddresses, address => ClientFor(address).NackAsync(request, cancellationToken: cancellationToken).ResponseAsync,
+            reply => reply.NotLeader, reply => reply.ShardMigrating is not null);
+
+        // A parked message won't come again: what follows it is already the right next message.
+        if (!reply.Success.Parked)
+            _rewinds.AddOrUpdate((streamName, consumerGroup), offset, (_, pending) => Math.Min(pending, offset));
+    }
+
+    /// <inheritdoc />
     public async IAsyncEnumerable<RemontoireMessage> ConsumeAsync(
         string streamName, string consumerGroup, [EnumeratorCancellation] CancellationToken cancellationToken = default) {
         RequireConsumerGroup(streamName, consumerGroup);
         var (groupId, memberAddresses) = ResolveGroup(streamName, virtualShardIndex: 0);
+        var rewindKey = (streamName, consumerGroup);
+        var lastOffset = -1L; // the server sends ascending offsets, except when it goes back to a nacked message
 
         // NotLeader can only ever appear as the FIRST reply on the stream — once the server
         // starts streaming, it was, at that moment, the correct leader by definition. A later
@@ -168,7 +203,19 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
                         break; // reconnect to the (possibly new) leader
                     }
 
-                    yield return ToMessage(reply.Message);
+                    var message = ToMessage(reply.Message);
+                    var wentBack = message.Offset <= lastOffset;
+                    lastOffset = message.Offset;
+                    if (_rewinds.TryGetValue(rewindKey, out var rewind)) {
+                        // Sent before the server saw the nack of an earlier message: dropped, it comes
+                        // again once the server went back. The nacked message itself, anything at or
+                        // below it after a reconnect, or any step back ends the wait.
+                        if (message.Offset > rewind && !wentBack)
+                            continue;
+                        _rewinds.TryRemove(new KeyValuePair<(string StreamName, string ConsumerGroup), long>(rewindKey, rewind));
+                    }
+
+                    yield return message;
                 }
             } finally {
                 call.Dispose();
@@ -206,11 +253,13 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
         var request = new EnsureConsumerGroupRequest {
             StreamName = streamName, ConsumerGroup = consumerGroup, Mandatory = options.Mandatory,
             AckMode = options.AckMode == AckMode.Checkpoint ? AckModeProto.Checkpoint : AckModeProto.Strict,
+            MaxRetries = options.MaxRetries,
+            InitialRetryDelay = Duration.FromTimeSpan(options.InitialRetryDelay), MaxRetryDelay = Duration.FromTimeSpan(options.MaxRetryDelay),
         };
 
         await CallAdminAsync(address => AdminFor(address).EnsureConsumerGroupAsync(request, cancellationToken: cancellationToken).ResponseAsync, cancellationToken);
-        await WaitUntilVisibleAsync(() => _table.TryGetConsumerGroupPolicy(streamName, consumerGroup, out var policy)
-            && policy.Mode == options.AckMode && policy.Mandatory == options.Mandatory, cancellationToken);
+        var declared = ConsumerGroupPolicy.From(options);
+        await WaitUntilVisibleAsync(() => _table.TryGetConsumerGroupPolicy(streamName, consumerGroup, out var policy) && policy == declared, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -344,7 +393,8 @@ public sealed class RemontoireConnection : IRemontoireProducer, IRemontoireConsu
         proto.PartitionKey.ToStringUtf8(),
         proto.Payload.Memory,
         proto.Headers.ToDictionary(header => header.Key.ToStringUtf8(), header => header.Value.ToStringUtf8()),
-        ToDateTimeOffset(proto.IngestedAtMicros)
+        ToDateTimeOffset(proto.IngestedAtMicros),
+        (int)proto.Attempt
     );
 
     static DateTimeOffset ToDateTimeOffset(ulong micros) => DateTimeOffset.UnixEpoch.AddTicks((long)micros * 10);

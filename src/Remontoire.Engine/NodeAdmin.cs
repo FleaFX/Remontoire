@@ -102,13 +102,15 @@ public sealed partial class NodeAdmin(RemontoireNode node, ShardAssignmentTable 
         ValidateName(consumerGroup, nameof(consumerGroup));
         if (!Enum.IsDefined(options.AckMode))
             throw new ArgumentOutOfRangeException(nameof(options), options.AckMode, "Not a valid ack mode.");
+        ValidateRetryOptions(options);
         RequireMetaGroupReplica();
 
-        if (assignmentTable.TryGetConsumerGroupPolicy(streamName, consumerGroup, out var policy)
-            && policy.Mode == options.AckMode && policy.Mandatory == options.Mandatory)
+        if (assignmentTable.TryGetConsumerGroupPolicy(streamName, consumerGroup, out var policy) && policy == ConsumerGroupPolicy.From(options))
             return;
 
-        await node.ProposeMetaAsync([new DeclareConsumerGroup(streamName, consumerGroup, options.AckMode, options.Mandatory)], proposedBy, cancellationToken);
+        await node.ProposeMetaAsync(
+            [new DeclareConsumerGroup(streamName, consumerGroup, options.AckMode, options.Mandatory, options.MaxRetries, options.InitialRetryDelay, options.MaxRetryDelay)],
+            proposedBy, cancellationToken);
     }
 
     // Embedded, every stream gets a group of its own, named after it. In a cluster, the registered
@@ -156,5 +158,15 @@ public sealed partial class NodeAdmin(RemontoireNode node, ShardAssignmentTable 
             throw new ArgumentOutOfRangeException(nameof(options), interval, $"{nameof(StreamOptions.CheckpointInterval)} must be positive.");
         if (options.CheckpointOffsetCount is <= 0)
             throw new ArgumentOutOfRangeException(nameof(options), options.CheckpointOffsetCount, $"{nameof(StreamOptions.CheckpointOffsetCount)} must be positive.");
+    }
+
+    static void ValidateRetryOptions(ConsumerGroupOptions options) {
+        if (options.MaxRetries < 0)
+            throw new ArgumentOutOfRangeException(nameof(options), options.MaxRetries, $"{nameof(ConsumerGroupOptions.MaxRetries)} can't be negative.");
+        if (options.InitialRetryDelay <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(options), options.InitialRetryDelay, $"{nameof(ConsumerGroupOptions.InitialRetryDelay)} must be positive.");
+        if (options.MaxRetryDelay < options.InitialRetryDelay)
+            throw new ArgumentOutOfRangeException(nameof(options), options.MaxRetryDelay,
+                $"{nameof(ConsumerGroupOptions.MaxRetryDelay)} can't be shorter than {nameof(ConsumerGroupOptions.InitialRetryDelay)}.");
     }
 }

@@ -2,11 +2,13 @@ syntax = "proto3";
 package remontoire.client.v1;
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/duration.proto";
 
 service RemontoireClient {
   rpc Publish(PublishRequest) returns (PublishReply);
   rpc Consume(ConsumeRequest) returns (stream ConsumeReply);
   rpc Ack(AckRequest) returns (AckReply);
+  rpc Nack(NackRequest) returns (NackReply);
 }
 
 message PublishRequest {
@@ -70,6 +72,7 @@ message RemontoireMessageProto {
   bytes payload = 4;
   repeated MessageHeader headers = 5;
   uint64 ingested_at_micros = 6;
+  uint32 attempt = 7; // 1 on the first delivery to the consumer group, one more after every nack
 }
 
 message AckRequest {
@@ -87,4 +90,29 @@ message AckReply {
     NotLeader not_leader = 2;
     ShardMigrating shard_migrating = 3;
   }
+}
+
+// Reports that handling one message failed for a consumer group: the message comes again after
+// the delay (or the group's backoff), before any later one, or is parked once the group's retries
+// are used up.
+message NackRequest {
+  string stream_name = 1;
+  string consumer_group = 2;
+  int32 shard_id = 3;
+  uint64 offset = 4;
+  string reason = 5;                   // empty: no reason given
+  google.protobuf.Duration delay = 6;  // absent: the group's backoff
+}
+
+message NackReply {
+  oneof result {
+    NackSuccess success = 1;
+    NotLeader not_leader = 2;
+    ShardMigrating shard_migrating = 3;
+  }
+}
+
+message NackSuccess {
+  // The nack used up the group's retries and parked the message: it won't come again.
+  bool parked = 1;
 }

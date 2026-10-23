@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Remontoire.Messaging;
 using Remontoire.Raft;
 using Remontoire.Sharding;
@@ -9,18 +10,26 @@ using Remontoire.Storage;
 namespace Remontoire.Engine;
 
 /// <summary>
-/// Publish, ack and consume against a group this process hosts — the one implementation behind the
+/// Publish, ack, nack and consume against a group this process hosts — the one implementation behind the
 /// gRPC client endpoint and the embedded producer and consumer, so both behave the same. Resolving
 /// the group, and answering when it isn't hosted here, stays with the caller.
 /// </summary>
 /// <param name="assignmentTable">The source of every stream's consumer-group policies.</param>
-/// <param name="metrics">Records the published and acknowledged messages.</param>
-public sealed class MessagingOperations(ShardAssignmentTable assignmentTable, RemontoireMetrics metrics) {
+/// <param name="metrics">Records the published, acknowledged, retried and parked messages.</param>
+/// <param name="logger">Logs every parked message.</param>
+public sealed class MessagingOperations(ShardAssignmentTable assignmentTable, RemontoireMetrics metrics, ILogger<MessagingOperations> logger) {
     /// <summary>
     /// The header a message's trace context rides under, in W3C <c>traceparent</c> format: stored
     /// with the message at publish, so every later receive of it can link back to the publish.
     /// </summary>
     public const string TraceParentHeaderKey = "traceparent";
+
+    /// <summary>
+    /// The most characters of a nack's reason that are kept.
+    /// </summary>
+    public const int MaxReasonLength = 1024;
+
+    static readonly TimeSpan NackApplyTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// Proposes one message to <paramref name="replica"/> in a <c>publish</c> span and completes
@@ -105,6 +114,77 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable, Re
     }
 
     /// <summary>
+    /// Nacks the message at <paramref name="offset"/> for <paramref name="consumerGroup"/>: proposes a
+    /// retry after <paramref name="delay"/> or the group's backoff, or parks the message once the
+    /// group's retries are used up. Completes once this node's ack index applied the nack, so a
+    /// consume stream here offers the nacked message again before any later one. Does nothing for an
+    /// offset that is already acked or parked, or that the log doesn't hold.
+    /// </summary>
+    /// <param name="streamName">The stream.</param>
+    /// <param name="consumerGroup">The consumer group.</param>
+    /// <param name="offset">The nacked offset.</param>
+    /// <param name="reason">Why handling failed; <see langword="null"/> for none.</param>
+    /// <param name="delay">The delay before the next attempt; <see langword="null"/> for the group's backoff.</param>
+    /// <param name="replica">The replica of the group serving the virtual shard.</param>
+    /// <param name="shardLog">That group's shard log.</param>
+    /// <param name="ackIndex">That group's ack index.</param>
+    /// <param name="cancellationToken">Cancels the wait.</param>
+    /// <returns><see langword="true"/> when the message was parked.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="delay"/> is negative.</exception>
+    /// <exception cref="NotLeaderException"><paramref name="replica"/> doesn't lead its group.</exception>
+    public async Task<bool> NackAsync(
+        string streamName,
+        string consumerGroup,
+        ulong offset,
+        string? reason,
+        TimeSpan? delay,
+        RaftReplica replica,
+        ShardLog shardLog,
+        AckIndex ackIndex,
+        CancellationToken cancellationToken
+    ) {
+        if (delay < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(delay), delay, "A nack's delay can't be negative.");
+
+        var state = ackIndex.GetOrCreate(consumerGroup);
+        if (offset >= shardLog.NextOffsetToApply || state.IsAcked(offset))
+            return false;
+
+        // The attempt that failed: the one the pending retry handed out, or else the first delivery.
+        var attempt = state.Retry is { } retry && retry.Offset == offset ? retry.Attempt : 1;
+        var policy = assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup);
+        var park = attempt > policy.MaxRetries;
+        var keptReason = reason is null ? "" : reason.Length <= MaxReasonLength ? reason : reason[..MaxReasonLength];
+        var result = await replica.ProposeAsync(
+            new NackRequest(consumerGroup, offset, attempt, park ? TimeSpan.Zero : delay ?? RetryDelay(policy, attempt), park, keptReason), cancellationToken);
+
+        // Committed either way; past the timeout this node merely lags in applying it.
+        await ConditionPoller.WaitUntilAsync(() => ackIndex.AppliedRaftIndex >= result.RaftIndex, NackApplyTimeout, cancellationToken: cancellationToken);
+
+        if (park) {
+            metrics.RecordParked(streamName, replica.GroupId, consumerGroup);
+            logger.LogWarning("Parked offset {Offset} of stream {StreamName} for consumer group {ConsumerGroup} after {Attempts} attempt(s): {Reason}",
+                offset, streamName, consumerGroup, attempt, keptReason);
+        } else {
+            metrics.RecordRetried(streamName, replica.GroupId, consumerGroup);
+        }
+
+        return park;
+    }
+
+    /// <summary>
+    /// The group's backoff before the retry that follows the failed <paramref name="attempt"/>:
+    /// <see cref="ConsumerGroupPolicy.InitialRetryDelay"/>, doubled for every earlier attempt, at
+    /// most <see cref="ConsumerGroupPolicy.MaxRetryDelay"/>.
+    /// </summary>
+    /// <param name="policy">The group's policy.</param>
+    /// <param name="attempt">The attempt that failed, 1 for the first.</param>
+    /// <returns>The delay.</returns>
+    internal static TimeSpan RetryDelay(ConsumerGroupPolicy policy, int attempt) =>
+        // In doubles: doubling the ticks themselves overflows a long for a large attempt, long before the cap applies.
+        TimeSpan.FromTicks((long)Math.Min(policy.InitialRetryDelay.Ticks * Math.Pow(2, attempt - 1), policy.MaxRetryDelay.Ticks));
+
+    /// <summary>
     /// Whether <paramref name="consumerGroup"/> must consume from its group's leader.
     /// </summary>
     /// <remarks>
@@ -122,33 +202,84 @@ public sealed class MessagingOperations(ShardAssignmentTable assignmentTable, Re
         assignmentTable.GetConsumerGroupPolicy(streamName, consumerGroup).Mode == AckMode.Strict;
 
     /// <summary>
-    /// Streams every message from <paramref name="consumerGroup"/>'s first not-yet-acked offset on,
-    /// live-tailing as new messages arrive. The caller disposes each handle.
+    /// Streams every message from <paramref name="consumerGroup"/>'s first not-yet-acked offset on, in
+    /// offset order, live-tailing as new messages arrive, each with its delivery attempt. Skips what
+    /// the group acked or parked meanwhile. A nacked message is offered again once its retry is due,
+    /// before any later one: the stream goes back to it, also when it already handed out later
+    /// messages. The caller disposes each handle.
     /// </summary>
     /// <param name="shardLog">The group's shard log.</param>
     /// <param name="ackIndex">The group's ack index.</param>
     /// <param name="consumerGroup">The consumer group.</param>
     /// <param name="cancellationToken">Ends the stream.</param>
-    /// <returns>The messages, in offset order; never ends on its own.</returns>
-    public static async IAsyncEnumerable<LogEntryHandle> ConsumeAsync(
+    /// <returns>The messages with their attempt, in offset order; never ends on its own.</returns>
+    public static async IAsyncEnumerable<(LogEntryHandle Handle, int Attempt)> ConsumeAsync(
         ShardLog shardLog,
         AckIndex ackIndex,
         string consumerGroup,
         [EnumeratorCancellation] CancellationToken cancellationToken
     ) {
         // ShardLog's own reads are point-in-time snapshots, so this alternates draining what's
-        // currently available with waiting for the next Append. The wait is taken before the read:
-        // an Append applied after the snapshot but before the wait would otherwise go unnoticed
-        // until the next one.
-        var offset = ackIndex.GetOrCreate(consumerGroup).LowWatermark; // exclusive — already the first not-yet-acked offset
+        // currently available with waiting for the next Append or nack. Both waits are taken before
+        // the read: an Append or nack applied after the snapshot but before the wait would otherwise
+        // go unnoticed until the next one.
+        var state = ackIndex.GetOrCreate(consumerGroup);
+        var offset = state.LowWatermark; // exclusive — already the first not-yet-acked offset
+        PendingRetry? handledRetry = null; // the retry this stream went back for or handed out: never again for the same one
         while (true) {
             var appended = shardLog.WaitForAppendAsync(cancellationToken);
-            await foreach (var handle in shardLog.ReadFromAsync(offset, cancellationToken)) {
-                offset = handle.Entry.LogicalOffset + 1;
-                yield return handle;
+            var retryChanged = state.RetryChanged;
+            var reread = false;
+            var pending = state.Retry;
+            if (pending is not null && pending.Offset < offset && !ReferenceEquals(pending, handledRetry)) {
+                // Nacked after this stream handed it out, with nothing later to read yet (the stream
+                // sat at the head of the log): go back to it before waiting for anything new.
+                offset = pending.Offset;
+                handledRetry = pending;
             }
 
-            await appended;
+            await foreach (var handle in shardLog.ReadFromAsync(offset, cancellationToken)) {
+                var entryOffset = handle.Entry.LogicalOffset;
+                var retry = state.Retry;
+                if (retry is not null && retry.Offset < entryOffset && !ReferenceEquals(retry, handledRetry)) {
+                    // Nacked after this stream handed it out: go back to it before anything later.
+                    // Once per retry: a message pruned past its maximum retention never comes back.
+                    handle.Dispose();
+                    offset = retry.Offset;
+                    handledRetry = retry;
+                    reread = true;
+                    break;
+                }
+
+                if (state.IsAcked(entryOffset)) {
+                    handle.Dispose();
+                    offset = entryOffset + 1;
+                    continue;
+                }
+
+                var attempt = 1;
+                if (retry is not null && retry.Offset == entryOffset) {
+                    var wait = DateTimeOffset.FromUnixTimeMilliseconds((long)(retry.NotBeforeMicros / 1000)) - DateTimeOffset.UtcNow;
+                    if (wait > TimeSpan.Zero) {
+                        // Not due yet: hand out nothing until it is, or until the retry changes.
+                        handle.Dispose();
+                        await Task.WhenAny(Task.Delay(wait, cancellationToken), retryChanged);
+                        offset = entryOffset;
+                        reread = true;
+                        break;
+                    }
+
+                    attempt = retry.Attempt;
+                    handledRetry = retry; // a stream that reached it without going back must not go back for it later
+                }
+
+                offset = entryOffset + 1;
+                yield return (handle, attempt);
+            }
+
+            if (!reread)
+                await Task.WhenAny(appended, retryChanged);
+            cancellationToken.ThrowIfCancellationRequested();
         }
     }
 

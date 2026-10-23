@@ -27,4 +27,14 @@ public sealed record StreamDescription(
 /// <param name="Name">The consumer group's name.</param>
 /// <param name="AckMode">See <see cref="ConsumerGroupOptions.AckMode"/>.</param>
 /// <param name="Mandatory">See <see cref="ConsumerGroupOptions.Mandatory"/>.</param>
-public sealed record ConsumerGroupDescription(string Name, AckMode AckMode, bool Mandatory);
+/// <param name="MaxRetries">See <see cref="ConsumerGroupOptions.MaxRetries"/>.</param>
+/// <param name="InitialRetryDelay">See <see cref="ConsumerGroupOptions.InitialRetryDelay"/>.</param>
+/// <param name="MaxRetryDelay">See <see cref="ConsumerGroupOptions.MaxRetryDelay"/>.</param>
+public sealed record ConsumerGroupDescription(
+    string Name,
+    AckMode AckMode,
+    bool Mandatory,
+    int MaxRetries,
+    TimeSpan InitialRetryDelay,
+    TimeSpan MaxRetryDelay
+);
