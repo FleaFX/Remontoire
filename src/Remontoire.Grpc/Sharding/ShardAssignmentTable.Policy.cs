@@ -6,14 +6,14 @@ public sealed partial class ShardAssignmentTable {
     readonly ConcurrentDictionary<(string StreamName, string ConsumerGroup), ConsumerGroupPolicy> _consumerGroupPolicies = new();
     readonly ConcurrentDictionary<string, StreamRetentionPolicy> _retentionPolicies = new();
 
-    static readonly ConsumerGroupPolicy DefaultConsumerGroupPolicy = new(AckMode.Strict, Mandatory: true);
+    static readonly ConsumerGroupPolicy DefaultConsumerGroupPolicy = ConsumerGroupPolicy.From(new ConsumerGroupOptions());
     static readonly StreamRetentionPolicy DefaultRetentionPolicy = new(
         AuditRetention: TimeSpan.FromDays(7), MaxRetention: TimeSpan.FromDays(30),
         MaxSizeBytesPerVirtualShard: null, CheckpointInterval: null, CheckpointOffsetCount: null);
 
     /// <summary>
     /// A consumer group's ack policy for a stream — <see cref="DefaultConsumerGroupPolicy"/>
-    /// (strict + mandatory) for a group that was never declared.
+    /// (the defaults of <see cref="ConsumerGroupOptions"/>) for a group that was never declared.
     /// </summary>
     public ConsumerGroupPolicy GetConsumerGroupPolicy(string streamName, string consumerGroup) =>
         _consumerGroupPolicies.GetValueOrDefault((streamName, consumerGroup), DefaultConsumerGroupPolicy);
@@ -43,7 +43,8 @@ public sealed partial class ShardAssignmentTable {
         var consumerGroups = _consumerGroupPolicies
             .Where(pair => pair.Key.StreamName == streamName)
             .OrderBy(pair => pair.Key.ConsumerGroup, StringComparer.Ordinal)
-            .Select(pair => new ConsumerGroupDescription(pair.Key.ConsumerGroup, pair.Value.Mode, pair.Value.Mandatory))
+            .Select(pair => new ConsumerGroupDescription(pair.Key.ConsumerGroup, pair.Value.Mode, pair.Value.Mandatory,
+                pair.Value.MaxRetries, pair.Value.InitialRetryDelay, pair.Value.MaxRetryDelay))
             .ToArray();
         return new StreamDescription(streamName, config.VirtualShardCount, retention.MaxRetention, retention.MaxSizeBytesPerVirtualShard,
             retention.CheckpointInterval, retention.CheckpointOffsetCount, consumerGroups);
@@ -78,7 +79,8 @@ public sealed partial class ShardAssignmentTable {
                 break;
 
             case DeclareConsumerGroup r:
-                _consumerGroupPolicies[(r.StreamName, r.ConsumerGroup)] = new ConsumerGroupPolicy(r.Mode, r.Mandatory);
+                _consumerGroupPolicies[(r.StreamName, r.ConsumerGroup)] =
+                    new ConsumerGroupPolicy(r.Mode, r.Mandatory, r.MaxRetries, r.InitialRetryDelay, r.MaxRetryDelay);
                 break;
 
             case SetStreamRetentionPolicy r:

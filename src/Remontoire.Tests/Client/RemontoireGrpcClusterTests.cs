@@ -620,6 +620,57 @@ public class RemontoireGrpcClusterTests {
     }
 
     [Fact]
+    public async Task A_pending_retry_survives_a_leader_crash() {
+        var directoryRoot = CreateTempDirectory();
+        var nodes = await StartClusterAsync(directoryRoot);
+        try {
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10))).Should().BeTrue();
+            var leaderNode = nodes.First(node => node.Replica.IsLeader);
+            var survivors = nodes.Where(node => node != leaderNode).ToArray();
+
+            await DeclareConsumerGroupAsync(nodes, "group-a");
+
+            using var connection = Connect(nodes);
+            var published = await PublishOnceReadyAsync(connection, StreamName, "key-1", "one"u8.ToArray());
+
+            var received = new List<RemontoireMessage>();
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                await foreach (var message in connection.ConsumeAsync(StreamName, "group-a", cts.Token)) {
+                    received.Add(message);
+                    break;
+                }
+            received.Should().ContainSingle(message => message.Offset == published.Offset && message.Attempt == 1);
+
+            var sinceNack = Stopwatch.StartNew();
+            await connection.NackAsync(StreamName, "group-a", received[0].ShardId, received[0].Offset, delay: TimeSpan.FromSeconds(2));
+
+            (await RunUntilAsync(() => survivors.All(node =>
+                    node.AckIndex.GetOrCreate("group-a").Retry is { } retry && retry.Offset == (ulong)published.Offset && retry.Attempt == 2),
+                TimeSpan.FromSeconds(10))).Should().BeTrue("the nack must have applied on every surviving node before the leader crash");
+
+            nodes.Remove(leaderNode);
+            await leaderNode.DisposeAsync();
+
+            (await RunUntilAsync(() => nodes.Any(node => node.Replica.IsLeader), TimeSpan.FromSeconds(10)))
+                .Should().BeTrue("the two surviving nodes must elect a new leader");
+
+            var retried = new List<RemontoireMessage>();
+            using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+                await foreach (var message in connection.ConsumeAsync(StreamName, "group-a", cts.Token)) {
+                    retried.Add(message);
+                    break;
+                }
+
+            retried.Should().ContainSingle(message => message.Offset == published.Offset && message.Attempt == 2,
+                "the pending retry survived the crash and is offered again by the new leader");
+            sinceNack.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromSeconds(1.6),
+                "the retry stays behind its delay across the failover — at the earliest after 80% of it, with margin");
+        } finally {
+            await DisposeAllAsync(nodes, directoryRoot);
+        }
+    }
+
+    [Fact]
     public async Task Ack_for_a_checkpoint_mode_consumer_group_applies_locally_bypassing_Raft() {
         var directoryRoot = CreateTempDirectory();
         var nodes = await StartClusterAsync(directoryRoot);
@@ -703,12 +754,13 @@ public class RemontoireGrpcClusterTests {
     // group a test never consumes with holds back pruning.
     static async Task DeclareConsumerGroupAsync(IReadOnlyList<Node> nodes, string consumerGroup, AckMode mode = AckMode.Strict, bool mandatory = true, RaftReplica? metaReplica = null) {
         foreach (var node in nodes)
-            node.Host.Services.GetRequiredService<ShardAssignmentTable>().Apply(new DeclareConsumerGroup(StreamName, consumerGroup, mode, mandatory));
+            node.Host.Services.GetRequiredService<ShardAssignmentTable>().Apply(
+                new DeclareConsumerGroup(StreamName, consumerGroup, mode, mandatory, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)));
 
         var journal = nodes[0].Host.Services.GetRequiredService<MetaLogJournal>();
         if ((metaReplica ?? nodes[0].MetaReplica) is { } replica) {
             await replica.ProposeAsync(new AppendRequest(Array.Empty<byte>(), [],
-                MetaLogRecord.Encode(new DeclareConsumerGroup(StreamName, consumerGroup, mode, mandatory))));
+                MetaLogRecord.Encode(new DeclareConsumerGroup(StreamName, consumerGroup, mode, mandatory, 5, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(30)))));
             await RunUntilAsync(() => journal.Snapshot().Records.Any(record =>
                 MetaLogRecord.Decode(record.Payload) is DeclareConsumerGroup declared && declared.ConsumerGroup == consumerGroup), TimeSpan.FromSeconds(5));
         }

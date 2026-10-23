@@ -12,7 +12,7 @@ using Remontoire.Storage;
 namespace Remontoire.Server;
 
 /// <summary>
-/// The client-facing RPCs (<c>Publish</c>/<c>Consume</c>/<c>Ack</c>) — resolves <c>stream_name</c>
+/// The client-facing RPCs (<c>Publish</c>/<c>Consume</c>/<c>Ack</c>/<c>Nack</c>) — resolves <c>stream_name</c>
 /// (and, for <c>Publish</c>, a partition key) to a virtual shard and its current physical group via
 /// a <see cref="ShardAssignmentTable"/>, answers with a redirect when that group isn't hosted here,
 /// and otherwise leaves the work to <see cref="MessagingOperations"/>, the same operations the
@@ -80,6 +80,34 @@ public sealed class RemontoireClientGrpcService(
     }
 
     /// <inheritdoc />
+    public override async Task<NackReply> Nack(Remontoire.Client.V1.NackRequest request, ServerCallContext context) {
+        if (!assignmentTable.TryGetStreamConfig(request.StreamName, out _))
+            throw new RpcException(new Status(StatusCode.NotFound, $"No stream '{request.StreamName}' is hosted here."));
+        if (!assignmentTable.TryGetConsumerGroupPolicy(request.StreamName, request.ConsumerGroup, out _))
+            throw new RpcException(new Status(StatusCode.NotFound,
+                $"No consumer group '{request.ConsumerGroup}' is declared on stream '{request.StreamName}'."));
+
+        var delay = request.Delay?.ToTimeSpan();
+        if (delay < TimeSpan.Zero)
+            throw new RpcException(new Status(StatusCode.InvalidArgument, "A nack's delay can't be negative."));
+
+        var redirect = TryResolveGroup(request.StreamName, virtualShardIndex: 0, out var replica, out var shardLog, out var ackIndex);
+        if (redirect is not null)
+            return new NackReply { NotLeader = redirect };
+
+        if (admissionGate.IsPaused(replica.GroupId))
+            return new NackReply { ShardMigrating = new ShardMigrating { StreamName = request.StreamName } };
+
+        try {
+            var parked = await operations.NackAsync(request.StreamName, request.ConsumerGroup, request.Offset, request.Reason, delay,
+                replica, shardLog, ackIndex, context.CancellationToken);
+            return new NackReply { Success = new NackSuccess { Parked = parked } };
+        } catch (NotLeaderException ex) {
+            return new NackReply { NotLeader = BuildNotLeader(request.StreamName, ex) };
+        }
+    }
+
+    /// <inheritdoc />
     public override async Task Consume(ConsumeRequest request, IServerStreamWriter<ConsumeReply> responseStream, ServerCallContext context) {
         if (!assignmentTable.TryGetStreamConfig(request.StreamName, out _))
             throw new RpcException(new Status(StatusCode.NotFound, $"No stream '{request.StreamName}' is hosted here."));
@@ -104,21 +132,22 @@ public sealed class RemontoireClientGrpcService(
             return;
         }
 
-        await foreach (var handle in MessagingOperations.ConsumeAsync(shardLog, ackIndex, request.ConsumerGroup, context.CancellationToken)) {
+        await foreach (var (handle, attempt) in MessagingOperations.ConsumeAsync(shardLog, ackIndex, request.ConsumerGroup, context.CancellationToken)) {
             using (handle) {
                 using var receive = MessagingOperations.StartReceiveActivity(request.StreamName, request.ConsumerGroup, handle.Entry.Headers);
-                await responseStream.WriteAsync(new ConsumeReply { Message = ToProto(handle.Entry) });
+                await responseStream.WriteAsync(new ConsumeReply { Message = ToProto(handle.Entry, attempt) });
             }
         }
     }
 
-    static RemontoireMessageProto ToProto(LogEntry entry) {
+    static RemontoireMessageProto ToProto(LogEntry entry, int attempt) {
         var proto = new RemontoireMessageProto {
             ShardId = 0,
             Offset = entry.LogicalOffset,
             PartitionKey = ByteString.CopyFrom(entry.PartitionKey.Span),
             Payload = ByteString.CopyFrom(entry.Payload.Span),
             IngestedAtMicros = entry.TimestampMicros,
+            Attempt = (uint)attempt,
         };
         proto.Headers.Add(entry.Headers.Select(header => new MessageHeader {
             Key = ByteString.CopyFrom(header.Key.Span), Value = ByteString.CopyFrom(header.Value.Span),

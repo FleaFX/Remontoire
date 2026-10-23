@@ -42,6 +42,9 @@ message EnsureConsumerGroupRequest {
   string consumer_group = 2;
   AckModeProto ack_mode = 3;
   bool mandatory = 4;
+  int32 max_retries = 5;
+  google.protobuf.Duration initial_retry_delay = 6;  // required
+  google.protobuf.Duration max_retry_delay = 7;      // required
 }
 
 enum AckModeProto {

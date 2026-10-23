@@ -47,6 +47,7 @@ public sealed class AckIndex : IAsyncDisposable {
     readonly Channel<AckIndexMessage> _mailbox = Channel.CreateUnbounded<AckIndexMessage>(new UnboundedChannelOptions { SingleReader = true });
     readonly CancellationTokenSource _cts = new();
     readonly Task _loop;
+    ulong _appliedRaftIndex;
 
     /// <summary>
     /// Starts the actor loop immediately.
@@ -54,19 +55,26 @@ public sealed class AckIndex : IAsyncDisposable {
     public AckIndex() => _loop = Task.Run(RunAsync);
 
     /// <summary>
-    /// Applies one Ack or AckCheckpoint record — a no-op for any other <see cref="WalRecordType"/>.
+    /// Applies one Ack, AckCheckpoint or Nack record — a no-op for any other <see cref="WalRecordType"/>.
     /// Awaits the actor's own completion signal before returning, so a caller that processes its
     /// source strictly in order (<see cref="AckIndexApplier"/>'s own replay loop) can rely on this
     /// record's effect being visible before it moves on to the next one.
     /// </summary>
     public async Task ApplyAsync(WalRecord record, CancellationToken cancellationToken = default) {
-        if (record.RecordType is not (WalRecordType.Ack or WalRecordType.AckCheckpoint))
+        if (record.RecordType is not (WalRecordType.Ack or WalRecordType.AckCheckpoint or WalRecordType.Nack))
             return;
 
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _mailbox.Writer.TryWrite(new ApplyCommittedRecord(record, completion));
         await completion.Task.WaitAsync(cancellationToken);
     }
+
+    /// <summary>
+    /// The <see cref="WalRecord.RaftIndex"/> of the last Ack, AckCheckpoint or Nack record applied;
+    /// zero before the first. A nack's proposer waits for it, so a consume stream on the same node
+    /// sees the nack before it hands out the next message.
+    /// </summary>
+    public ulong AppliedRaftIndex => Volatile.Read(ref _appliedRaftIndex);
 
     /// <summary>
     /// Applies offsets directly, bypassing Raft entirely — checkpoint mode's cheap path. Funnels
@@ -137,6 +145,14 @@ public sealed class AckIndex : IAsyncDisposable {
         return (slowest.Key, slowest.Value.CommittedWatermark);
     }
 
+    /// <summary>
+    /// Whether a mandatory consumer group parked the message at <paramref name="offset"/> — such a
+    /// message holds back pruning until its maximum retention, although every group's watermark is
+    /// past it. Takes the mandatory-ness check as a delegate, like <see cref="MandatoryGroupsLowWatermark"/>.
+    /// </summary>
+    public bool IsParkedByMandatoryGroup(ulong offset, Func<string, bool> isMandatory) =>
+        _groups.Any(pair => isMandatory(pair.Key) && pair.Value.IsParked(offset));
+
     // The single-threaded owner of every ConsumerGroupAckState this index holds — the same
     // single-reader-mailbox shape as ShardLog's own actor loop.
     async Task RunAsync() {
@@ -145,6 +161,7 @@ public sealed class AckIndex : IAsyncDisposable {
                 switch (message) {
                     case ApplyCommittedRecord(var record, var completion):
                         ApplyCommitted(record);
+                        Volatile.Write(ref _appliedRaftIndex, record.RaftIndex);
                         completion.TrySetResult();
                         break;
 
@@ -177,7 +194,26 @@ public sealed class AckIndex : IAsyncDisposable {
                 GetOrCreate(consumerGroup).AdvanceWatermarkTo(BinaryPrimitives.ReadUInt64LittleEndian(record.Payload.Span));
                 break;
             }
+            case WalRecordType.Nack: {
+                var consumerGroup = Encoding.UTF8.GetString(record.PartitionKey.Span);
+                ApplyNack(GetOrCreate(consumerGroup), record);
+                break;
+            }
         }
+    }
+
+    // The wire format a Nack record's payload carries: [uint64 offset][int32 attempt][int64 delay
+    // micros][byte park][UTF-8 reason to the end], little-endian. The retry is due the delay after
+    // the record's own timestamp, so every replica derives the same moment.
+    static void ApplyNack(ConsumerGroupAckState state, WalRecord record) {
+        var payload = record.Payload.Span;
+        var offset = BinaryPrimitives.ReadUInt64LittleEndian(payload);
+        var attempt = BinaryPrimitives.ReadInt32LittleEndian(payload[8..]);
+        var delayMicros = BinaryPrimitives.ReadInt64LittleEndian(payload[12..]);
+        if (payload[20] == 1)
+            state.Park(offset, new ParkedMessage(attempt, Encoding.UTF8.GetString(payload[21..]), record.TimestampMicros));
+        else
+            state.Nack(offset, attempt + 1, record.TimestampMicros + (ulong)delayMicros);
     }
 
     // The wire format an Ack record's payload always carries: [uint32 count][uint64 offsets...],

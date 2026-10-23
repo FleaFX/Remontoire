@@ -145,6 +145,76 @@ public class ConsumerGroupAckStateTests {
         }
     }
 
+    public class NackAndPark {
+        [Fact]
+        public void Nack_schedules_a_retry_with_the_given_attempt() {
+            var state = new ConsumerGroupAckState();
+
+            state.Nack(3, attempt: 2, notBeforeMicros: 1_000);
+
+            state.Retry.Should().Be(new PendingRetry(3, 2, 1_000));
+        }
+
+        [Fact]
+        public void A_retry_disappears_once_its_offset_is_acked() {
+            var state = new ConsumerGroupAckState();
+            state.Nack(0, 2, 0);
+
+            state.Ack([0]);
+
+            state.Retry.Should().BeNull("acking the retried offset resolves the retry — no extra code needed in the ack paths");
+        }
+
+        [Fact]
+        public void Nack_for_an_acked_offset_is_ignored() {
+            var state = new ConsumerGroupAckState();
+            state.Ack([0]);
+
+            state.Nack(0, 2, 0);
+
+            state.Retry.Should().BeNull("a late nack after an ack is harmless");
+        }
+
+        [Fact]
+        public void Nack_behind_a_pending_retry_is_ignored() {
+            var state = new ConsumerGroupAckState();
+            state.Nack(2, 2, 0);
+
+            state.Nack(5, 2, 0);
+
+            state.Retry!.Offset.Should().Be(2, "the group offers the earlier offset's retry first — a later nack waits behind it");
+        }
+
+        [Fact]
+        public void Park_acks_the_offset_and_keeps_why() {
+            var state = new ConsumerGroupAckState();
+            state.Nack(1, 2, 0);
+
+            state.Park(1, new ParkedMessage(6, "boom", 123));
+
+            state.IsAcked(1).Should().BeTrue("parking acks the offset, so the group's cursor moves past it");
+            state.IsParked(1).Should().BeTrue();
+            state.Parked[1].Should().Be(new ParkedMessage(6, "boom", 123));
+            state.Retry.Should().BeNull();
+        }
+
+        [Fact]
+        public void RetryChanged_completes_at_every_nack_and_park() {
+            var state = new ConsumerGroupAckState();
+            var first = state.RetryChanged;
+
+            state.Nack(0, 2, 0);
+
+            first.IsCompleted.Should().BeTrue("the first nack completed the first signal");
+            var second = state.RetryChanged;
+            second.IsCompleted.Should().BeFalse("a waiter that takes the signal again right after waking lands on a fresh one");
+
+            state.Park(0, new ParkedMessage(2, "boom", 1));
+
+            second.IsCompleted.Should().BeTrue("the park completed the second signal");
+        }
+    }
+
     // No Concurrency test class here anymore: Ack/ApplyLocally/AdvanceWatermarkTo are only ever
     // called from AckIndex's own actor thread now, one at a time by construction — calling them
     // concurrently against a bare ConsumerGroupAckState would violate that contract rather than

@@ -298,6 +298,7 @@ public class RemontoireAdminGrpcServiceEndToEndTests {
 
             await client.EnsureConsumerGroupAsync(new EnsureConsumerGroupRequest {
                 StreamName = StreamName, ConsumerGroup = "billing", AckMode = AckModeProto.Checkpoint, Mandatory = true,
+                MaxRetries = 5, InitialRetryDelay = Duration.FromTimeSpan(TimeSpan.FromSeconds(1)), MaxRetryDelay = Duration.FromTimeSpan(TimeSpan.FromSeconds(30)),
             }, header);
             // Ensure… waits for this node's own journal, and the applier applies a record to the
             // table before appending it there — so the table shows the policy right away.

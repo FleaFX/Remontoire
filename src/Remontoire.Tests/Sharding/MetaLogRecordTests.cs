@@ -129,7 +129,7 @@ public class MetaLogRecordTests {
 
         [Fact]
         public void Round_trips_a_DeclareConsumerGroup_record() {
-            var record = new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false);
+            var record = new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false, 7, TimeSpan.FromSeconds(3), TimeSpan.FromMinutes(2));
 
             var decoded = MetaLogRecord.Decode(MetaLogRecord.Encode(record));
 

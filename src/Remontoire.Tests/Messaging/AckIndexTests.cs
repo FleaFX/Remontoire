@@ -171,6 +171,44 @@ public class AckIndexTests {
         }
     }
 
+    public class ApplyNack {
+        [Fact]
+        public async Task A_committed_nack_schedules_a_retry_due_its_delay_after_the_record() {
+            var index = new AckIndex();
+
+            await index.ApplyAsync(NackRecord("group-1", 4, 1, TimeSpan.FromSeconds(2), park: false, "x", timestampMicros: 10_000_000, raftIndex: 7));
+
+            index.GetOrCreate("group-1").Retry.Should().Be(new PendingRetry(4, 2, 12_000_000),
+                "the next attempt is due the record's own delay after the record's own timestamp, on every replica alike");
+            index.AppliedRaftIndex.Should().Be(7);
+        }
+
+        [Fact]
+        public async Task A_committed_parking_nack_parks_the_offset() {
+            var index = new AckIndex();
+
+            await index.ApplyAsync(NackRecord("group-1", 4, 6, TimeSpan.Zero, park: true, "boom", timestampMicros: 5, raftIndex: 3));
+
+            var state = index.GetOrCreate("group-1");
+            state.IsParked(4).Should().BeTrue();
+            state.Parked[4].Should().Be(new ParkedMessage(6, "boom", 5));
+            state.IsAcked(4).Should().BeTrue("parking acks the offset, so the group's cursor moves past it");
+        }
+
+        [Fact]
+        public async Task IsParkedByMandatoryGroup_counts_mandatory_groups_only() {
+            var index = new AckIndex();
+            await index.ApplyAsync(NackRecord("best-effort", 2, 1, TimeSpan.Zero, park: true, "", 0, raftIndex: 1));
+
+            index.IsParkedByMandatoryGroup(2, consumerGroup => consumerGroup == "mandatory").Should().BeFalse(
+                "a best-effort group's parked message never holds back pruning");
+
+            await index.ApplyAsync(NackRecord("mandatory", 2, 1, TimeSpan.Zero, park: true, "", 0, raftIndex: 2));
+
+            index.IsParkedByMandatoryGroup(2, consumerGroup => consumerGroup == "mandatory").Should().BeTrue();
+        }
+    }
+
     public class Concurrency {
         [Fact]
         public async Task Concurrent_ApplyAsync_and_ApplyLocalAsync_never_corrupt_state() {
@@ -200,6 +238,19 @@ public class AckIndexTests {
     static WalRecord AckRecord(string consumerGroup, params ulong[] offsets) =>
         new(WalRecordType.Ack, RaftTerm: 0, RaftIndex: 0, LogicalOffset: 0, TimestampMicros: 42,
             Encoding.UTF8.GetBytes(consumerGroup), [], EncodeOffsets(offsets));
+
+    // The wire format a Nack record's payload carries: [uint64 offset][int32 attempt][int64 delay
+    // micros][byte park][UTF-8 reason to the end], little-endian.
+    static WalRecord NackRecord(string consumerGroup, ulong offset, int attempt, TimeSpan delay, bool park, string reason, ulong timestampMicros, ulong raftIndex) {
+        var buffer = new byte[21 + Encoding.UTF8.GetByteCount(reason)];
+        BinaryPrimitives.WriteUInt64LittleEndian(buffer, offset);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(8), attempt);
+        BinaryPrimitives.WriteInt64LittleEndian(buffer.AsSpan(12), delay.Ticks / TimeSpan.TicksPerMicrosecond);
+        buffer[20] = park ? (byte)1 : (byte)0;
+        Encoding.UTF8.GetBytes(reason, buffer.AsSpan(21));
+        return new WalRecord(WalRecordType.Nack, RaftTerm: 0, raftIndex, LogicalOffset: 0, timestampMicros,
+            Encoding.UTF8.GetBytes(consumerGroup), [], buffer);
+    }
 
     // The wire format an Ack record's payload always carries: [uint32 count][uint64 offsets...], little-endian.
     static byte[] EncodeOffsets(params ulong[] offsets) {

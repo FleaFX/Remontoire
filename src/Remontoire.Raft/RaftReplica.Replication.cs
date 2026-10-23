@@ -58,6 +58,22 @@ public sealed partial class RaftReplica {
         return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
     }
 
+    /// <summary>
+    /// Proposes a consumer group's negative acknowledgment for replication — same overload family as
+    /// <see cref="ProposeAsync(AppendRequest, CancellationToken)"/>. Same
+    /// non-consuming-a-<see cref="ProposeResult.LogicalOffset"/> contract as
+    /// <see cref="ProposeAsync(AckRequest, CancellationToken)"/>.
+    /// </summary>
+    public ValueTask<ProposeResult> ProposeAsync(NackRequest request, CancellationToken cancellationToken = default) {
+        ValidateRequest(request);
+
+        var completion = new TaskCompletionSource<ProposeResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = _channel.Writer.TryWrite(new ProposeNackReceived(request, completion, Activity.Current?.Context));
+        ObjectDisposedException.ThrowIf(!accepted, this);
+
+        return new ValueTask<ProposeResult>(completion.Task.WaitAsync(cancellationToken));
+    }
+
     // PartitionKey/header keys are encoded with a 16-bit length prefix on disk (WalRecordSerializer,
     // via VariableLengthTail) — validated here, at the public API boundary, rather than deep in the
     // serializer or on the actor loop: an exception escaping HandleProposeReceivedAsync would crash
@@ -89,6 +105,15 @@ public sealed partial class RaftReplica {
     static void ValidateRequest(AckCheckpointRequest request) {
         if (Encoding.UTF8.GetByteCount(request.ConsumerGroup) > ushort.MaxValue)
             throw new ArgumentException($"ConsumerGroup exceeds the 16-bit length-prefix limit of {ushort.MaxValue} bytes.", nameof(request));
+    }
+
+    // Same ConsumerGroup-as-PartitionKey boundary check as AckRequest's own ValidateRequest; a
+    // negative delay would schedule the retry in the past, which no caller means.
+    static void ValidateRequest(NackRequest request) {
+        if (Encoding.UTF8.GetByteCount(request.ConsumerGroup) > ushort.MaxValue)
+            throw new ArgumentException($"ConsumerGroup exceeds the 16-bit length-prefix limit of {ushort.MaxValue} bytes.", nameof(request));
+        if (request.Delay < TimeSpan.Zero)
+            throw new ArgumentException("A nack's delay can't be negative.", nameof(request));
     }
 
     /// <summary>
@@ -123,6 +148,12 @@ public sealed partial class RaftReplica {
         var request = message.Request;
         await ProposeRecordAsync(WalRecordType.AckCheckpoint, Encoding.UTF8.GetBytes(request.ConsumerGroup), headers: [],
             EncodeWatermarkPayload(request.Watermark), consumesLogicalOffset: false, message.Reply, message.CallerContext);
+    }
+
+    async Task HandleProposeNackReceivedAsync(ProposeNackReceived message) {
+        var request = message.Request;
+        await ProposeRecordAsync(WalRecordType.Nack, Encoding.UTF8.GetBytes(request.ConsumerGroup), headers: [],
+            EncodeNackPayload(request), consumesLogicalOffset: false, message.Reply, message.CallerContext);
     }
 
     // Shared by both ProposeAsync overloads' handlers — the only place _nextLogicalOffset++ is
@@ -179,6 +210,19 @@ public sealed partial class RaftReplica {
     static byte[] EncodeWatermarkPayload(ulong watermark) {
         var buffer = new byte[8];
         BinaryPrimitives.WriteUInt64LittleEndian(buffer, watermark);
+        return buffer;
+    }
+
+    // [uint64 offset][int32 attempt][int64 delay micros][byte park][UTF-8 reason to the end],
+    // little-endian. The delay, not a moment: every replica adds it to the record's own timestamp,
+    // the leader's clock at propose, so all of them derive the same moment.
+    static byte[] EncodeNackPayload(NackRequest request) {
+        var buffer = new byte[21 + Encoding.UTF8.GetByteCount(request.Reason)];
+        BinaryPrimitives.WriteUInt64LittleEndian(buffer, request.Offset);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(8), request.Attempt);
+        BinaryPrimitives.WriteInt64LittleEndian(buffer.AsSpan(12), request.Delay.Ticks / TimeSpan.TicksPerMicrosecond);
+        buffer[20] = request.Park ? (byte)1 : (byte)0;
+        Encoding.UTF8.GetBytes(request.Reason, buffer.AsSpan(21));
         return buffer;
     }
 

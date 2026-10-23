@@ -20,6 +20,8 @@ public sealed class RemontoireMetrics {
 
     readonly Counter<long> _messagesPublished;
     readonly Counter<long> _messagesAcked;
+    readonly Counter<long> _messagesRetried;
+    readonly Counter<long> _messagesParked;
     readonly Histogram<double> _ackLatency;
     readonly Histogram<double> _walFsyncDuration;
     readonly Histogram<double> _segmentCompactionDuration;
@@ -40,6 +42,8 @@ public sealed class RemontoireMetrics {
         Meter = meterFactory.Create(MeterName);
         _messagesPublished = Meter.CreateCounter<long>("remontoire.messages.published", "{message}", "Messages committed by a publish.");
         _messagesAcked = Meter.CreateCounter<long>("remontoire.messages.acked", "{message}", "Offsets acknowledged by a consumer group.");
+        _messagesRetried = Meter.CreateCounter<long>("remontoire.messages.retried", "{message}", "Nacked messages that will be offered to their consumer group again.");
+        _messagesParked = Meter.CreateCounter<long>("remontoire.messages.parked", "{message}", "Messages a consumer group parked after their last retry.");
         _ackLatency = Meter.CreateHistogram<double>("remontoire.ack.latency", "s", "Time from a message's ingest to its ack.");
         _walFsyncDuration = Meter.CreateHistogram<double>("remontoire.wal.fsync.duration", "s", "Duration of one WAL fsync.");
         _segmentCompactionDuration = Meter.CreateHistogram<double>("remontoire.segment.compaction.duration", "s", "Duration of one segment compaction.");
@@ -70,6 +74,24 @@ public sealed class RemontoireMetrics {
     /// <param name="count">The number of acknowledged offsets.</param>
     internal void RecordAcked(string streamName, string groupId, string consumerGroup, int count) =>
         _messagesAcked.Add(count, Tag("stream", streamName), Tag("group", groupId), Tag("consumer_group", consumerGroup));
+
+    /// <summary>
+    /// Records one nacked message that will be offered again.
+    /// </summary>
+    /// <param name="streamName">The stream.</param>
+    /// <param name="groupId">The group serving the stream.</param>
+    /// <param name="consumerGroup">The consumer group that nacked.</param>
+    internal void RecordRetried(string streamName, string groupId, string consumerGroup) =>
+        _messagesRetried.Add(1, Tag("stream", streamName), Tag("group", groupId), Tag("consumer_group", consumerGroup));
+
+    /// <summary>
+    /// Records one parked message.
+    /// </summary>
+    /// <param name="streamName">The stream.</param>
+    /// <param name="groupId">The group serving the stream.</param>
+    /// <param name="consumerGroup">The consumer group that parked it.</param>
+    internal void RecordParked(string streamName, string groupId, string consumerGroup) =>
+        _messagesParked.Add(1, Tag("stream", streamName), Tag("group", groupId), Tag("consumer_group", consumerGroup));
 
     /// <summary>
     /// Records the time from one message's ingest to its ack.
@@ -171,8 +193,11 @@ public sealed class RemontoireMetrics {
             () => messagingRegistry.All.Select(group => new Measurement<long>(group.ShardLog.ForcedPruneMessagesTotal, Tag("group", group.GroupId))),
             "{message}", "Messages pruned by the emergency size limit before every mandatory group acked them.");
 
+        // One reason for now: the retention forward. A parked message is not dead-lettered; it has
+        // its own counter, remontoire.messages.parked.
         Meter.CreateObservableCounter("remontoire.messages.dead_lettered",
-            () => messagingRegistry.All.Select(group => new Measurement<long>(group.RetentionEvaluator.DeadLetterMessagesTotal, Tag("group", group.GroupId))),
+            () => messagingRegistry.All.Select(group => new Measurement<long>(group.RetentionEvaluator.DeadLetterMessagesTotal,
+                Tag("stream", StreamName(group.GroupId) ?? group.GroupId), Tag("group", group.GroupId), Tag("reason", "max_retention"))),
             "{message}", "Messages forwarded to the dead-letter stream after their maximum retention.");
     }
 

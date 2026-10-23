@@ -47,11 +47,11 @@ sealed class EmbeddedRemontoire(
         StreamConfig(streamName);
         RequireConsumerGroup(streamName, consumerGroup);
         var (_, shardLog, ackIndex) = Resolve(streamName, virtualShardIndex: 0);
-        await foreach (var handle in MessagingOperations.ConsumeAsync(shardLog, ackIndex, consumerGroup, cancellationToken)) {
+        await foreach (var (handle, attempt) in MessagingOperations.ConsumeAsync(shardLog, ackIndex, consumerGroup, cancellationToken)) {
             RemontoireMessage message;
             using (handle) {
                 using var receive = MessagingOperations.StartReceiveActivity(streamName, consumerGroup, handle.Entry.Headers);
-                message = ToMessage(handle.Entry);
+                message = ToMessage(handle.Entry, attempt);
             }
 
             yield return message;
@@ -64,6 +64,22 @@ sealed class EmbeddedRemontoire(
         RequireConsumerGroup(streamName, consumerGroup);
         var (replica, shardLog, ackIndex) = Resolve(streamName, virtualShardIndex: 0);
         await operations.AckAsync(streamName, consumerGroup, [(ulong)offset], replica, shardLog, ackIndex, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task NackAsync(
+        string streamName,
+        string consumerGroup,
+        int shardId,
+        long offset,
+        string? reason = null,
+        TimeSpan? delay = null,
+        CancellationToken cancellationToken = default
+    ) {
+        StreamConfig(streamName);
+        RequireConsumerGroup(streamName, consumerGroup);
+        var (replica, shardLog, ackIndex) = Resolve(streamName, virtualShardIndex: 0);
+        await operations.NackAsync(streamName, consumerGroup, (ulong)offset, reason, delay, replica, shardLog, ackIndex, cancellationToken);
     }
 
     StreamShardingConfig StreamConfig(string streamName) =>
@@ -92,13 +108,13 @@ sealed class EmbeddedRemontoire(
         return true;
     }
 
-    static RemontoireMessage ToMessage(LogEntry entry) {
+    static RemontoireMessage ToMessage(LogEntry entry, int attempt) {
         var headers = new Dictionary<string, string>();
         foreach (var header in entry.Headers)
             headers[Encoding.UTF8.GetString(header.Key.Span)] = Encoding.UTF8.GetString(header.Value.Span);
 
         return new RemontoireMessage(ShardId: 0, (long)entry.LogicalOffset, Encoding.UTF8.GetString(entry.PartitionKey.Span),
-            entry.Payload.ToArray(), headers, ToDateTimeOffset(entry.TimestampMicros));
+            entry.Payload.ToArray(), headers, ToDateTimeOffset(entry.TimestampMicros), attempt);
     }
 
     // The same conversion the gRPC client uses.

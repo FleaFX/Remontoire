@@ -68,7 +68,7 @@ sealed class HandledGreetings {
 }
 
 /// <summary>
-/// Handles and acks every greeting; the stream and the consumer group are declared on the builder.
+/// Handles and acks every greeting, and nacks one that fails; the stream and the consumer group are declared on the builder.
 /// </summary>
 sealed class GreetingConsumer(IRemontoireConsumer consumer, HandledGreetings handled) : BackgroundService {
     /// <summary>
@@ -84,7 +84,14 @@ sealed class GreetingConsumer(IRemontoireConsumer consumer, HandledGreetings han
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken) {
         await foreach (var message in consumer.ConsumeAsync(StreamName, ConsumerGroup, stoppingToken)) {
-            handled.Add(Encoding.UTF8.GetString(message.Payload.Span));
+            try {
+                handled.Add(Encoding.UTF8.GetString(message.Payload.Span));
+            } catch (Exception ex) when (!stoppingToken.IsCancellationRequested) {
+                // Offered again after the group's backoff, before any later greeting; parked after the last retry.
+                await consumer.NackAsync(StreamName, ConsumerGroup, message.ShardId, message.Offset, ex.Message, cancellationToken: stoppingToken);
+                continue;
+            }
+
             await consumer.AckAsync(StreamName, ConsumerGroup, message.ShardId, message.Offset, stoppingToken);
         }
     }

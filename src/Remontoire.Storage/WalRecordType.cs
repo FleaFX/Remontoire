@@ -28,5 +28,11 @@ public enum WalRecordType : byte {
     /// <summary>
     /// An empty entry used by Raft to establish leader authority in a new term.
     /// </summary>
-    NoOp = 4
+    NoOp = 4,
+
+    /// <summary>
+    /// A consumer group's negative acknowledgment of one previously appended message: offer it
+    /// again after a delay, or park it once the group's retries are used up.
+    /// </summary>
+    Nack = 5
 }

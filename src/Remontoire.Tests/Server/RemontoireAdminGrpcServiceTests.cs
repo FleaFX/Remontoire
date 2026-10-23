@@ -177,11 +177,13 @@ public class RemontoireAdminGrpcServiceTests {
 
         [Fact]
         public void Describes_a_DeclareConsumerGroup_record() {
-            var (recordType, fields) = RemontoireAdminGrpcService.Describe(new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false));
+            var (recordType, fields) = RemontoireAdminGrpcService.Describe(
+                new DeclareConsumerGroup("orders", "billing", AckMode.Checkpoint, Mandatory: false, 7, TimeSpan.FromSeconds(3), TimeSpan.FromMinutes(2)));
 
             recordType.Should().Be("DeclareConsumerGroup");
             fields.Should().Equal(new Dictionary<string, string> {
                 ["StreamName"] = "orders", ["ConsumerGroup"] = "billing", ["Mode"] = AckMode.Checkpoint.ToString(), ["Mandatory"] = false.ToString(),
+                ["MaxRetries"] = "7", ["InitialRetryDelay"] = "00:00:03", ["MaxRetryDelay"] = "00:02:00",
             });
         }
     }

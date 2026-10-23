@@ -266,6 +266,75 @@ public class RetentionEvaluatorTests {
         }
     }
 
+    [Fact]
+    public async Task A_parked_message_holds_back_pruning_until_its_maximum_retention() {
+        var directory = CreateTempDirectory();
+        try {
+            var timeProvider = new FakeTimeProvider();
+            var recentTimestamp = ToMicros(timeProvider.GetUtcNow()); // well within MaxRetention
+            await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+            var ackIndex = new AckIndex();
+            await ackIndex.ApplyAsync(AckRecord("mandatory", 0));
+            await ackIndex.ApplyAsync(AckRecord("mandatory", 2));
+            await ackIndex.ApplyAsync(NackRecord("mandatory", 1, 2, TimeSpan.Zero, park: true, "boom", 42));
+            var forwarded = new ConcurrentQueue<AppendRequest>();
+
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, recentTimestamp, "zero")));
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(1, recentTimestamp, "one")));
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(2, recentTimestamp, "two")));
+            await WaitForVisibleAsync(shardLog, 0);
+            await WaitForVisibleAsync(shardLog, 1);
+            await WaitForVisibleAsync(shardLog, 2);
+
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
+
+            await AdvanceAndSettleAsync(timeProvider);
+
+            forwarded.Should().BeEmpty("the parked message is within its retention window");
+            evaluator.SafeToPruneWatermark.Should().Be(1,
+                "offset 1 is parked by a mandatory group, so pruning stops before it even though every watermark covers it");
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_parked_message_past_its_maximum_retention_is_forwarded_with_its_reason() {
+        var directory = CreateTempDirectory();
+        try {
+            var timeProvider = new FakeTimeProvider();
+            var oldTimestamp = ToMicros(timeProvider.GetUtcNow() - MaxRetention - TimeSpan.FromHours(1));
+            await using var shardLog = await ShardLog.OpenAsync(directory, EmptyCommittedSource);
+            var ackIndex = new AckIndex();
+            await ackIndex.ApplyAsync(NackRecord("mandatory", 0, 2, TimeSpan.Zero, park: true, "boom", 42));
+            await ackIndex.ApplyAsync(AckRecord("mandatory", 1));
+            var forwarded = new ConcurrentQueue<AppendRequest>();
+
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(0, oldTimestamp, "zero")));
+            shardLog.TryPost(new WalRecordCommitted(AppendRecord(1, oldTimestamp, "one")));
+            await WaitForVisibleAsync(shardLog, 0);
+            await WaitForVisibleAsync(shardLog, 1);
+
+            await using var evaluator = new RetentionEvaluator(new RetentionEvaluatorOptions(
+                shardLog, ackIndex, IsMandatory: consumerGroup => consumerGroup == "mandatory", GetMaxRetention: () => MaxRetention,
+                ForwardToDeadLetterAsync: Forward(forwarded), IsAdmissionPaused: () => false, IsLeader: () => true, timeProvider));
+
+            await AdvanceAndSettleAsync(timeProvider);
+
+            forwarded.Should().ContainSingle();
+            Encoding.UTF8.GetString(forwarded.Single().Payload.Span).Should().Be("zero",
+                "only the parked message is forwarded — offset 1 is acked and not parked, so no dead-letter for it");
+            var reasonHeader = forwarded.Single().Headers.Single(header =>
+                Encoding.UTF8.GetString(header.Key.Span) == RetentionEvaluator.DeadLetterReasonHeaderKey);
+            Encoding.UTF8.GetString(reasonHeader.Value.Span).Should().Be(RetentionEvaluator.DeadLetterReasonMaxRetention);
+            evaluator.SafeToPruneWatermark.Should().Be(2);
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     static Func<AppendRequest, CancellationToken, Task<bool>> Forward(ConcurrentQueue<AppendRequest> forwarded) =>
         (request, _) => {
             forwarded.Enqueue(request);
@@ -286,6 +355,19 @@ public class RetentionEvaluatorTests {
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(4 + i * 8, 8), offsets[i]);
 
         return new WalRecord(WalRecordType.Ack, RaftTerm: 0, RaftIndex: 0, LogicalOffset: 0, TimestampMicros: 42,
+            Encoding.UTF8.GetBytes(consumerGroup), [], buffer);
+    }
+
+    // The wire format a Nack record's payload carries: [uint64 offset][int32 attempt][int64 delay
+    // micros][byte park][UTF-8 reason to the end], little-endian.
+    static WalRecord NackRecord(string consumerGroup, ulong offset, int attempt, TimeSpan delay, bool park, string reason, ulong timestampMicros) {
+        var buffer = new byte[21 + Encoding.UTF8.GetByteCount(reason)];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(buffer, offset);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(8), attempt);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(buffer.AsSpan(12), delay.Ticks / TimeSpan.TicksPerMicrosecond);
+        buffer[20] = park ? (byte)1 : (byte)0;
+        Encoding.UTF8.GetBytes(reason, buffer.AsSpan(21));
+        return new WalRecord(WalRecordType.Nack, RaftTerm: 0, RaftIndex: 0, LogicalOffset: 0, timestampMicros,
             Encoding.UTF8.GetBytes(consumerGroup), [], buffer);
     }
 

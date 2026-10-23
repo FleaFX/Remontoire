@@ -134,4 +134,116 @@ public class EmbeddedServerTests {
                 Directory.Delete(dataDirectory, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task A_remote_client_gets_a_nacked_message_again_before_any_later_one() {
+        var port = FreePort();
+        var dataDirectory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        WebApplication? app = null;
+        ServiceProvider? provider = null;
+        try {
+            app = StartApp(port, dataDirectory).App;
+            await app.StartAsync();
+
+            provider = BuildClient($"http://127.0.0.1:{port}");
+            var producer = provider.GetRequiredService<IRemontoireProducer>();
+            var consumer = provider.GetRequiredService<IRemontoireConsumer>();
+            var admin = provider.GetRequiredService<IRemontoireAdmin>();
+            await admin.EnsureStreamAsync("orders");
+            await admin.EnsureConsumerGroupAsync("orders", "billing");
+
+            // All three published before consuming, so the server already has the later messages in
+            // flight by the time m0 is nacked — what the client must drop until it went back.
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (true) {
+                try {
+                    await producer.PublishAsync("orders", "key-0", "zero"u8.ToArray());
+                    break;
+                } catch (Exception ex) when (ex is ArgumentException or RemontoireUnavailableException && DateTime.UtcNow < deadline) {
+                    await Task.Delay(50);
+                }
+            }
+            await producer.PublishAsync("orders", "key-1", "one"u8.ToArray());
+            await producer.PublishAsync("orders", "key-2", "two"u8.ToArray());
+
+            await using var messages = new ConsumeStream(consumer.ConsumeAsync("orders", "billing"));
+            var first = await NextAsync(messages);
+            first.Offset.Should().Be(0);
+            first.Attempt.Should().Be(1);
+
+            await consumer.NackAsync("orders", "billing", first.ShardId, first.Offset, delay: TimeSpan.FromMilliseconds(200));
+
+            var retried = await NextAsync(messages);
+            retried.Offset.Should().Be(0);
+            retried.Attempt.Should().Be(2, "the nacked message comes back first, once the server went back to it");
+
+            var second = await NextAsync(messages);
+            second.Offset.Should().Be(1);
+            second.Attempt.Should().Be(1);
+            var third = await NextAsync(messages);
+            third.Offset.Should().Be(2);
+            third.Attempt.Should().Be(1);
+        } finally {
+            if (provider is not null)
+                await provider.DisposeAsync();
+            if (app is not null) {
+                await app.StopAsync();
+                await app.DisposeAsync();
+            }
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_remote_client_parks_a_message_after_the_last_retry() {
+        var port = FreePort();
+        var dataDirectory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        WebApplication? app = null;
+        ServiceProvider? provider = null;
+        try {
+            app = StartApp(port, dataDirectory).App;
+            await app.StartAsync();
+
+            provider = BuildClient($"http://127.0.0.1:{port}");
+            var producer = provider.GetRequiredService<IRemontoireProducer>();
+            var consumer = provider.GetRequiredService<IRemontoireConsumer>();
+            var admin = provider.GetRequiredService<IRemontoireAdmin>();
+            await admin.EnsureStreamAsync("orders");
+            await admin.EnsureConsumerGroupAsync("orders", "billing", new ConsumerGroupOptions { MaxRetries = 0 });
+
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (true) {
+                try {
+                    await producer.PublishAsync("orders", "key-0", "zero"u8.ToArray());
+                    break;
+                } catch (Exception ex) when (ex is ArgumentException or RemontoireUnavailableException && DateTime.UtcNow < deadline) {
+                    await Task.Delay(50);
+                }
+            }
+            await producer.PublishAsync("orders", "key-1", "one"u8.ToArray());
+
+            await using var messages = new ConsumeStream(consumer.ConsumeAsync("orders", "billing"));
+            var first = await NextAsync(messages);
+            first.Offset.Should().Be(0);
+            first.Attempt.Should().Be(1);
+
+            await consumer.NackAsync("orders", "billing", first.ShardId, first.Offset, reason: "boom");
+
+            var second = await NextAsync(messages);
+            second.Offset.Should().Be(1, "a group with no retries parks at the first nack — the next message follows");
+            second.Attempt.Should().Be(1);
+        } finally {
+            if (provider is not null)
+                await provider.DisposeAsync();
+            if (app is not null) {
+                await app.StopAsync();
+                await app.DisposeAsync();
+            }
+            if (Directory.Exists(dataDirectory))
+                Directory.Delete(dataDirectory, recursive: true);
+        }
+    }
+
+    static Task<RemontoireMessage> NextAsync(ConsumeStream messages) => messages.NextAsync();
 }
